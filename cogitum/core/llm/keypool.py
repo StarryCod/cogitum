@@ -355,12 +355,17 @@ class KeyPool:
             return
 
         # generic ERROR / CANCELLED
+        if lease.outcome == LeaseOutcome.CANCELLED:
+            # User-initiated cancel should NOT penalize the key
+            s.last_error = ""
+            return
+
         s.error_streak += 1
         s.last_error = lease.error_msg or "error"
-        # Soft cooldown after 3 consecutive errors so we stop pounding.
-        if s.error_streak >= 3:
+        # Soft cooldown after 5 consecutive errors (was 3 — too aggressive for single-key pools)
+        if s.error_streak >= 5:
             s.status = KeyStatus.RATE_LIMITED
-            s.cooldown_until = time.monotonic() + _next_cooldown(s.error_streak - 3)
+            s.cooldown_until = time.monotonic() + _next_cooldown(s.error_streak - 5)
 
     def _auto_recover(self, now: float) -> None:
         for s in self.states:

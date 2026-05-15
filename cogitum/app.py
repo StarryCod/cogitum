@@ -16,7 +16,7 @@ from .core.llm.mesh import Mesh, ResolvedModel
 from .core.tools import REGISTRY
 from .setup_flow import SetupScreen
 from .widgets.banner import Banner, BannerTags
-from .widgets.composer import Composer
+from .widgets.composer import Composer, ComposerArea
 from .widgets.cards import EditCard, WriteCard, RunCard, SearchCard, ReadCard, FetchCard
 from .widgets.feed import AgentBlock, Feed, ThinkingBlock, ToolCallCard, WaitingIndicator
 from .widgets.inspector import Inspector, InspectorState
@@ -230,7 +230,7 @@ class CogitumApp(App):
         # If agent is running, queue the message for next turn
         if self._agent_task and not self._agent_task.done():
             self._pending_messages.append(text)
-            feed.append_system(f"queued: {text[:60]}{'…' if len(text) > 60 else ''}", "queued")
+            feed.append_queued(text)
             return
 
         # Normal flow continues below
@@ -252,6 +252,26 @@ class CogitumApp(App):
         self._agent_task = asyncio.create_task(
             self._run_agent(text, feed)
         )
+
+    @on(ComposerArea.HistoryRequest)
+    def _on_history_for_queue(self, event: ComposerArea.HistoryRequest) -> None:
+        """Arrow up with empty input while agent running → pop last queued message back to input."""
+        if event.direction != -1:
+            return
+        # Only intercept if agent is running and there are queued messages
+        if not self._pending_messages:
+            return
+        if not self._agent_task or self._agent_task.done():
+            return
+        area = self.query_one("#composer-area", ComposerArea)
+        if area.text.strip():
+            return  # don't override if user is typing something
+        # Pop last queued message back into composer
+        text = self._pending_messages.pop()
+        feed = self.query_one("#feed-pane", Feed)
+        feed.pop_queued()
+        area.load_text(text)
+        event.stop()
 
     # ------------------------------------------------------------------
     # agent worker
@@ -435,6 +455,9 @@ class CogitumApp(App):
             # Process any queued messages
             if self._pending_messages:
                 next_msg = self._pending_messages.pop(0)
+                # Remove queued indicator from feed and show as user message
+                feed.pop_queued()
+                feed.append_user(next_msg)
                 self._agent_task = asyncio.create_task(
                     self._run_agent(next_msg, feed)
                 )

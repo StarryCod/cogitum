@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator, Iterable
 
 from ..events import ChunkKind, Message, StreamChunk
-from .keypool import NoKeyAvailable
+from .keypool import LeaseOutcome, NoKeyAvailable
 from .provider import CompletionRequest, ModelConfig, Provider
 
 logger = logging.getLogger(__name__)
@@ -186,6 +186,7 @@ class Mesh:
                     # rendered as messages. (Caller may re-stamp later.)
                     yield chunk
             except asyncio.CancelledError:
+                lease.record(LeaseOutcome.CANCELLED)
                 yield StreamChunk(
                     kind=ChunkKind.ERROR,
                     error=f"{provider.id}: cancelled",

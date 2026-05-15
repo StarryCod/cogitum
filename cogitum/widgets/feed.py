@@ -317,6 +317,31 @@ class WaitingIndicator(Static):
         self.remove()
 
 
+# ── Queued message (pending while agent works) ───────────────────────────────
+
+class QueuedMessage(Static):
+    """Grey indicator showing a queued message that will be sent next."""
+    DEFAULT_CLASSES = "feed-entry feed-queued"
+
+    def __init__(self, text: str, **kw) -> None:
+        self._text = text
+        super().__init__(self._build(text), **kw)
+
+    @property
+    def queued_text(self) -> str:
+        return self._text
+
+    @staticmethod
+    def _build(text: str) -> Text:
+        out = Text()
+        out.append("  ⏳ ", style=MUTED)
+        out.append("queued", style=f"italic {MUTED}")
+        out.append("  ")
+        display = text[:80] + ("…" if len(text) > 80 else "")
+        out.append(display, style=f"italic {TXT_DIM}")
+        return out
+
+
 # ── Feed container ──────────────────────────────────────────────────────────
 
 class Feed(VerticalScroll):
@@ -349,6 +374,22 @@ class Feed(VerticalScroll):
         self.mount(indicator)
         self.scroll_end(animate=False)
         return indicator
+
+    def append_queued(self, text: str) -> QueuedMessage:
+        msg = QueuedMessage(text)
+        self.mount(msg)
+        self.scroll_end(animate=False)
+        return msg
+
+    def pop_queued(self) -> str | None:
+        """Remove the last queued message and return its text (for editing)."""
+        queued = list(self.query("QueuedMessage"))
+        if queued:
+            last = queued[-1]
+            text = last.queued_text
+            last.remove()
+            return text
+        return None
 
     def append_error(self, text: str, meta: str = "") -> None:
         self.mount(ErrorBlock(text, meta))
