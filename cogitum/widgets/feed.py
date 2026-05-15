@@ -246,6 +246,55 @@ class SystemLine(Static):
         return out
 
 
+# ── Waiting animation (TTFS) ─────────────────────────────────────────────────
+
+class WaitingIndicator(Static):
+    """Animated waiting indicator while model is thinking (TTFS)."""
+    DEFAULT_CLASSES = "feed-entry feed-waiting"
+
+    FRAMES = [
+        "◇ · · ·",
+        "· ◆ · ·",
+        "· · ◆ ·",
+        "· · · ◆",
+        "· · ◆ ·",
+        "· ◆ · ·",
+    ]
+
+    def __init__(self, **kw) -> None:
+        super().__init__("", **kw)
+        self._frame = 0
+        self._timer = None
+
+    def on_mount(self) -> None:
+        self._timer = self.set_interval(0.2, self._tick)
+        self._render_frame()
+
+    def _tick(self) -> None:
+        self._frame = (self._frame + 1) % len(self.FRAMES)
+        self._render_frame()
+
+    def _render_frame(self) -> None:
+        out = Text()
+        out.append("  ", style=GOLD_DIM)
+        frame = self.FRAMES[self._frame]
+        for ch in frame:
+            if ch == "◆":
+                out.append(ch, style=f"bold {GOLD_HI}")
+            elif ch == "◇":
+                out.append(ch, style=GOLD)
+            else:
+                out.append(ch, style=MUTED)
+        out.append("  thinking…", style=f"italic {TXT_DIM}")
+        self.update(out)
+
+    def stop(self) -> None:
+        if self._timer:
+            self._timer.stop()
+            self._timer = None
+        self.remove()
+
+
 # ── Feed container ──────────────────────────────────────────────────────────
 
 class Feed(VerticalScroll):
@@ -272,6 +321,12 @@ class Feed(VerticalScroll):
         self.mount(card)
         self.scroll_end(animate=False)
         return card
+
+    def append_waiting(self) -> "WaitingIndicator":
+        indicator = WaitingIndicator()
+        self.mount(indicator)
+        self.scroll_end(animate=False)
+        return indicator
 
     def append_error(self, text: str, meta: str = "") -> None:
         self.mount(ErrorBlock(text, meta))

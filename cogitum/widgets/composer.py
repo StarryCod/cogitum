@@ -183,12 +183,15 @@ class Composer(Widget):
         max-height: 7;
         background: #1A1816;
         color: #E6E1CF;
-        border: none;
+        border: tall #A8732D;
         padding: 0 1;
     }
     ComposerArea:focus {
-        background: #1E1C18;
-        border: none;
+        background: #1A1816;
+        border: tall #F5C24A;
+    }
+    ComposerArea > .text-area--cursor-line {
+        background: #1A1816;
     }
     """
 

@@ -18,7 +18,7 @@ from .setup_flow import SetupScreen
 from .widgets.banner import Banner, BannerTags
 from .widgets.composer import Composer
 from .widgets.cards import EditCard, RunCard, SearchCard, ReadCard, FetchCard
-from .widgets.feed import AgentBlock, Feed, ThinkingBlock, ToolCallCard
+from .widgets.feed import AgentBlock, Feed, ThinkingBlock, ToolCallCard, WaitingIndicator
 from .widgets.inspector import Inspector, InspectorState
 from .widgets.model_picker import ModelPicker
 from .widgets.statusbar import StatusBar
@@ -239,6 +239,7 @@ class CogitumApp(App):
         # Current agent block and thinking block (updated live)
         agent_block: AgentBlock | None = None
         thinking_block: ThinkingBlock | None = None
+        waiting: WaitingIndicator | None = feed.append_waiting()
         # Map call_id → ToolCallCard for result updates
         tool_cards: dict[str, ToolCallCard] = {}
         # Map call_id → AgentToolCall event for rich card creation
@@ -254,11 +255,19 @@ class CogitumApp(App):
                     continue
 
                 if isinstance(event, AgentText):
+                    # Stop waiting animation on first content
+                    if waiting is not None:
+                        waiting.stop()
+                        waiting = None
                     if agent_block is None:
                         agent_block = feed.append_agent()
-                    self.call_from_thread(agent_block.append_delta, event.delta) if False else agent_block.append_delta(event.delta)
+                    agent_block.append_delta(event.delta)
 
                 elif isinstance(event, AgentThinking):
+                    # Stop waiting animation on first thinking
+                    if waiting is not None:
+                        waiting.stop()
+                        waiting = None
                     if thinking_block is None:
                         thinking_block = feed.append_thinking()
                     thinking_block.append_delta(event.delta)
@@ -326,6 +335,9 @@ class CogitumApp(App):
                     return
 
                 elif isinstance(event, AgentError):
+                    if waiting is not None:
+                        waiting.stop()
+                        waiting = None
                     feed.append_error(event.message, meta="agent")
                     try:
                         inspector = self.query_one("#inspector-pane", Inspector)
