@@ -61,6 +61,15 @@ from .design import (
 
 
 # ---------------------------------------------------------------------------
+# Non-selectable Static — prevents text highlight on click
+# ---------------------------------------------------------------------------
+
+class _Static(Static):
+    """Static widget with text selection disabled."""
+    ALLOW_SELECT = False
+
+
+# ---------------------------------------------------------------------------
 # Generic modals
 # ---------------------------------------------------------------------------
 
@@ -86,8 +95,8 @@ class MessageModal(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="msg-shell"):
             t = Text(self._title, style=f"bold {RUST if self._error else GOLD_HI}")
-            yield Static(t, id="msg-title")
-            yield Static(self._body, id="msg-body")
+            yield _Static(t, id="msg-title")
+            yield _Static(self._body, id="msg-body")
             with Horizontal(id="msg-foot"):
                 yield Button("OK", id="msg-ok", variant="primary")
 
@@ -117,8 +126,8 @@ class ConfirmModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="conf-shell"):
-            yield Static(Text(self._title, style=f"bold {GOLD_HI}"), id="conf-title")
-            yield Static(self._body, id="conf-body")
+            yield _Static(Text(self._title, style=f"bold {GOLD_HI}"), id="conf-title")
+            yield _Static(self._body, id="conf-body")
             with Horizontal(id="conf-foot"):
                 yield Button("Cancel", id="conf-no")
                 yield Button("Confirm", id="conf-yes", variant="primary")
@@ -203,8 +212,8 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="key-shell"):
-            yield Static(Text(f"Add API key — {self._pname}", style=f"bold {GOLD_HI}"), id="key-title")
-            yield Static(Text("Pick a storage backend, then paste the key.", style=TXT_DIM), id="key-sub")
+            yield _Static(Text(f"Add API key — {self._pname}", style=f"bold {GOLD_HI}"), id="key-title")
+            yield _Static(Text("Pick a storage backend, then paste the key.", style=TXT_DIM), id="key-sub")
 
             with Horizontal(classes="krow"):
                 yield Label("Label")
@@ -218,13 +227,13 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
                             placeholder="paste key (hidden — never logged)")
 
             with Vertical(id="backend-section"):
-                yield Static(Text("Storage backend", style=GOLD_DIM), id="backend-label")
+                yield _Static(Text("Storage backend", style=GOLD_DIM), id="backend-label")
                 for i, (bid, blabel) in enumerate(self.BACKENDS):
                     cls = "be-option selected" if i == 0 else "be-option"
-                    yield Static(self._render_backend(i, bid, blabel),
+                    yield _Static(self._render_backend(i, bid, blabel),
                                  classes=cls, id=f"be-{bid}")
 
-            yield Static(self._hint(), id="key-hint")
+            yield _Static(self._hint(), id="key-hint")
 
             with Horizontal(id="key-foot"):
                 yield Button("Cancel", id="key-cancel")
@@ -240,13 +249,13 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
 
     def _refresh_backends(self) -> None:
         for i, (bid, blabel) in enumerate(self.BACKENDS):
-            w = self.query_one(f"#be-{bid}", Static)
+            w = self.query_one(f"#be-{bid}", _Static)
             w.update(self._render_backend(i, bid, blabel))
             if i == self._backend_idx:
                 w.add_class("selected")
             else:
                 w.remove_class("selected")
-        self.query_one("#key-hint", Static).update(self._hint())
+        self.query_one("#key-hint", _Static).update(self._hint())
 
     def on_click(self, event) -> None:
         """Handle clicks on backend options."""
@@ -358,7 +367,11 @@ class AddProviderModal(ModalScreen[ProviderPreset | None]):
     #ap-list > ListItem.--highlight,
     #ap-list > ListItem:hover { background: #261E10; }
     #ap-foot { height: 3; align: right middle; padding-top: 1; }
-    #ap-foot Button { margin-left: 1; }
+    #ap-foot Button { margin-left: 1; min-width: 12; }
+    #ap-cancel { background: #2A2620; color: #9C957D; }
+    #ap-cancel:hover { background: #3A3630; }
+    #ap-ok { background: #7A5A1A; color: #F5C24A; }
+    #ap-ok:hover { background: #8A6A2A; }
     """
 
     BINDINGS = [
@@ -373,8 +386,8 @@ class AddProviderModal(ModalScreen[ProviderPreset | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="ap-shell"):
-            yield Static(Text("Add a provider", style=f"bold {GOLD_HI}"), id="ap-title")
-            yield Static(Text("Pick a preset; you'll add a key in the next step.",
+            yield _Static(Text("Add a provider", style=f"bold {GOLD_HI}"), id="ap-title")
+            yield _Static(Text("Pick a preset; you'll add a key in the next step.",
                               style=TXT_DIM), id="ap-sub")
             yield ListView(id="ap-list")
             with Horizontal(id="ap-foot"):
@@ -386,9 +399,9 @@ class AddProviderModal(ModalScreen[ProviderPreset | None]):
         for preset in PROVIDER_PRESETS:
             self._items.append(preset)
             row = self._render_preset(preset)
-            lv.append(ListItem(Static(row), id=f"ap-{preset.id}"))
+            lv.append(ListItem(_Static(row), id=f"ap-{preset.id}"))
         self._items.append(None)
-        lv.append(ListItem(Static(self._render_custom()), id="ap-custom"))
+        lv.append(ListItem(_Static(self._render_custom()), id="ap-custom"))
         lv.focus()
 
     def _render_preset(self, p: ProviderPreset) -> Text:
@@ -457,7 +470,7 @@ class CustomProviderModal(ModalScreen[ProviderPreset | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="cp-shell"):
-            yield Static(Text("Custom provider", style=f"bold {GOLD_HI}"), id="cp-title")
+            yield _Static(Text("Custom provider", style=f"bold {GOLD_HI}"), id="cp-title")
             with Horizontal(classes="cprow"):
                 yield Label("ID")
                 yield Input(id="cp-id", placeholder="lowercase-slug, e.g. my-vllm")
@@ -545,13 +558,13 @@ class OAuthLoginModal(ModalScreen[OAuthCredentials | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="oa-shell"):
-            yield Static(Text(f"Connect {self._oauth.name}", style=f"bold {GOLD_HI}"),
+            yield _Static(Text(f"Connect {self._oauth.name}", style=f"bold {GOLD_HI}"),
                          id="oa-title")
-            yield Static(Text("Starting OAuth flow… a browser will open.", style=TXT_DIM),
+            yield _Static(Text("Starting OAuth flow… a browser will open.", style=TXT_DIM),
                          id="oa-sub")
-            yield Static("", id="oa-url")
-            yield Static("", id="oa-instructions")
-            yield Static("", id="oa-progress")
+            yield _Static("", id="oa-url")
+            yield _Static("", id="oa-instructions")
+            yield _Static("", id="oa-progress")
             yield Input(placeholder="paste redirect URL here if browser is on another machine",
                         id="oa-paste")
             with Horizontal(id="oa-foot"):
@@ -600,8 +613,8 @@ class OAuthLoginModal(ModalScreen[OAuthCredentials | None]):
         url_text = Text()
         url_text.append("authorize URL  ", style=GOLD_DIM)
         url_text.append(self._url or "", style=GOLD)
-        self.query_one("#oa-url", Static).update(url_text)
-        self.query_one("#oa-instructions", Static).update(Text(self._instr, style=TXT_DIM))
+        self.query_one("#oa-url", _Static).update(url_text)
+        self.query_one("#oa-instructions", _Static).update(Text(self._instr, style=TXT_DIM))
 
     def _append_progress(self, msg: str) -> None:
         ts = time.strftime("%H:%M:%S")
@@ -609,7 +622,7 @@ class OAuthLoginModal(ModalScreen[OAuthCredentials | None]):
         body = Text()
         for line in self._progress_lines[-12:]:
             body.append(line + "\n", style=TXT)
-        self.query_one("#oa-progress", Static).update(body)
+        self.query_one("#oa-progress", _Static).update(body)
 
     @on(Input.Submitted, "#oa-paste")
     def _on_paste(self, event: Input.Submitted) -> None:
@@ -712,15 +725,15 @@ class SetupScreen(Screen):
     # --- compose -------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Static(self._banner_text(), id="setup-banner")
+        yield _Static(self._banner_text(), id="setup-banner")
         with Horizontal(id="setup-main"):
             with Vertical(id="setup-rail"):
                 for sid, label in self.SECTIONS:
-                    yield Static(self._rail_text(sid, label),
+                    yield _Static(self._rail_text(sid, label),
                                  classes=f"rail-item{' active' if sid == self._active else ''}",
                                  id=f"rail-{sid}")
             yield VerticalScroll(id="setup-content")
-        yield Static(
+        yield _Static(
             "esc back · ctrl+r reload · ctrl+q quit",
             id="setup-foot",
         )
@@ -747,7 +760,7 @@ class SetupScreen(Screen):
     def _set_active(self, sid: str) -> None:
         self._active = sid
         for s, _ in self.SECTIONS:
-            w = self.query_one(f"#rail-{s}", Static)
+            w = self.query_one(f"#rail-{s}", _Static)
             label = next(l for sid_, l in self.SECTIONS if sid_ == s)
             w.update(self._rail_text(s, label))
             if s == sid:
@@ -807,8 +820,8 @@ class SetupScreen(Screen):
         # Header card with "add provider" CTA
         header = Vertical(classes="card")
         content.mount(header)
-        header.mount(Static(Text("API Providers", style=f"bold {GOLD_HI}"), classes="card-title"))
-        header.mount(Static(Text(
+        header.mount(_Static(Text("API Providers", style=f"bold {GOLD_HI}"), classes="card-title"))
+        header.mount(_Static(Text(
             "Each provider has many keys; the mesh balances load across them"
             " and falls back on rate-limit. Add as many as you like.",
             style=TXT_DIM)))
@@ -822,7 +835,7 @@ class SetupScreen(Screen):
         if not providers:
             empty = Vertical(classes="card")
             content.mount(empty)
-            empty.mount(Static(Text("No providers yet. Click + Add to begin.",
+            empty.mount(_Static(Text("No providers yet. Click + Add to begin.",
                                     style=TXT_DIM)))
             return
 
@@ -838,8 +851,8 @@ class SetupScreen(Screen):
         title.append(f"   {raw.get('format', 'openai_compat')}", style=BRONZE)
         if not bool(raw.get("enabled", True)):
             title.append("   [disabled]", style=COPPER)
-        card.mount(Static(title, classes="card-title"))
-        card.mount(Static(Text(raw.get("base_url", ""), style=TXT_DIM)))
+        card.mount(_Static(title, classes="card-title"))
+        card.mount(_Static(Text(raw.get("base_url", ""), style=TXT_DIM)))
 
         # keys
         keys = raw.get("keys") or {}
@@ -850,9 +863,9 @@ class SetupScreen(Screen):
                 line.append(kdata.get("secret_ref", ""), style=BRONZE)
                 if kdata.get("notes"):
                     line.append(f"   {kdata['notes']}", style=TXT_DIM)
-                card.mount(Static(line))
+                card.mount(_Static(line))
         else:
-            card.mount(Static(Text("  no keys yet — add one to enable", style=COPPER)))
+            card.mount(_Static(Text("  no keys yet — add one to enable", style=COPPER)))
 
         # models
         models = raw.get("models") or {}
@@ -862,7 +875,7 @@ class SetupScreen(Screen):
             mtitle.append(", ".join(list(models.keys())[:4]), style=TXT_DIM)
             if len(models) > 4:
                 mtitle.append(f"  +{len(models)-4} more", style=TXT_DIM)
-            card.mount(Static(mtitle))
+            card.mount(_Static(mtitle))
 
         actions = Horizontal(classes="card-actions")
         card.mount(actions)
@@ -877,9 +890,9 @@ class SetupScreen(Screen):
     def _render_subs(self, content: VerticalScroll) -> None:
         header = Vertical(classes="card")
         content.mount(header)
-        header.mount(Static(Text("Subscriptions (OAuth)", style=f"bold {GOLD_HI}"),
+        header.mount(_Static(Text("Subscriptions (OAuth)", style=f"bold {GOLD_HI}"),
                             classes="card-title"))
-        header.mount(Static(Text(
+        header.mount(_Static(Text(
             "Use a Claude Pro/Max or ChatGPT Plus/Pro account instead of an API key. "
             "Cogitum opens your browser, completes the flow, and stores tokens in "
             "~/.config/cogitum/auth.json (mode 0600).", style=TXT_DIM)))
@@ -896,7 +909,7 @@ class SetupScreen(Screen):
                 title.append(f"   refresh in {ttl_min:.1f}m", style=TXT_DIM)
             else:
                 title.append("   not connected", style=COPPER)
-            card.mount(Static(title, classes="card-title"))
+            card.mount(_Static(title, classes="card-title"))
             actions = Horizontal(classes="card-actions")
             card.mount(actions)
             if creds:
@@ -910,23 +923,23 @@ class SetupScreen(Screen):
     def _render_default(self, content: VerticalScroll) -> None:
         header = Vertical(classes="card")
         content.mount(header)
-        header.mount(Static(Text("Default model", style=f"bold {GOLD_HI}"),
+        header.mount(_Static(Text("Default model", style=f"bold {GOLD_HI}"),
                             classes="card-title"))
         try:
             settings = load_settings()
         except Exception as e:  # noqa: BLE001
             settings = {}
-            content.mount(Static(Text(f"settings load failed: {e}", style=RUST)))
+            content.mount(_Static(Text(f"settings load failed: {e}", style=RUST)))
         cur = settings.get("default_model", "—")
         line = Text()
         line.append("current: ", style=GOLD_DIM)
         line.append(cur, style=GOLD_HI)
-        header.mount(Static(line))
+        header.mount(_Static(line))
 
         try:
             mesh = load_mesh()
         except Exception as e:  # noqa: BLE001
-            content.mount(Static(Text(f"mesh load failed: {e}", style=RUST)))
+            content.mount(_Static(Text(f"mesh load failed: {e}", style=RUST)))
             return
 
         self._default_model_map = {}
@@ -936,7 +949,7 @@ class SetupScreen(Screen):
             t = Text()
             t.append(r.qualified_id, style=GOLD)
             t.append(f"   {r.model.display}", style=TXT)
-            row.mount(Static(t))
+            row.mount(_Static(t))
             actions = Horizontal(classes="card-actions")
             row.mount(actions)
             btn_id = f"def-model-{idx}"
@@ -951,9 +964,9 @@ class SetupScreen(Screen):
     def _render_vault(self, content: VerticalScroll) -> None:
         card = Vertical(classes="card")
         content.mount(card)
-        card.mount(Static(Text("Encrypted vault", style=f"bold {GOLD_HI}"),
+        card.mount(_Static(Text("Encrypted vault", style=f"bold {GOLD_HI}"),
                           classes="card-title"))
-        card.mount(Static(Text(
+        card.mount(_Static(Text(
             "AES-256-GCM with Argon2id KDF. Password is held in process memory "
             "for the session. For headless runs export "
             "COGITUM_VAULT_PASSWORD.\n\nUse `cog vault init / set / get / unset / list`"
@@ -965,16 +978,16 @@ class SetupScreen(Screen):
     def _render_diag(self, content: VerticalScroll) -> None:
         card = Vertical(classes="card")
         content.mount(card)
-        card.mount(Static(Text("Diagnostics", style=f"bold {GOLD_HI}"),
+        card.mount(_Static(Text("Diagnostics", style=f"bold {GOLD_HI}"),
                           classes="card-title"))
         try:
             mesh = load_mesh()
         except Exception as e:  # noqa: BLE001
-            card.mount(Static(Text(f"mesh load failed: {e}", style=RUST)))
+            card.mount(_Static(Text(f"mesh load failed: {e}", style=RUST)))
             return
 
         if not mesh.providers:
-            card.mount(Static(Text("No active providers.", style=COPPER)))
+            card.mount(_Static(Text("No active providers.", style=COPPER)))
             return
 
         for p in mesh.providers.values():
@@ -983,13 +996,13 @@ class SetupScreen(Screen):
             t = Text()
             t.append(p.id, style=f"bold {GOLD_HI}")
             t.append(f"   {p.name}", style=TXT)
-            block.mount(Static(t))
+            block.mount(_Static(t))
             for s in p.pool.snapshot():
                 line = Text()
                 line.append(f"  · key={s['id']:<14}", style=GOLD)
                 line.append(f"status={s['status']:<14}", style=BRONZE)
                 line.append(f"req={s['total_requests']:<5} tok={s['total_tokens']}", style=TXT_DIM)
-                block.mount(Static(line))
+                block.mount(_Static(line))
 
     # --- buttons -------------------------------------------------------
 
