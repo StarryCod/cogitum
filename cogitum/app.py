@@ -47,7 +47,7 @@ class CogitumApp(App):
         Binding("ctrl+q", "quit", "quit"),
         Binding("ctrl+p", "open_models", "models", priority=True),
         Binding("ctrl+s", "open_setup", "setup", priority=True),
-        Binding("escape", "cancel_agent", "stop", priority=True),
+        Binding("escape", "cancel_agent", "stop"),
     ]
 
     def __init__(self) -> None:
@@ -149,22 +149,25 @@ class CogitumApp(App):
     # ------------------------------------------------------------------
 
     def action_cancel_agent(self) -> None:
-        if self._agent_task and not self._agent_task.done():
-            self._agent_task.cancel()
-            self._pending_messages.clear()
-            # Cancel any running tool tasks via agent
-            if self._agent and self._agent._active_tool_tasks:
-                for t in self._agent._active_tool_tasks:
-                    if not t.done():
-                        t.cancel()
-                self._agent._active_tool_tasks = []
-            feed = self.query_one("#feed-pane", Feed)
-            # Remove any active WaitingIndicator
-            for w in feed.query("WaitingIndicator"):
-                w.stop()
-            # Show stopped message
-            feed.append_system("⏹ stopped by user", "esc")
-            self._set_composer_enabled(True)
+        # Only handle Esc if agent is actually running — otherwise let it
+        # propagate to modals (ModelPicker, SetupScreen) for their own dismiss
+        if not self._agent_task or self._agent_task.done():
+            return
+        self._agent_task.cancel()
+        self._pending_messages.clear()
+        # Cancel any running tool tasks via agent
+        if self._agent and self._agent._active_tool_tasks:
+            for t in self._agent._active_tool_tasks:
+                if not t.done():
+                    t.cancel()
+            self._agent._active_tool_tasks = []
+        feed = self.query_one("#feed-pane", Feed)
+        # Remove any active WaitingIndicator
+        for w in feed.query("WaitingIndicator"):
+            w.stop()
+        # Show stopped message
+        feed.append_system("⏹ stopped by user", "esc")
+        self._set_composer_enabled(True)
 
     def action_open_models(self) -> None:
         if self.mesh is None or not self.mesh.providers:
