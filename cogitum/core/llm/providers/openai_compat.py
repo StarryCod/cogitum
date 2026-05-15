@@ -96,7 +96,7 @@ class OpenAICompatProvider(Provider):
         }
 
         if req.tools:
-            body["tools"] = [{"type": "function", "function": t} for t in req.tools]
+            body["tools"] = req.tools
             if req.tool_choice is not None:
                 body["tool_choice"] = req.tool_choice
 
@@ -187,9 +187,14 @@ class OpenAICompatProvider(Provider):
                     return
 
                 # parse SSE
-                async for chunk in self._parse_sse(resp, lease):
-                    yield chunk
+                try:
+                    async for chunk in self._parse_sse(resp, lease):
+                        yield chunk
+                except GeneratorExit:
+                    return
 
+        except GeneratorExit:
+            return
         except httpx.HTTPError as e:
             lease.record(LeaseOutcome.ERROR, error=str(e))
             yield StreamChunk(kind=ChunkKind.ERROR, error=f"network: {e}")

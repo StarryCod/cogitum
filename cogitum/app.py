@@ -1,17 +1,21 @@
 """Cogitum TUI app — bubbles + specialised tool cards + model picker."""
 from __future__ import annotations
 
+import asyncio
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.widgets import Input, Static
 
+from .core.agent import Agent, AgentConfig, AgentDone, AgentError, AgentText, AgentThinking, AgentToolCall, AgentToolResult
+from .core.builtin_tools import *  # noqa: F401,F403 — registers tools into REGISTRY
 from .core.llm.loader import load_mesh, load_settings, write_settings
 from .core.llm.mesh import Mesh, ResolvedModel
+from .core.tools import REGISTRY
 from .setup_flow import SetupScreen
 from .widgets.banner import Banner, BannerTags
-from .widgets.feed import Feed
-from .widgets.cards import EditCard, RunCard, SearchCard, SwarmCard, ReadCard
+from .widgets.feed import AgentBlock, Feed, ThinkingBlock, ToolCallCard
 from .widgets.inspector import Inspector
 from .widgets.model_picker import ModelPicker
 from .widgets.statusbar import StatusBar
@@ -26,7 +30,7 @@ def _seed(feed: Feed) -> None:
 
 
 class HRule(Static):
-    """Full-width horizontal divider that always reaches the screen edges."""
+    """Full-width horizontal divider."""
     def __init__(self, classes: str = "hrule", **kw) -> None:
         super().__init__("", classes=classes, **kw)
 
@@ -43,6 +47,7 @@ class CogitumApp(App):
         Binding("ctrl+r", "noop", "rewind", show=False),
         Binding("ctrl+s", "noop", "verify", show=False),
         Binding("ctrl+k", "noop", "swarm", show=False),
+        Binding("escape", "cancel_agent", "cancel", show=False),
     ]
 
     def __init__(self) -> None:
@@ -50,6 +55,9 @@ class CogitumApp(App):
         self.mesh: Mesh | None = None
         self.settings: dict = {}
         self.current_model: str | None = None
+        self._agent: Agent | None = None
+        self._agent_task: asyncio.Task | None = None
+        self._history: list = []   # list[Message] — persists across turns
 
     # ------------------------------------------------------------------
     # compose
@@ -88,8 +96,7 @@ class CogitumApp(App):
 
         if not self.mesh.providers:
             feed.append_error(
-                "No providers configured. Run `cog setup` outside the TUI to "
-                "add API keys or connect a subscription.",
+                "No providers configured. Run `cog setup` to add API keys.",
                 meta="empty mesh",
             )
             self._update_statusbar("—")
@@ -99,7 +106,6 @@ class CogitumApp(App):
         if default and self.mesh.resolve(default):
             self.current_model = default
         else:
-            # First available.
             pairs = self.mesh.list_resolved()
             self.current_model = pairs[0].qualified_id if pairs else None
 
@@ -108,6 +114,14 @@ class CogitumApp(App):
             f"mesh ready · {len(self.mesh.providers)} providers · {len(self.mesh.list_resolved())} models",
             "loaded",
         )
+
+        # Build agent
+        if self.mesh:
+            self._agent = Agent(
+                mesh=self.mesh,
+                registry=REGISTRY,
+                config=AgentConfig(model=self.current_model),
+            )
 
     def _update_statusbar(self, model: str) -> None:
         try:
@@ -122,6 +136,13 @@ class CogitumApp(App):
     def action_noop(self) -> None:
         pass
 
+    def action_cancel_agent(self) -> None:
+        if self._agent_task and not self._agent_task.done():
+            self._agent_task.cancel()
+            feed = self.query_one("#feed-pane", Feed)
+            feed.append_system("agent cancelled", "esc")
+            self._set_composer_enabled(True)
+
     def action_open_models(self) -> None:
         if self.mesh is None or not self.mesh.providers:
             self.query_one("#feed-pane", Feed).append_error(
@@ -135,7 +156,6 @@ class CogitumApp(App):
         self.push_screen(SetupScreen(), self._on_setup_close)
 
     def _on_setup_close(self, _result: object) -> None:
-        # Re-load mesh and settings after setup.
         self._load_mesh_async()
 
     def _on_model_picked(self, resolved: ResolvedModel | None) -> None:
@@ -148,6 +168,9 @@ class CogitumApp(App):
         except Exception:  # noqa: BLE001
             pass
         self._update_statusbar(self.current_model)
+        # Update agent config
+        if self._agent:
+            self._agent.cfg.model = self.current_model
         self.query_one("#feed-pane", Feed).append_system(
             f"model = {self.current_model}", "switched"
         )
@@ -167,14 +190,137 @@ class CogitumApp(App):
             self._handle_command(text, feed)
             return
 
+        # Don't allow concurrent runs
+        if self._agent_task and not self._agent_task.done():
+            feed.append_system("agent is busy — press Esc to cancel", "busy")
+            return
+
         feed.append_user(text)
-        if self.current_model is None:
+
+        if self._agent is None or self.mesh is None:
             feed.append_error("No model selected. /models to pick one.")
             return
-        feed.append_agent(
-            f"(stub) would stream from {self.current_model}. Agent loop wires next.",
-            meta="staged",
+
+        self._set_composer_enabled(False)
+        self._agent_task = asyncio.create_task(
+            self._run_agent(text, feed)
         )
+
+    def _set_composer_enabled(self, enabled: bool) -> None:
+        try:
+            inp = self.query_one("#composer", Input)
+            inp.disabled = not enabled
+            prefix = self.query_one("#composer-prefix", Static)
+            prefix.update("▶" if enabled else "⏳")
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ------------------------------------------------------------------
+    # agent worker
+    # ------------------------------------------------------------------
+
+    async def _run_agent(self, user_message: str, feed: Feed) -> None:
+        """Run one agent turn, streaming events into the feed."""
+        queue: asyncio.Queue = asyncio.Queue()
+
+        # Current agent block and thinking block (updated live)
+        agent_block: AgentBlock | None = None
+        thinking_block: ThinkingBlock | None = None
+        # Map call_id → ToolCallCard for result updates
+        tool_cards: dict[str, ToolCallCard] = {}
+
+        async def drain_queue() -> None:
+            nonlocal agent_block, thinking_block
+            while True:
+                try:
+                    event = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    await asyncio.sleep(0.02)
+                    continue
+
+                if isinstance(event, AgentText):
+                    if agent_block is None:
+                        agent_block = feed.append_agent()
+                    self.call_from_thread(agent_block.append_delta, event.delta) if False else agent_block.append_delta(event.delta)
+
+                elif isinstance(event, AgentThinking):
+                    if thinking_block is None:
+                        thinking_block = feed.append_thinking()
+                    thinking_block.append_delta(event.delta)
+
+                elif isinstance(event, AgentToolCall):
+                    # Finish thinking block if open
+                    if thinking_block is not None:
+                        thinking_block.finish()
+                        thinking_block = None
+                    # New turn → new agent block next time
+                    agent_block = None
+                    card = feed.append_tool_call(
+                        event.tool_name, event.arguments, event.call_id
+                    )
+                    tool_cards[event.call_id] = card
+
+                elif isinstance(event, AgentToolResult):
+                    card = tool_cards.get(event.call_id)
+                    if card:
+                        card.set_result(event.result, error=event.error)
+                    # New agent block for next response
+                    agent_block = None
+
+                elif isinstance(event, AgentDone):
+                    if thinking_block is not None:
+                        thinking_block.finish()
+                    usage = event.usage
+                    if usage:
+                        feed.append_system(
+                            f"done · {event.turns} turn(s) · "
+                            f"in={usage.input_tokens} out={usage.output_tokens}",
+                            "usage",
+                        )
+                    self._set_composer_enabled(True)
+                    return
+
+                elif isinstance(event, AgentError):
+                    feed.append_error(event.message, meta="agent")
+                    self._set_composer_enabled(True)
+                    return
+
+        # Run agent + drain concurrently
+        agent_coro = self._agent.run(
+            user_message=user_message,
+            history=self._history,
+            queue=queue,
+        )
+
+        try:
+            agent_fut = asyncio.create_task(agent_coro)
+            drain_fut = asyncio.create_task(drain_queue())
+
+            done, pending = await asyncio.wait(
+                [agent_fut, drain_fut],
+                return_when=asyncio.ALL_COMPLETED,
+            )
+
+            # Propagate exceptions
+            for t in done:
+                if t.exception():
+                    raise t.exception()  # type: ignore[misc]
+
+            # Update history with new messages
+            if not agent_fut.cancelled():
+                self._history = agent_fut.result()
+
+        except asyncio.CancelledError:
+            agent_fut.cancel()
+            drain_fut.cancel()
+            raise
+        except Exception as exc:  # noqa: BLE001
+            feed.append_error(str(exc), meta="agent")
+            self._set_composer_enabled(True)
+
+    # ------------------------------------------------------------------
+    # commands
+    # ------------------------------------------------------------------
 
     def _handle_command(self, raw: str, feed: Feed) -> None:
         parts = raw[1:].split(maxsplit=1)
@@ -187,7 +333,6 @@ class CogitumApp(App):
 
         if cmd in ("models", "model"):
             if rest:
-                # /model kimi -> direct switch, fuzzy resolve
                 if self.mesh is None:
                     feed.append_error("mesh not ready")
                     return
@@ -203,11 +348,22 @@ class CogitumApp(App):
             self.action_open_models()
             return
 
+        if cmd == "new":
+            self._history = []
+            feed.clear()
+            feed.append_system("new session — history cleared", "new")
+            return
+
+        if cmd == "tools":
+            names = REGISTRY.names()
+            feed.append_system(f"{len(names)} tools: {', '.join(names)}", "tools")
+            return
+
         if cmd == "help":
             feed.append_system(
-                "/setup — provider/auth wizard · /models — pick model · "
-                "/model <id|alias> — direct switch · /clear — clear feed · "
-                "/quit — exit",
+                "/setup — provider wizard · /models — pick model · "
+                "/model <id> — direct switch · /new — clear history · "
+                "/tools — list tools · /clear — clear feed · /quit — exit",
                 "commands",
             )
             return

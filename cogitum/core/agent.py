@@ -331,14 +331,16 @@ class Agent:
         tools_schema: list[dict],
     ) -> AsyncIterator[StreamChunk]:
         """Delegate to mesh.stream() with current message history."""
-        async for chunk in self.mesh.stream(
+        from cogitum.core.llm.mesh import StreamRequest
+        req = StreamRequest(
             messages=messages,
-            model=self.cfg.model,
+            model=self.cfg.model or "",
+            system=self.cfg.system,
+            tools=tools_schema,
             max_tokens=self.cfg.max_tokens,
             temperature=self.cfg.temperature,
-            system=self.cfg.system,
-            tools=tools_schema if tools_schema else None,
-        ):
+        )
+        async for chunk in self.mesh.stream(req):
             yield chunk
 
     async def _execute_tool(
