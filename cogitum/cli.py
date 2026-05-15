@@ -21,6 +21,7 @@ import asyncio
 import getpass
 import json
 import logging
+import os
 import sys
 import webbrowser
 from pathlib import Path
@@ -480,11 +481,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Configure logging to file (not stderr) to avoid breaking TUI rendering
+    log_dir = Path(
+        os.environ.get("COGITUM_CONFIG_DIR")
+        or os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    ) / "cogitum"
+    log_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",
         datefmt="%H:%M:%S",
+        filename=str(log_dir / "cogitum.log"),
+        filemode="a",
     )
+    # Suppress UserWarnings in TUI mode (they go to stderr and break rendering)
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning)
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):

@@ -371,18 +371,29 @@ class CogitumApp(App):
             agent_fut = asyncio.create_task(agent_coro)
             drain_fut = asyncio.create_task(drain_queue())
 
-            done, pending = await asyncio.wait(
-                [agent_fut, drain_fut],
-                return_when=asyncio.ALL_COMPLETED,
-            )
+            # Wait for agent to finish first
+            await asyncio.wait([agent_fut], return_when=asyncio.FIRST_COMPLETED)
 
-            # Check for errors — show in feed, don't propagate traceback
-            for t in done:
-                if t.exception():
-                    exc = t.exception()
-                    feed.append_error(str(exc), meta="agent")
-                    self._set_composer_enabled(True)
-                    return
+            # If agent crashed without sending AgentDone/AgentError, push error to queue
+            if agent_fut.done() and agent_fut.exception():
+                exc = agent_fut.exception()
+                await queue.put(AgentError(message=str(exc), exc=exc))
+
+            # Now wait for drain to process remaining events (including the error we just pushed)
+            try:
+                await asyncio.wait_for(drain_fut, timeout=5.0)
+            except asyncio.TimeoutError:
+                drain_fut.cancel()
+                # drain didn't finish — show error directly
+                if agent_fut.exception():
+                    feed.append_error(str(agent_fut.exception()), meta="agent")
+                self._set_composer_enabled(True)
+                return
+
+            # Check for unhandled errors
+            if agent_fut.exception():
+                self._set_composer_enabled(True)
+                return
 
             # Update history with new messages
             if not agent_fut.cancelled():
