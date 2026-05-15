@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 
+from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
-from textual.widgets import Input, Static
+from textual.containers import Container
+from textual.widgets import Static
 
 from .core.agent import Agent, AgentConfig, AgentDone, AgentError, AgentText, AgentThinking, AgentToolCall, AgentToolResult
 from .core.builtin_tools import *  # noqa: F401,F403 — registers tools into REGISTRY
@@ -15,6 +16,7 @@ from .core.llm.mesh import Mesh, ResolvedModel
 from .core.tools import REGISTRY
 from .setup_flow import SetupScreen
 from .widgets.banner import Banner, BannerTags
+from .widgets.composer import Composer
 from .widgets.feed import AgentBlock, Feed, ThinkingBlock, ToolCallCard
 from .widgets.inspector import Inspector
 from .widgets.model_picker import ModelPicker
@@ -72,9 +74,7 @@ class CogitumApp(App):
             yield Inspector(id="inspector-pane")
         yield StatusBar(id="statusbar")
         yield HRule(id="hrule-bottom")
-        with Horizontal(id="composer-shell"):
-            yield Static("▶", id="composer-prefix")
-            yield Input(placeholder="type your task or /command…", id="composer")
+        yield Composer(id="composer")
 
     # ------------------------------------------------------------------
     # mount
@@ -179,10 +179,10 @@ class CogitumApp(App):
     # composer
     # ------------------------------------------------------------------
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    @on(Composer.Submitted)
+    def _on_composer_submitted(self, event: Composer.Submitted) -> None:
         feed = self.query_one("#feed-pane", Feed)
         text = event.value.strip()
-        event.input.value = ""
         if not text:
             return
 
@@ -208,10 +208,7 @@ class CogitumApp(App):
 
     def _set_composer_enabled(self, enabled: bool) -> None:
         try:
-            inp = self.query_one("#composer", Input)
-            inp.disabled = not enabled
-            prefix = self.query_one("#composer-prefix", Static)
-            prefix.update("▶" if enabled else "⏳")
+            self.query_one("#composer", Composer).set_enabled(enabled)
         except Exception:  # noqa: BLE001
             pass
 
@@ -270,6 +267,8 @@ class CogitumApp(App):
                 elif isinstance(event, AgentDone):
                     if thinking_block is not None:
                         thinking_block.finish()
+                    if agent_block is not None:
+                        agent_block.finish_streaming()
                     usage = event.usage
                     if usage:
                         feed.append_system(

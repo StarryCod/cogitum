@@ -271,11 +271,15 @@ class ModelPicker(ModalScreen[ResolvedModel | None]):
 
         self._filtered = items
         list_view = self.query_one("#picker-list", ListView)
-        list_view.clear()
-        for e in items:
+        # Remove all children synchronously to avoid DuplicateIds
+        for child in list(list_view.children):
+            child.remove()
+        self._rebuild_seq = getattr(self, "_rebuild_seq", 0) + 1
+        seq = self._rebuild_seq
+        for i, e in enumerate(items):
             active_keys = e.resolved.provider.pool.active_count
             row = _render_row(e, active_keys=active_keys)
-            list_view.append(ListItem(Static(row), id=f"item-{id(e)}"))
+            list_view.mount(ListItem(Static(row), id=f"item-{seq}-{i}"))
         if items:
             list_view.index = 0
         self._update_detail()

@@ -2,7 +2,7 @@
 
 Layout rules:
   · YOU       → bubble (warm surface, gold left bar, padded)
-  · AGENT     → no bubble, plain text on canvas, streaming-capable
+  · AGENT     → no bubble, Rich Markdown on canvas, streaming-capable
   · THINKING  → dim italic block, collapsible
   · TOOL CALL → compact card: name + args
   · TOOL RES  → compact card: result (truncated)
@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
+from rich.markdown import Markdown
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Static
@@ -69,15 +70,17 @@ class UserBubble(Static):
 # ── Agent block (streaming-capable) ─────────────────────────────────────────
 
 class AgentBlock(Static):
-    """Streaming agent response. Call .append_delta() to add text live."""
+    """Streaming agent response. Call .append_delta() to add text live.
+    Renders final content as Rich Markdown for tables, code blocks, etc."""
     DEFAULT_CLASSES = "feed-entry feed-agent"
 
     def __init__(self, text: str = "", meta: str = "", **kw) -> None:
         self._text = text
         self._meta = meta
-        super().__init__(self._build(), **kw)
+        self._streaming = True
+        super().__init__(self._build_streaming(), **kw)
 
-    def _build(self) -> Text:
+    def _header(self) -> Text:
         out = Text()
         out.append("AGENT", style=f"bold {GOLD}")
         if self._meta:
@@ -85,19 +88,36 @@ class AgentBlock(Static):
             out.append(self._meta, style=f"italic {TXT_DIM}")
         out.append("   ")
         out.append(datetime.now().strftime("%H:%M"), style=GOLD_DIM)
+        return out
+
+    def _build_streaming(self) -> Text:
+        """While streaming, render as plain text for speed."""
+        out = self._header()
         out.append("\n")
         for line in self._text.splitlines() or [""]:
             out.append(line + "\n", style=TXT)
-        result = out
-        if result.plain.endswith("\n"):
-            result.right_crop(1)
-        return result
+        if out.plain.endswith("\n"):
+            out.right_crop(1)
+        return out
+
+    def _build_final(self):
+        """After streaming done, render as Rich Markdown."""
+        from rich.console import Group
+        header = self._header()
+        md = Markdown(self._text, code_theme="monokai")
+        return Group(header, md)
 
     def append_delta(self, delta: str) -> None:
         """Append streaming text delta and refresh."""
         self._text += delta
-        self.update(self._build())
-        self.parent and self.parent.scroll_end(animate=False)  # type: ignore[union-attr]
+        self.update(self._build_streaming())
+        if self.parent:
+            self.parent.scroll_end(animate=False)
+
+    def finish_streaming(self) -> None:
+        """Switch from streaming plain text to final Markdown render."""
+        self._streaming = False
+        self.update(self._build_final())
 
 
 # ── Thinking block ───────────────────────────────────────────────────────────

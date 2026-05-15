@@ -49,7 +49,7 @@ Screen {
 #feed-pane {
     width: 2fr;
     background: #0E0E11;
-    padding: 0 2 1 2;
+    padding: 1 2 1 2;
     border-right: vkey #2A2620;
     overflow-y: auto;
 
@@ -66,7 +66,7 @@ Screen {
     width: 1fr;
     min-width: 36;
     background: #161618;
-    padding: 0 2 1 2;
+    padding: 1 2 1 2;
     overflow-y: auto;
 
     scrollbar-color: #2A2620 #161618;
@@ -124,31 +124,5 @@ Screen {
     padding: 0 2;
 }
 
-/* ───── Composer — visible warm panel ─────────────────────────────────── */
-#composer-shell {
-    height: 3;
-    width: 100%;
-    background: #14120E;
-    padding: 0;
-}
-
-#composer-prefix {
-    width: 4;
-    height: 3;
-    color: #F5C24A;
-    background: #14120E;
-    content-align: center middle;
-}
-
-Input#composer {
-    height: 3;
-    background: #14120E;
-    color: #E6E1CF;
-    border: none;
-    padding: 1 1;
-}
-
-Input:focus {
-    border: none;
-}
+/* ───── Composer — handled by widgets/composer.py ─────────────────────────── */
 

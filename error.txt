@@ -1,0 +1,219 @@
+[starred@starred-xsteam ~]$ cd /home/starred/Cogitum
+[starred@starred-xsteam Cogitum]$ .venv/bin/cog
+╭─────────────────────────────────────────────────────────── Traceback (most recent call last) ────────────────────────────────────────────────────────────╮
+│ /home/starred/Cogitum/cogitum/widgets/model_picker.py:253 in _on_search_change                                                                           │
+│                                                                                                                                                          │
+│   250 │                                                                                        ╭─────── locals ────────╮                                 │
+│   251 │   @on(Input.Changed, "#picker-search")                                                 │ event = Changed()     │                                 │
+│   252 │   def _on_search_change(self, event: Input.Changed) -> None:                           │  self = ModelPicker() │                                 │
+│ ❱ 253 │   │   self._rebuild_list(query=event.value)                                            ╰───────────────────────╯                                 │
+│   254 │                                                                                                                                                  │
+│   255 │   def _rebuild_list(self, query: str = "") -> None:                                                                                              │
+│   256 │   │   items = [e for e in self._all if self._passes_filters(e)]                                                                                  │
+│                                                                                                                                                          │
+│ /home/starred/Cogitum/cogitum/widgets/model_picker.py:278 in _rebuild_list                                                                               │
+│                                                                                                                                                          │
+│   275 │   │   for e in items:                                                                                                                            │
+│   276 │   │   │   active_keys = e.resolved.provider.pool.active_count                                                                                    │
+│   277 │   │   │   row = _render_row(e, active_keys=active_keys)                                                                                          │
+│ ❱ 278 │   │   │   list_view.append(ListItem(Static(row), id=f"item-{id(e)}"))                                                                            │
+│   279 │   │   if items:                                                                                                                                  │
+│   280 │   │   │   list_view.index = 0                                                                                                                    │
+│   281 │   │   self._update_detail()                                                                                                                      │
+│                                                                                                                                                          │
+│ ╭─────────────────────────────────────────────────────────────────────── locals ───────────────────────────────────────────────────────────────────────╮ │
+│ │ active_keys = 1                                                                                                                                      │ │
+│ │           e = _Entry(                                                                                                                                │ │
+│ │               │   resolved=ResolvedModel(                                                                                                            │ │
+│ │               │   │   provider=<cogitum.core.llm.providers.openai_compat.OpenAICompatProvider object at 0x7f1082b1fa90>,                             │ │
+│ │               │   │   model=ModelConfig(                                                                                                             │ │
+│ │               │   │   │   id='moonshotai/kimi-k2.6',                                                                                                 │ │
+│ │               │   │   │   display='Kimi K2.6',                                                                                                       │ │
+│ │               │   │   │   aliases=('kimi', 'kimi-k2.6', 'k2.6'),                                                                                     │ │
+│ │               │   │   │   capabilities=<Capability.TEXT|VISION|REASONING|TOOLS|STREAMING|LONG_CONTEXT: 347>,                                         │ │
+│ │               │   │   │   context_window=200000,                                                                                                     │ │
+│ │               │   │   │   max_output_tokens=128000,                                                                                                  │ │
+│ │               │   │   │   cost_input=0.0,                                                                                                            │ │
+│ │               │   │   │   cost_output=0.0,                                                                                                           │ │
+│ │               │   │   │   cost_cache_read=0.0,                                                                                                       │ │
+│ │               │   │   │   cost_cache_write=0.0,                                                                                                      │ │
+│ │               │   │   │   reasoning_effort_map={'off': 'off', 'minimal': 'off', 'low': 'low', 'medium': 'medium', 'high': 'high', 'xhigh': 'high'},  │ │
+│ │               │   │   │   default_reasoning_effort='high',                                                                                           │ │
+│ │               │   │   │   extra={}                                                                                                                   │ │
+│ │               │   │   )                                                                                                                              │ │
+│ │               │   ),                                                                                                                                 │ │
+│ │               │   score=100.0                                                                                                                        │ │
+│ │               )                                                                                                                                      │ │
+│ │        fuzz = <module 'rapidfuzz.fuzz' from '/home/starred/Cogitum/.venv/lib/python3.11/site-packages/rapidfuzz/fuzz.py'>                            │ │
+│ │       items = [                                                                                                                                      │ │
+│ │               │   _Entry(                                                                                                                            │ │
+│ │               │   │   resolved=ResolvedModel(                                                                                                        │ │
+│ │               │   │   │   provider=<cogitum.core.llm.providers.openai_compat.OpenAICompatProvider object at 0x7f1082b1fa90>,                         │ │
+│ │               │   │   │   model=ModelConfig(                                                                                                         │ │
+│ │               │   │   │   │   id='moonshotai/kimi-k2.6',                                                                                             │ │
+│ │               │   │   │   │   display='Kimi K2.6',                                                                                                   │ │
+│ │               │   │   │   │   aliases=('kimi', 'kimi-k2.6', 'k2.6'),                                                                                 │ │
+│ │               │   │   │   │   capabilities=<Capability.TEXT|VISION|REASONING|TOOLS|STREAMING|LONG_CONTEXT: 347>,                                     │ │
+│ │               │   │   │   │   context_window=200000,                                                                                                 │ │
+│ │               │   │   │   │   max_output_tokens=128000,                                                                                              │ │
+│ │               │   │   │   │   cost_input=0.0,                                                                                                        │ │
+│ │               │   │   │   │   cost_output=0.0,                                                                                                       │ │
+│ │               │   │   │   │   cost_cache_read=0.0,                                                                                                   │ │
+│ │               │   │   │   │   cost_cache_write=0.0,                                                                                                  │ │
+│ │               │   │   │   │   reasoning_effort_map={                                                                                                 │ │
+│ │               │   │   │   │   │   'off': 'off',                                                                                                      │ │
+│ │               │   │   │   │   │   'minimal': 'off',                                                                                                  │ │
+│ │               │   │   │   │   │   'low': 'low',                                                                                                      │ │
+│ │               │   │   │   │   │   'medium': 'medium',                                                                                                │ │
+│ │               │   │   │   │   │   'high': 'high',                                                                                                    │ │
+│ │               │   │   │   │   │   'xhigh': 'high'                                                                                                    │ │
+│ │               │   │   │   │   },                                                                                                                     │ │
+│ │               │   │   │   │   default_reasoning_effort='high',                                                                                       │ │
+│ │               │   │   │   │   extra={}                                                                                                               │ │
+│ │               │   │   │   )                                                                                                                          │ │
+│ │               │   │   ),                                                                                                                             │ │
+│ │               │   │   score=100.0                                                                                                                    │ │
+│ │               │   )                                                                                                                                  │ │
+│ │               ]                                                                                                                                      │ │
+│ │   list_view = ListView(id='picker-list')                                                                                                             │ │
+│ │           q = 'm'                                                                                                                                    │ │
+│ │       query = 'm'                                                                                                                                    │ │
+│ │         row = <text 'canopywave/moonshotai/kimi-k2.6   Kimi K2.6   ◆ ◇ ⚒   ctx   200k' [Span(0, 11, '#7A5A1A'), Span(11, 31, '#D9A23B'), Span(34,    │ │
+│ │               43, '#9C957D'), Span(46, 48, '#A8732D'), Span(48, 50, '#A8732D'), Span(50, 52, '#A8732D'), Span(52, 64, '#5A5648')] ''>                │ │
+│ │        self = ModelPicker()                                                                                                                          │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                                                                          │
+│ /home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/widgets/_list_view.py:259 in append                                                     │
+│                                                                                                                                                          │
+│   256 │   │   │   An awaitable that yields control to the event loop                           ╭────────────────── locals ──────────────────╮            │
+│   257 │   │   │   │   until the DOM has been updated with the new child item.                  │ item = ListItem(id='item-139708876204560') │            │
+│   258 │   │   """                                                                              │ self = ListView(id='picker-list')          │            │
+│ ❱ 259 │   │   return self.extend([item])                                                       ╰────────────────────────────────────────────╯            │
+│   260 │                                                                                                                                                  │
+│   261 │   def clear(self) -> AwaitRemove:                                                                                                                │
+│   262 │   │   """Clear all items from the ListView.                                                                                                      │
+│                                                                                                                                                          │
+│ /home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/widgets/_list_view.py:246 in extend                                                     │
+│                                                                                                                                                          │
+│   243 │   │   │   An awaitable that yields control to the event loop                           ╭─────────────────── locals ────────────────────╮         │
+│   244 │   │   │   │   until the DOM has been updated with the new child items.                 │ items = [ListItem(id='item-139708876204560')] │         │
+│   245 │   │   """                                                                              │  self = ListView(id='picker-list')            │         │
+│ ❱ 246 │   │   await_mount = self.mount(*items)                                                 ╰───────────────────────────────────────────────╯         │
+│   247 │   │   return await_mount                                                                                                                         │
+│   248 │                                                                                                                                                  │
+│   249 │   def append(self, item: ListItem) -> AwaitMount:                                                                                                │
+│                                                                                                                                                          │
+│ /home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/widget.py:1485 in mount                                                                 │
+│                                                                                                                                                          │
+│   1482 │   │   else:                                                                                                                                     │
+│   1483 │   │   │   parent = self                                                                                                                         │
+│   1484 │   │                                                                                                                                             │
+│ ❱ 1485 │   │   mounted = self.app._register(                                                                                                             │
+│   1486 │   │   │   parent, *widgets, before=insert_before, after=insert_after                                                                            │
+│   1487 │   │   )                                                                                                                                         │
+│   1488                                                                                                                                                   │
+│                                                                                                                                                          │
+│ ╭──────────────────────── locals ────────────────────────╮                                                                                               │
+│ │         after = None                                   │                                                                                               │
+│ │        before = None                                   │                                                                                               │
+│ │  ids_to_mount = ['item-139708876204560']               │                                                                                               │
+│ │  insert_after = None                                   │                                                                                               │
+│ │ insert_before = None                                   │                                                                                               │
+│ │        parent = ListView(id='picker-list')             │                                                                                               │
+│ │          self = ListView(id='picker-list')             │                                                                                               │
+│ │     widget_id = 'item-139708876204560'                 │                                                                                               │
+│ │       widgets = (ListItem(id='item-139708876204560'),) │                                                                                               │
+│ ╰────────────────────────────────────────────────────────╯                                                                                               │
+│                                                                                                                                                          │
+│ /home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/app.py:3667 in _register                                                                │
+│                                                                                                                                                          │
+│   3664 │   │   │   │   raise AppError(f"Can't register {widget!r}; expected a Widget instance")                                                          │
+│   3665 │   │   │   if widget not in self._registry:                                                                                                      │
+│   3666 │   │   │   │   add_new_widget(widget)                                                                                                            │
+│ ❱ 3667 │   │   │   │   self._register_child(parent, widget, before, after)                                                                               │
+│   3668 │   │   │   │   if widget._nodes:                                                                                                                 │
+│   3669 │   │   │   │   │   self._register(widget, *widget._nodes, cache=cache)                                                                           │
+│   3670 │   │   for widget in new_widgets:                                                                                                                │
+│                                                                                                                                                          │
+│ ╭─────────────────────────────────────────────────────────────────────── locals ───────────────────────────────────────────────────────────────────────╮ │
+│ │   add_new_widget = <built-in method append of list object at 0x7f1082b48f40>                                                                         │ │
+│ │            after = None                                                                                                                              │ │
+│ │ apply_stylesheet = <bound method Stylesheet.apply of <Stylesheet [('/home/starred/Cogitum/cogitum/cogitum.tcss', ''),                                │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/app.py', 'App.DEFAULT_CSS'),                                   │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/screen.py', 'Screen.DEFAULT_CSS'),                             │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/widget.py', 'Widget.DEFAULT_CSS'),                             │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/widgets/_static.py', 'Static.DEFAULT_CSS'),                    │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/containers.py', 'Container.DEFAULT_CSS'),                      │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/containers.py', 'Horizontal.DEFAULT_CSS'),                     │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/widgets/_toast.py', 'ToastRack.DEFAULT_CSS'),                  │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/widgets/_tooltip.py', 'Tooltip.DEFAULT_CSS'),                  │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/containers.py', 'VerticalScroll.DEFAULT_CSS'),                 │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/containers.py', 'ScrollableContainer.DEFAULT_CSS'),            │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/widgets/_input.py', 'Input.DEFAULT_CSS'),                      │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/scroll_view.py', 'ScrollView.DEFAULT_CSS'),                    │ │
+│ │                    ('/home/starred/Cogitum/cogitum/widgets/model_picker.py', 'ModelPicker.DEFAULT_CSS'),                                             │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/screen.py', 'ModalScreen.DEFAULT_CSS'),                        │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/containers.py', 'Vertical.DEFAULT_CSS'),                       │ │
+│ │                    ('/home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/widgets/_list_view.py', 'ListView.DEFAULT_CSS')]>>             │ │
+│ │           before = None                                                                                                                              │ │
+│ │            cache = {}                                                                                                                                │ │
+│ │      new_widgets = [ListItem(id='item-139708876204560')]                                                                                             │ │
+│ │           parent = ListView(id='picker-list')                                                                                                        │ │
+│ │             self = CogitumApp(title='COGITUM', classes={'-dark-mode'}, pseudo_classes={'focus', 'dark'})                                             │ │
+│ │           widget = ListItem(id='item-139708876204560')                                                                                               │ │
+│ │      widget_list = (ListItem(id='item-139708876204560'),)                                                                                            │ │
+│ │          widgets = (ListItem(id='item-139708876204560'),)                                                                                            │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                                                                          │
+│ /home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/app.py:3613 in _register_child                                                          │
+│                                                                                                                                                          │
+│   3610 │   │   │   │   # At this point we appear to not be adding before or after,                                                                       │
+│   3611 │   │   │   │   # or we've got a before/after value that really means                                                                             │
+│   3612 │   │   │   │   # "please append". So...                                                                                                          │
+│ ❱ 3613 │   │   │   │   parent._nodes._append(child)                                                                                                      │
+│   3614 │   │   │                                                                                                                                         │
+│   3615 │   │   │   # Now that the widget is in the NodeList of its parent, sort out                                                                      │
+│   3616 │   │   │   # the rest of the admin.                                                                                                              │
+│                                                                                                                                                          │
+│ ╭──────────────────────────────────────────── locals ────────────────────────────────────────────╮                                                       │
+│ │  after = None                                                                                  │                                                       │
+│ │ before = None                                                                                  │                                                       │
+│ │  child = ListItem(id='item-139708876204560')                                                   │                                                       │
+│ │ parent = ListView(id='picker-list')                                                            │                                                       │
+│ │   self = CogitumApp(title='COGITUM', classes={'-dark-mode'}, pseudo_classes={'focus', 'dark'}) │                                                       │
+│ ╰────────────────────────────────────────────────────────────────────────────────────────────────╯                                                       │
+│                                                                                                                                                          │
+│ /home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/_node_list.py:129 in _append                                                            │
+│                                                                                                                                                          │
+│   126 │   │   │   self._nodes_set.add(widget)                                                                                                            │
+│   127 │   │   │   widget_id = widget.id                                                                                                                  │
+│   128 │   │   │   if widget_id is not None:                                                                                                              │
+│ ❱ 129 │   │   │   │   self._ensure_unique_id(widget_id)                                                                                                  │
+│   130 │   │   │   │   self._nodes_by_id[widget_id] = widget                                                                                              │
+│   131 │   │   │   self.updated()                                                                                                                         │
+│   132                                                                                                                                                    │
+│                                                                                                                                                          │
+│ ╭───────────────────────────────────────────── locals ──────────────────────────────────────────────╮                                                    │
+│ │      self = <NodeList [ListItem(id='item-139708876204560'), ListItem(id='item-139708876204560')]> │                                                    │
+│ │    widget = ListItem(id='item-139708876204560')                                                   │                                                    │
+│ │ widget_id = 'item-139708876204560'                                                                │                                                    │
+│ ╰───────────────────────────────────────────────────────────────────────────────────────────────────╯                                                    │
+│                                                                                                                                                          │
+│ /home/starred/Cogitum/.venv/lib/python3.11/site-packages/textual/_node_list.py:158 in _ensure_unique_id                                                  │
+│                                                                                                                                                          │
+│   155 │   │   │   DuplicateIds: If the given ID is not unique.                                                                                           │
+│   156 │   │   """                                                                                                                                        │
+│   157 │   │   if widget_id in self._nodes_by_id:                                                                                                         │
+│ ❱ 158 │   │   │   raise DuplicateIds(                                                                                                                    │
+│   159 │   │   │   │   f"Tried to insert a widget with ID {widget_id!r}, but a widget already e                                                           │
+│   160 │   │   │   │   "ensure all child widgets have a unique ID."                                                                                       │
+│   161 │   │   │   )                                                                                                                                      │
+│                                                                                                                                                          │
+│ ╭───────────────────────────────────────────── locals ──────────────────────────────────────────────╮                                                    │
+│ │      self = <NodeList [ListItem(id='item-139708876204560'), ListItem(id='item-139708876204560')]> │                                                    │
+│ │ widget_id = 'item-139708876204560'                                                                │                                                    │
+│ ╰───────────────────────────────────────────────────────────────────────────────────────────────────╯                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+DuplicateIds: Tried to insert a widget with ID 'item-139708876204560', but a widget already exists with that ID (ListItem(id='item-139708876204560'));
+ensure all child widgets have a unique ID.
+[starred@starred-xsteam Cogitum]$
