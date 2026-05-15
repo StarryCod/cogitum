@@ -352,10 +352,13 @@ class CogitumApp(App):
                 return_when=asyncio.ALL_COMPLETED,
             )
 
-            # Propagate exceptions
+            # Check for errors — show in feed, don't propagate traceback
             for t in done:
                 if t.exception():
-                    raise t.exception()  # type: ignore[misc]
+                    exc = t.exception()
+                    feed.append_error(str(exc), meta="agent")
+                    self._set_composer_enabled(True)
+                    return
 
             # Update history with new messages
             if not agent_fut.cancelled():
@@ -364,7 +367,6 @@ class CogitumApp(App):
         except asyncio.CancelledError:
             agent_fut.cancel()
             drain_fut.cancel()
-            raise
         except Exception as exc:  # noqa: BLE001
             feed.append_error(str(exc), meta="agent")
             self._set_composer_enabled(True)

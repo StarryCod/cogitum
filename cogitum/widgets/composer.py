@@ -7,9 +7,8 @@ Composer — поле ввода с выпадающим меню команд.
   - При вводе / появляется dropdown со списком команд
   - Фильтрация по мере ввода
   - Стрелки вверх/вниз для навигации
-  - Enter вставляет команду но не отправляет
+  - Enter сразу выполняет команду (не нужен двойной Enter)
   - Escape закрывает меню
-  - Enter без меню — отправка сообщения
 """
 from __future__ import annotations
 
@@ -34,19 +33,45 @@ from ..design import GOLD, GOLD_DIM, GOLD_HI, MUTED, TXT, TXT_DIM
 class CommandDef:
     name: str
     description: str
+    aliases: list[str] | None = None
     shortcut: str = ""
 
 
 COMMANDS: list[CommandDef] = [
-    CommandDef("setup", "Provider & auth wizard", "Ctrl+,"),
-    CommandDef("models", "Open model picker", "Ctrl+M"),
-    CommandDef("model", "Switch model: /model <id>"),
-    CommandDef("new", "Clear history, start fresh"),
-    CommandDef("tools", "List available tools"),
-    CommandDef("clear", "Clear feed display"),
-    CommandDef("help", "Show all commands"),
-    CommandDef("quit", "Exit Cogitum", "Ctrl+Q"),
+    CommandDef("setup", "Provider & auth wizard", aliases=["s"], shortcut="Ctrl+,"),
+    CommandDef("models", "Open model picker", aliases=["m"], shortcut="Ctrl+M"),
+    CommandDef("model", "Switch model: /model <id>", aliases=["mod"]),
+    CommandDef("new", "Clear history, start fresh", aliases=["n", "reset"]),
+    CommandDef("tools", "List available tools", aliases=["t"]),
+    CommandDef("clear", "Clear feed display", aliases=["cls", "c"]),
+    CommandDef("help", "Show all commands", aliases=["h", "?"]),
+    CommandDef("quit", "Exit Cogitum", aliases=["q", "exit"], shortcut="Ctrl+Q"),
 ]
+
+
+def _match_command(text: str) -> CommandDef | None:
+    """Match exact command name or alias."""
+    name = text.lower().strip()
+    for cmd in COMMANDS:
+        if cmd.name == name:
+            return cmd
+        if cmd.aliases and name in cmd.aliases:
+            return cmd
+    return None
+
+
+def _filter_commands(query: str) -> list[CommandDef]:
+    """Filter commands by prefix."""
+    q = query.lower().strip()
+    if not q:
+        return list(COMMANDS)
+    results = []
+    for cmd in COMMANDS:
+        if cmd.name.startswith(q):
+            results.append(cmd)
+        elif cmd.aliases and any(a.startswith(q) for a in cmd.aliases):
+            results.append(cmd)
+    return results
 
 
 # ── Dropdown menu ────────────────────────────────────────────────────────────
@@ -57,15 +82,12 @@ class CommandMenu(Static):
     DEFAULT_CSS = """
     CommandMenu {
         display: none;
-        layer: overlay;
-        dock: bottom;
         width: 100%;
         max-height: 12;
         height: auto;
         background: #161618;
         border: round #2A2620;
         padding: 0 1;
-        margin-bottom: 3;
     }
     CommandMenu.visible {
         display: block;
@@ -139,28 +161,15 @@ class Composer(Widget):
         width: 100%;
         layout: vertical;
     }
-    #composer-bar {
-        height: 3;
-        width: 100%;
-        layout: horizontal;
-        background: #14120E;
-    }
-    #composer-prefix {
-        width: 4;
-        height: 3;
-        color: #F5C24A;
-        background: #14120E;
-        content-align: center middle;
-    }
     #composer-input {
         height: 3;
         background: #14120E;
         color: #E6E1CF;
-        border: none;
-        padding: 1 1;
+        border: tall #2A2620;
+        padding: 1 2;
     }
     #composer-input:focus {
-        border: none;
+        border: tall #A8732D;
     }
     """
 
@@ -168,7 +177,7 @@ class Composer(Widget):
 
     def __init__(self, **kw) -> None:
         super().__init__(**kw)
-        self._just_inserted = False
+        self._menu_active = False
 
     # ── Messages ──────────────────────────────────────────────────────────────
 
@@ -184,9 +193,7 @@ class Composer(Widget):
 
     def compose(self) -> ComposeResult:
         yield CommandMenu(id="cmd-menu")
-        with Widget(id="composer-bar"):
-            yield Static("▶", id="composer-prefix")
-            yield Input(placeholder="type your task or /command…", id="composer-input")
+        yield Input(placeholder="message or /command…", id="composer-input")
 
     # ── Input handling ────────────────────────────────────────────────────────
 
@@ -195,21 +202,18 @@ class Composer(Widget):
         text = event.value
         menu = self.query_one("#cmd-menu", CommandMenu)
 
-        # Reset insert flag when user types
-        self._just_inserted = False
-
-        if text.startswith("/"):
-            query = text[1:].lower().strip()
-            filtered = [
-                cmd for cmd in COMMANDS
-                if query == "" or cmd.name.startswith(query)
-            ]
+        if text.startswith("/") and " " not in text:
+            query = text[1:]
+            filtered = _filter_commands(query)
             if filtered:
                 menu.show(filtered)
+                self._menu_active = True
             else:
                 menu.hide()
+                self._menu_active = False
         else:
             menu.hide()
+            self._menu_active = False
 
     @on(Input.Submitted, "#composer-input")
     def _on_input_submitted(self, event: Input.Submitted) -> None:
@@ -219,27 +223,37 @@ class Composer(Widget):
         menu = self.query_one("#cmd-menu", CommandMenu)
         inp = self.query_one("#composer-input", Input)
 
-        if menu.is_visible and not self._just_inserted:
-            # Insert selected command, don't submit
+        if self._menu_active and menu.is_visible:
+            # Pick selected command and submit immediately
             cmd = menu.selected_command
-            if cmd:
-                self._just_inserted = True
-                inp.value = f"/{cmd.name} "
-                inp.cursor_position = len(inp.value)
             menu.hide()
+            self._menu_active = False
+            if cmd:
+                inp.value = ""
+                self.post_message(self.Submitted(value=f"/{cmd.name}"))
             return
 
-        # Normal submit
-        self._just_inserted = False
-        menu.hide()
+        # Normal submit — resolve aliases
         text = inp.value.strip()
-        if text:
-            inp.value = ""
-            self.post_message(self.Submitted(value=text))
+        if not text:
+            return
+
+        if text.startswith("/"):
+            # Check if it's an alias
+            cmd_text = text[1:].split()[0]
+            args = text[1:][len(cmd_text):].strip()
+            matched = _match_command(cmd_text)
+            if matched:
+                text = f"/{matched.name}" + (f" {args}" if args else "")
+
+        inp.value = ""
+        menu.hide()
+        self._menu_active = False
+        self.post_message(self.Submitted(value=text))
 
     def on_key(self, event) -> None:
         menu = self.query_one("#cmd-menu", CommandMenu)
-        if not menu.is_visible:
+        if not self._menu_active or not menu.is_visible:
             return
 
         if event.key == "up":
@@ -252,6 +266,7 @@ class Composer(Widget):
             event.stop()
         elif event.key == "escape":
             menu.hide()
+            self._menu_active = False
             event.prevent_default()
             event.stop()
 
@@ -260,8 +275,6 @@ class Composer(Widget):
     def set_enabled(self, enabled: bool) -> None:
         inp = self.query_one("#composer-input", Input)
         inp.disabled = not enabled
-        prefix = self.query_one("#composer-prefix", Static)
-        prefix.update("▶" if enabled else "⏳")
 
     def focus_input(self) -> None:
         self.query_one("#composer-input", Input).focus()
