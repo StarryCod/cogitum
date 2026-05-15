@@ -442,32 +442,26 @@ class CogitumApp(App):
                 # drain didn't finish — show error directly
                 if agent_fut.exception():
                     feed.append_error(str(agent_fut.exception()), meta="agent")
-                return
 
-            # Check for unhandled errors
-            if agent_fut.exception():
-                return
-
-            # Update history with new messages
-            if not agent_fut.cancelled():
+            # Update history with new messages (only on success)
+            if agent_fut.done() and not agent_fut.cancelled() and not agent_fut.exception():
                 self._history = agent_fut.result()
-
-            # Process any queued messages
-            if self._pending_messages:
-                next_msg = self._pending_messages.pop(0)
-                # Remove queued indicator from feed and show as user message
-                feed.pop_queued()
-                feed.append_user(next_msg)
-                self._agent_task = asyncio.create_task(
-                    self._run_agent(next_msg, feed)
-                )
-                return
 
         except asyncio.CancelledError:
             agent_fut.cancel()
             drain_fut.cancel()
+            return  # user cancelled — don't process queue
         except Exception as exc:  # noqa: BLE001
             feed.append_error(str(exc), meta="agent")
+
+        # ALWAYS process queued messages after current turn finishes (success or error)
+        if self._pending_messages:
+            next_msg = self._pending_messages.pop(0)
+            feed.pop_queued()
+            feed.append_user(next_msg)
+            self._agent_task = asyncio.create_task(
+                self._run_agent(next_msg, feed)
+            )
 
     # ------------------------------------------------------------------
     # rich tool cards

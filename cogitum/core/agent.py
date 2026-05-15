@@ -325,6 +325,9 @@ class Agent:
                         break
 
                     elif chunk.kind == ChunkKind.ERROR:
+                        # "cancelled" is not a real error — it's user-initiated stop
+                        if "cancelled" in (chunk.error or "").lower():
+                            break
                         raise RuntimeError(chunk.error or "stream error")
 
                 # flush any pending tool calls that never got TOOL_CALL_DONE

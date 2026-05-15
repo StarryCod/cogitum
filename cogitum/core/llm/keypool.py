@@ -296,6 +296,12 @@ class KeyPool:
             self._auto_recover(now)
             candidates = [s for s in self.states if s.is_available(now)]
             if not candidates:
+                # Double-check: force recover any keys whose cooldown has passed
+                for s in self.states:
+                    if s.status == KeyStatus.RATE_LIMITED and now >= s.cooldown_until:
+                        s.status = KeyStatus.ACTIVE
+                candidates = [s for s in self.states if s.is_available(now)]
+            if not candidates:
                 cooldown = self._earliest_cooldown(now)
                 raise NoKeyAvailable(
                     f"all {len(self.states)} keys unavailable in pool"
@@ -378,7 +384,13 @@ class KeyPool:
             for s in self.states
             if s.status == KeyStatus.RATE_LIMITED and s.cooldown_until > now
         ]
-        return min(candidates) if candidates else 0.0
+        if candidates:
+            return max(min(candidates), 0.5)  # at least 0.5s to avoid busy-loop
+        # If all rate-limited keys have expired cooldowns, recover them now
+        for s in self.states:
+            if s.status == KeyStatus.RATE_LIMITED and s.cooldown_until <= now:
+                s.status = KeyStatus.ACTIVE
+        return 0.0
 
 
 __all__ = [

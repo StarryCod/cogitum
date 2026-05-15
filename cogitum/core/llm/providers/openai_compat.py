@@ -12,6 +12,7 @@ between vendors are handled via flags on `ProviderConfig.extra` and
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING, Any, AsyncIterator
@@ -195,6 +196,9 @@ class OpenAICompatProvider(Provider):
 
         except GeneratorExit:
             return
+        except asyncio.CancelledError:
+            lease.record(LeaseOutcome.CANCELLED)
+            raise
         except httpx.HTTPError as e:
             lease.record(LeaseOutcome.ERROR, error=str(e))
             yield StreamChunk(kind=ChunkKind.ERROR, error=f"network: {e}")
