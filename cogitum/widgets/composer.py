@@ -4,6 +4,9 @@ cogitum.widgets.composer
 Composer — поле ввода с выпадающим меню команд.
 
 Enter — отправка. Ctrl+Enter — новая строка.
+Up/Down — история предыдущих сообщений (когда поле пустое или на первой строке).
+Ctrl+V — вставка. Большой текст (>100 символов) показывается как
+[Pasted content N lines] в поле, но отправляется полностью.
 """
 from __future__ import annotations
 
@@ -18,7 +21,7 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static, TextArea
 
-from ..design import GOLD, GOLD_DIM, GOLD_HI, MUTED, TXT, TXT_DIM
+from ..design import GOLD, GOLD_DIM, GOLD_HI, MUTED, TXT, TXT_DIM, BRONZE
 
 
 # ── Command definitions ──────────────────────────────────────────────────────
@@ -138,6 +141,11 @@ class CommandMenu(Static):
         self.update(out)
 
 
+# ── Paste indicator ──────────────────────────────────────────────────────────
+
+_PASTE_THRESHOLD = 100  # chars
+
+
 # ── Custom TextArea — Enter submits, Ctrl+Enter newline ──────────────────────
 
 class ComposerArea(TextArea):
@@ -146,6 +154,10 @@ class ComposerArea(TextArea):
     @dataclass
     class SubmitRequest(Message):
         pass
+
+    @dataclass
+    class HistoryRequest(Message):
+        direction: int  # -1 = older, +1 = newer
 
     async def _on_key(self, event: events.Key) -> None:
         """Intercept Enter BEFORE TextArea processes it."""
@@ -161,6 +173,21 @@ class ComposerArea(TextArea):
             event.stop()
             self.insert("\n")
             return
+        elif event.key == "up":
+            # If on first line and text is empty or cursor at start → history
+            if self.cursor_location[0] == 0:
+                event.prevent_default()
+                event.stop()
+                self.post_message(self.HistoryRequest(direction=-1))
+                return
+        elif event.key == "down":
+            # If on last line → history forward
+            lines = self.text.split("\n")
+            if self.cursor_location[0] >= len(lines) - 1:
+                event.prevent_default()
+                event.stop()
+                self.post_message(self.HistoryRequest(direction=1))
+                return
         # Everything else — let TextArea handle normally
         await super()._on_key(event)
 
@@ -168,7 +195,7 @@ class ComposerArea(TextArea):
 # ── Composer widget ──────────────────────────────────────────────────────────
 
 class Composer(Widget):
-    """Multi-line input with slash-command autocomplete."""
+    """Multi-line input with slash-command autocomplete + history + paste."""
 
     DEFAULT_CSS = """
     Composer {
@@ -193,6 +220,16 @@ class Composer(Widget):
     ComposerArea > .text-area--cursor-line {
         background: #1A1816;
     }
+    #paste-indicator {
+        display: none;
+        height: 1;
+        padding: 0 1;
+        color: #A8732D;
+        background: #1A1610;
+    }
+    #paste-indicator.visible {
+        display: block;
+    }
     """
 
     COMPONENT_CLASSES: ClassVar[set[str]] = set()
@@ -200,6 +237,10 @@ class Composer(Widget):
     def __init__(self, **kw) -> None:
         super().__init__(**kw)
         self._menu_active = False
+        self._history: list[str] = []
+        self._history_idx: int = -1  # -1 = not browsing history
+        self._draft: str = ""  # saved draft when browsing history
+        self._pasted_content: str | None = None  # full pasted text when collapsed
 
     # ── Messages ──────────────────────────────────────────────────────────────
 
@@ -215,6 +256,7 @@ class Composer(Widget):
 
     def compose(self) -> ComposeResult:
         yield CommandMenu(id="cmd-menu")
+        yield Static("", id="paste-indicator")
         yield ComposerArea(id="composer-area", language=None, show_line_numbers=False, theme="css")
 
     # ── Input handling ────────────────────────────────────────────────────────
@@ -224,6 +266,11 @@ class Composer(Widget):
         area = self.query_one("#composer-area", ComposerArea)
         text = area.text
         menu = self.query_one("#cmd-menu", CommandMenu)
+
+        # If user types after paste collapse, clear the collapse
+        if self._pasted_content and text != self._paste_display():
+            self._pasted_content = None
+            self._hide_paste_indicator()
 
         first_line = text.split("\n")[0] if text else ""
         if first_line.startswith("/") and " " not in first_line and "\n" not in text:
@@ -253,7 +300,14 @@ class Composer(Widget):
                 self.post_message(self.Submitted(value=f"/{cmd.name}"))
             return
 
-        text = area.text.strip()
+        # Get the actual text to send
+        if self._pasted_content:
+            text = self._pasted_content.strip()
+            self._pasted_content = None
+            self._hide_paste_indicator()
+        else:
+            text = area.text.strip()
+
         if not text:
             return
 
@@ -265,10 +319,47 @@ class Composer(Widget):
             if matched:
                 text = f"/{matched.name}" + (f" {args}" if args else "")
 
+        # Add to history
+        if text and (not self._history or self._history[-1] != text):
+            self._history.append(text)
+        self._history_idx = -1
+        self._draft = ""
+
         area.clear()
         menu.hide()
         self._menu_active = False
         self.post_message(self.Submitted(value=text))
+
+    @on(ComposerArea.HistoryRequest)
+    def _on_history_request(self, event: ComposerArea.HistoryRequest) -> None:
+        if not self._history:
+            return
+
+        area = self.query_one("#composer-area", ComposerArea)
+
+        if event.direction == -1:  # older
+            if self._history_idx == -1:
+                # Save current draft
+                self._draft = area.text
+                self._history_idx = len(self._history) - 1
+            elif self._history_idx > 0:
+                self._history_idx -= 1
+            else:
+                return  # at oldest
+
+            area.load_text(self._history[self._history_idx])
+
+        elif event.direction == 1:  # newer
+            if self._history_idx == -1:
+                return  # not browsing
+
+            if self._history_idx < len(self._history) - 1:
+                self._history_idx += 1
+                area.load_text(self._history[self._history_idx])
+            else:
+                # Back to draft
+                self._history_idx = -1
+                area.load_text(self._draft)
 
     def on_key(self, event) -> None:
         """Arrow keys for menu navigation."""
@@ -290,6 +381,46 @@ class Composer(Widget):
             event.prevent_default()
             event.stop()
 
+    def on_paste(self, event: events.Paste) -> None:
+        """Handle paste — collapse large content into indicator."""
+        text = event.text or ""
+        if not text:
+            return
+
+        event.prevent_default()
+        event.stop()
+        area = self.query_one("#composer-area", ComposerArea)
+
+        if len(text) > _PASTE_THRESHOLD:
+            # Store full content, show collapsed in area
+            self._pasted_content = text
+            lines = text.count("\n") + 1
+            area.load_text(self._paste_display())
+            self._show_paste_indicator(lines, len(text))
+        else:
+            # Short paste — insert normally
+            area.insert(text)
+
+    def _paste_display(self) -> str:
+        """Collapsed display text for pasted content."""
+        if not self._pasted_content:
+            return ""
+        lines = self._pasted_content.count("\n") + 1
+        return f"[Pasted content: {lines} lines]"
+
+    def _show_paste_indicator(self, lines: int, chars: int) -> None:
+        indicator = self.query_one("#paste-indicator", Static)
+        t = Text()
+        t.append("⎘ ", style=GOLD)
+        t.append(f"Pasted {lines} lines ({chars} chars)", style=BRONZE)
+        t.append(" — full content will be sent on Enter", style=TXT_DIM)
+        indicator.update(t)
+        indicator.add_class("visible")
+
+    def _hide_paste_indicator(self) -> None:
+        indicator = self.query_one("#paste-indicator", Static)
+        indicator.remove_class("visible")
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def set_enabled(self, enabled: bool) -> None:
@@ -298,3 +429,8 @@ class Composer(Widget):
 
     def focus_input(self) -> None:
         self.query_one("#composer-area", ComposerArea).focus()
+
+    def add_to_history(self, text: str) -> None:
+        """Add a message to history from outside (e.g. app restoring session)."""
+        if text and (not self._history or self._history[-1] != text):
+            self._history.append(text)

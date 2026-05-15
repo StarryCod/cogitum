@@ -1010,16 +1010,14 @@ class SetupScreen(Screen):
         if bid == "prov-add":
             existing = set(self._writer.providers().keys())
             preset = await self.app.push_screen_wait(AddProviderModal(existing))
-            if preset is None:
-                preset = None
-            elif preset is None:  # custom path was indicated by None inside list
-                pass
             if preset is not None:
                 await self._add_provider_flow(preset)
             else:
-                # If user clicked "custom" specifically, AddProviderModal returns None
-                # but we want CustomProviderModal. We rely on Selected items index — see below.
-                pass
+                # "custom" selected — open free-form provider definition
+                custom_preset = await self.app.push_screen_wait(CustomProviderModal())
+                if custom_preset is not None:
+                    await self._add_provider_flow(custom_preset)
+            self._render_section()
             return
 
         if bid == "prov-edit":
@@ -1129,13 +1127,51 @@ class SetupScreen(Screen):
         if creds is None:
             return
         auth_storage.set_(pid, creds)
-        # If we have a matching anthropic-pro / openai-codex provider entry,
-        # enable it.
-        if pid == "anthropic" and self._writer.has_provider("anthropic-pro"):
-            self._writer.set_enabled("anthropic-pro", True)
+
+        # Auto-create and enable the matching provider entry
+        if pid == "anthropic":
+            target = "anthropic-pro"
+            if not self._writer.has_provider(target):
+                self._writer.add_provider(
+                    target, name="Claude Pro/Max", format="anthropic_native",
+                    base_url="https://api.anthropic.com", auth="bearer", enabled=True,
+                )
+                # Add default models for Claude Pro/Max
+                self._writer.add_model(target, "claude-opus-4-5",
+                    display="Claude Opus 4.5 (Pro)", aliases=["opus-pro"],
+                    capabilities=["text", "vision", "reasoning", "tools", "caching"],
+                    context_window=200000, max_output_tokens=32000)
+                self._writer.add_model(target, "claude-sonnet-4-5",
+                    display="Claude Sonnet 4.5 (Pro)", aliases=["sonnet-pro"],
+                    capabilities=["text", "vision", "reasoning", "tools", "caching"],
+                    context_window=200000, max_output_tokens=16000)
+                self._writer.set_key(target, "subscription", "oauth:anthropic")
+            self._writer.set_enabled(target, True)
             self._writer.save()
+
+        elif pid == "openai-codex":
+            target = "openai-codex"
+            if not self._writer.has_provider(target):
+                self._writer.add_provider(
+                    target, name="ChatGPT Plus/Pro", format="openai_compat",
+                    base_url="https://api.openai.com/v1", auth="bearer", enabled=True,
+                )
+                self._writer.add_model(target, "gpt-5",
+                    display="GPT-5 (Codex)", aliases=["gpt5-codex"],
+                    capabilities=["text", "vision", "reasoning", "tools"],
+                    context_window=256000, max_output_tokens=64000)
+                self._writer.add_model(target, "gpt-5-mini",
+                    display="GPT-5 mini (Codex)", aliases=["gpt5-mini-codex"],
+                    capabilities=["text", "vision", "tools"],
+                    context_window=256000, max_output_tokens=32000)
+                self._writer.set_key(target, "subscription", "oauth:openai-codex")
+            self._writer.set_enabled(target, True)
+            self._writer.save()
+
         await self.app.push_screen_wait(MessageModal(
-            "Connected", f"{pid} authenticated. Tokens stored in ~/.config/cogitum/auth.json"
+            "Connected",
+            f"{pid} authenticated. Tokens stored in ~/.config/cogitum/auth.json\n"
+            f"Provider enabled — models now available in /models.",
         ))
         self._render_section()
 
