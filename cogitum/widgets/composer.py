@@ -166,6 +166,10 @@ class Composer(Widget):
 
     COMPONENT_CLASSES: ClassVar[set[str]] = set()
 
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self._just_inserted = False
+
     # ── Messages ──────────────────────────────────────────────────────────────
 
     @dataclass
@@ -191,6 +195,9 @@ class Composer(Widget):
         text = event.value
         menu = self.query_one("#cmd-menu", CommandMenu)
 
+        # Reset insert flag when user types
+        self._just_inserted = False
+
         if text.startswith("/"):
             query = text[1:].lower().strip()
             filtered = [
@@ -212,16 +219,19 @@ class Composer(Widget):
         menu = self.query_one("#cmd-menu", CommandMenu)
         inp = self.query_one("#composer-input", Input)
 
-        if menu.is_visible:
+        if menu.is_visible and not self._just_inserted:
             # Insert selected command, don't submit
             cmd = menu.selected_command
             if cmd:
+                self._just_inserted = True
                 inp.value = f"/{cmd.name} "
                 inp.cursor_position = len(inp.value)
             menu.hide()
             return
 
         # Normal submit
+        self._just_inserted = False
+        menu.hide()
         text = inp.value.strip()
         if text:
             inp.value = ""

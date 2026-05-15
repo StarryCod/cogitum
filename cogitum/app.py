@@ -17,8 +17,9 @@ from .core.tools import REGISTRY
 from .setup_flow import SetupScreen
 from .widgets.banner import Banner, BannerTags
 from .widgets.composer import Composer
+from .widgets.cards import EditCard, RunCard, SearchCard, ReadCard, FetchCard
 from .widgets.feed import AgentBlock, Feed, ThinkingBlock, ToolCallCard
-from .widgets.inspector import Inspector
+from .widgets.inspector import Inspector, InspectorState
 from .widgets.model_picker import ModelPicker
 from .widgets.statusbar import StatusBar
 
@@ -121,6 +122,22 @@ class CogitumApp(App):
                 mesh=self.mesh,
                 registry=REGISTRY,
                 config=AgentConfig(model=self.current_model),
+            )
+            # Update inspector with real data
+            inspector = self.query_one("#inspector-pane", Inspector)
+            model_name = self.current_model or "—"
+            provider_name = "—"
+            context_window = 200_000
+            if self.current_model:
+                resolved = self.mesh.resolve(self.current_model)
+                if resolved:
+                    provider_name = resolved[0].provider.id
+                    context_window = resolved[0].model.context_window or 200_000
+            inspector.update_state(
+                model=model_name,
+                provider=provider_name,
+                context_window=context_window,
+                tools=REGISTRY.names(),
             )
 
     def _update_statusbar(self, model: str) -> None:
@@ -225,6 +242,8 @@ class CogitumApp(App):
         thinking_block: ThinkingBlock | None = None
         # Map call_id → ToolCallCard for result updates
         tool_cards: dict[str, ToolCallCard] = {}
+        # Map call_id → AgentToolCall event for rich card creation
+        tool_calls_data: dict[str, AgentToolCall] = {}
 
         async def drain_queue() -> None:
             nonlocal agent_block, thinking_block
@@ -252,14 +271,30 @@ class CogitumApp(App):
                         thinking_block = None
                     # New turn → new agent block next time
                     agent_block = None
+                    # Show a pending card (will be replaced with proper card on result)
                     card = feed.append_tool_call(
                         event.tool_name, event.arguments, event.call_id
                     )
                     tool_cards[event.call_id] = card
+                    tool_calls_data[event.call_id] = event
 
                 elif isinstance(event, AgentToolResult):
                     card = tool_cards.get(event.call_id)
-                    if card:
+                    # Replace generic card with a beautiful typed card
+                    tool_event = tool_calls_data.get(event.call_id)
+                    if card and tool_event:
+                        rich_card = self._make_rich_card(
+                            tool_event.tool_name,
+                            tool_event.arguments,
+                            event.result,
+                            event.error,
+                        )
+                        if rich_card:
+                            card.remove()
+                            feed.append_card(rich_card)
+                        else:
+                            card.set_result(event.result, error=event.error)
+                    elif card:
                         card.set_result(event.result, error=event.error)
                     # New agent block for next response
                     agent_block = None
@@ -276,11 +311,28 @@ class CogitumApp(App):
                             f"in={usage.input_tokens} out={usage.output_tokens}",
                             "usage",
                         )
+                        # Update inspector
+                        try:
+                            inspector = self.query_one("#inspector-pane", Inspector)
+                            inspector.update_state(
+                                tokens_in=inspector.state.tokens_in + usage.input_tokens,
+                                tokens_out=inspector.state.tokens_out + usage.output_tokens,
+                                tokens_used=inspector.state.tokens_used + usage.input_tokens + usage.output_tokens,
+                                turns=inspector.state.turns + event.turns,
+                                messages=len(self._history),
+                            )
+                        except Exception:
+                            pass
                     self._set_composer_enabled(True)
                     return
 
                 elif isinstance(event, AgentError):
                     feed.append_error(event.message, meta="agent")
+                    try:
+                        inspector = self.query_one("#inspector-pane", Inspector)
+                        inspector.update_state(last_error=event.message)
+                    except Exception:
+                        pass
                     self._set_composer_enabled(True)
                     return
 
@@ -316,6 +368,59 @@ class CogitumApp(App):
         except Exception as exc:  # noqa: BLE001
             feed.append_error(str(exc), meta="agent")
             self._set_composer_enabled(True)
+
+    # ------------------------------------------------------------------
+    # rich tool cards
+    # ------------------------------------------------------------------
+
+    def _make_rich_card(self, tool_name: str, arguments: dict, result: str, error: bool):
+        """Create a beautiful typed card based on tool name, or None for generic."""
+        if tool_name == "terminal":
+            cmd = arguments.get("command", "")
+            lines = result.splitlines()
+            # Parse exit code from result
+            exit_code = 0
+            output = result
+            if lines and lines[0].startswith("[exit "):
+                try:
+                    exit_code = int(lines[0].split()[1].rstrip("]"))
+                    output = "\n".join(lines[1:])
+                except (ValueError, IndexError):
+                    pass
+            # Truncate long output
+            out_lines = output.splitlines()
+            if len(out_lines) > 15:
+                output = "\n".join(out_lines[:12]) + f"\n… +{len(out_lines) - 12} more lines"
+            return RunCard(cmd=cmd, output=output, exit_code=exit_code)
+
+        elif tool_name == "read_file":
+            path = arguments.get("path", "")
+            lines_count = result.count("\n") + 1
+            size = f"{len(result)} chars"
+            return ReadCard(path=path, lines=lines_count, size=size)
+
+        elif tool_name == "write_file":
+            path = arguments.get("path", "")
+            content = arguments.get("content", "")
+            # Fake a simple diff: all lines are additions
+            diff_lines = [("+", line) for line in content.splitlines()[:10]]
+            if len(content.splitlines()) > 10:
+                diff_lines.append(("", f"… +{len(content.splitlines()) - 10} more lines"))
+            return EditCard(path=path, diff=diff_lines, plus=len(content.splitlines()), minus=0)
+
+        elif tool_name == "search_files":
+            pattern = arguments.get("pattern", "")
+            hits = [l for l in result.splitlines() if l.strip()][:8]
+            total = len(result.splitlines())
+            return SearchCard(pattern=pattern, hits=hits, total=total)
+
+        elif tool_name == "fetch_url":
+            url = arguments.get("url", "")
+            status = 200 if not error else 500
+            size = f"{len(result)} chars"
+            return FetchCard(url=url, status=status, size=size)
+
+        return None  # generic ToolCallCard stays
 
     # ------------------------------------------------------------------
     # commands

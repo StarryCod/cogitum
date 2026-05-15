@@ -1,14 +1,14 @@
-"""Inspector pane — neutral tech terminology, warm palette.
+"""Inspector pane — live system state, warm palette.
 
 Right-hand column. Sections, top to bottom:
   · MODEL    — model name, provider, context use
-  · AGENTS   — active subagents / running tasks
-  · SKILLS   — loaded skills
-  · PROJECT  — workdir, git branch, dirty files
-  · USAGE    — token + cost meter, elapsed time
+  · TOOLS    — available tools count + list
+  · SESSION  — messages count, turns
+  · USAGE    — token meter, elapsed time
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 from rich.console import Group
@@ -30,6 +30,7 @@ from ..design import (
     OK,
     OLIVE,
     RULE,
+    RUST,
     TXT,
     TXT_DIM,
 )
@@ -37,31 +38,17 @@ from ..design import (
 
 @dataclass
 class InspectorState:
-    model: str = "claude-opus-4.7"
-    provider: str = "custom · kr"
-    context_used_pct: float = 0.18
-    agents: list[tuple[str, str]] = field(
-        default_factory=lambda: [
-            ("scribe",   "running"),
-            ("analyst",  "idle"),
-            ("redteam",  "idle"),
-            ("auditor",  "idle"),
-        ]
-    )
-    skills: list[str] = field(
-        default_factory=lambda: [
-            "writing-plans",
-            "subagent-driven-development",
-            "humanity-mode",
-            "godmode",
-        ]
-    )
-    workdir: str = "~/Cogitum"
-    branch: str = "main"
-    dirty: int = 6
-    tokens_in: int = 14_812
-    tokens_out: int = 2_476
-    elapsed: str = "00:04:31"
+    model: str = "—"
+    provider: str = "—"
+    context_window: int = 200_000
+    tokens_used: int = 0
+    tools: list[str] = field(default_factory=list)
+    messages: int = 0
+    turns: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    started_at: float = field(default_factory=time.time)
+    last_error: str = ""
 
 
 def _h(name: str) -> Text:
@@ -92,6 +79,13 @@ class Inspector(Widget):
         super().__init__(**kwargs)
         self.state = state or InspectorState()
 
+    def update_state(self, **kwargs) -> None:
+        """Update state fields and refresh."""
+        for k, v in kwargs.items():
+            if hasattr(self.state, k):
+                setattr(self.state, k, v)
+        self.refresh()
+
     def render(self):
         st = self.state
         rows: list = []
@@ -101,66 +95,60 @@ class Inspector(Widget):
         rows.append(Text(""))
         rows.append(_kv("name",     st.model,    f"bold {GOLD_HI}"))
         rows.append(_kv("provider", st.provider, TXT_DIM))
+        pct = st.tokens_used / max(st.context_window, 1)
         ctx = Table.grid(expand=True, padding=(0, 0))
         ctx.add_column(ratio=1); ctx.add_column(ratio=2, justify="right")
-        ctx.add_row(Text("context", style=GOLD_DIM), _bar(st.context_used_pct))
+        ctx.add_row(Text("context", style=GOLD_DIM), _bar(pct))
         rows.append(ctx)
         rows.append(
             Text.assemble(
                 ("            ", ""),
-                (f"{int(st.context_used_pct*100)} %", TXT_DIM),
+                (f"{int(pct*100)}% of {st.context_window//1000}k", TXT_DIM),
             )
         )
         rows.append(Rule(style=RULE))
 
-        # ── AGENTS ───────────────────────────────────────────────────────
-        rows.append(_h("AGENTS"))
+        # ── TOOLS ──────────────────────────────────────────────────────
+        rows.append(_h("TOOLS"))
         rows.append(Text(""))
-        ag = Table.grid(expand=True, padding=(0, 0))
-        ag.add_column(ratio=2); ag.add_column(ratio=1, justify="right")
-        for name, status in st.agents:
-            if status == "running":
-                left = Text()
-                left.append("● ", style=GOLD_HI)
-                left.append(name, style=TXT)
-                right = Text("running", style=GOLD_HI)
-            else:
-                left = Text()
-                left.append("○ ", style=OLIVE)
-                left.append(name, style=TXT_DIM)
-                right = Text("idle", style=MUTED)
-            ag.add_row(left, right)
-        rows.append(ag)
+        if st.tools:
+            for t in st.tools[:8]:
+                line = Text()
+                line.append(f"  {GLYPH_BULLET} ", style=GOLD_DIM)
+                line.append(t, style=TXT)
+                rows.append(line)
+            if len(st.tools) > 8:
+                rows.append(Text(f"  … +{len(st.tools) - 8} more", style=MUTED))
+            rows.append(Text(f"  {len(st.tools)} available", style=GOLD_DIM))
+        else:
+            rows.append(Text("  none loaded", style=MUTED))
         rows.append(Rule(style=RULE))
 
-        # ── SKILLS ───────────────────────────────────────────────────────
-        rows.append(_h("SKILLS"))
+        # ── SESSION ────────────────────────────────────────────────────
+        rows.append(_h("SESSION"))
         rows.append(Text(""))
-        for s in st.skills:
-            line = Text()
-            line.append(f"  {GLYPH_BULLET} ", style=GOLD_DIM)
-            line.append(s, style=TXT)
-            rows.append(line)
-        rows.append(Text(f"  {len(st.skills)} loaded", style=GOLD_DIM))
+        rows.append(_kv("messages", str(st.messages), TXT))
+        rows.append(_kv("turns",    str(st.turns),    TXT))
+        elapsed = time.time() - st.started_at
+        mins = int(elapsed // 60)
+        secs = int(elapsed % 60)
+        rows.append(_kv("elapsed",  f"{mins:02d}:{secs:02d}", TXT))
         rows.append(Rule(style=RULE))
 
-        # ── PROJECT ──────────────────────────────────────────────────────
-        rows.append(_h("PROJECT"))
-        rows.append(Text(""))
-        rows.append(_kv("path",   st.workdir, TXT))
-        rows.append(_kv("branch", st.branch,  GOLD))
-        rows.append(_kv(
-            "dirty",
-            f"{st.dirty} files",
-            value_style=GOLD_HI if st.dirty else OK,
-        ))
-        rows.append(Rule(style=RULE))
-
-        # ── USAGE ────────────────────────────────────────────────────────
+        # ── USAGE ──────────────────────────────────────────────────────
         rows.append(_h("USAGE"))
         rows.append(Text(""))
         rows.append(_kv("tokens in",  f"{st.tokens_in:,}",  TXT))
         rows.append(_kv("tokens out", f"{st.tokens_out:,}", TXT))
-        rows.append(_kv("elapsed",    st.elapsed,           TXT))
+        total = st.tokens_in + st.tokens_out
+        rows.append(_kv("total",      f"{total:,}",         f"bold {GOLD_HI}"))
+
+        # ── ERROR ──────────────────────────────────────────────────────
+        if st.last_error:
+            rows.append(Rule(style=RULE))
+            rows.append(_h("LAST ERROR"))
+            rows.append(Text(""))
+            err_text = st.last_error[:80]
+            rows.append(Text(f"  {err_text}", style=RUST))
 
         return Group(*rows)
