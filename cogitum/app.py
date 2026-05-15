@@ -6,7 +6,7 @@ import asyncio
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, VerticalScroll
 from textual.widgets import Static
 
 from .core.agent import Agent, AgentConfig, AgentDone, AgentError, AgentText, AgentThinking, AgentToolCall, AgentToolResult
@@ -72,7 +72,8 @@ class CogitumApp(App):
         yield HRule(id="hrule-top")
         with Container(id="main"):
             yield Feed(id="feed-pane")
-            yield Inspector(id="inspector-pane")
+            with VerticalScroll(id="inspector-pane"):
+                yield Inspector(id="inspector-widget")
         yield StatusBar(id="statusbar")
         yield Composer(id="composer")
 
@@ -123,7 +124,7 @@ class CogitumApp(App):
                 config=AgentConfig(model=self.current_model),
             )
             # Update inspector with real data
-            inspector = self.query_one("#inspector-pane", Inspector)
+            inspector = self.query_one("#inspector-widget", Inspector)
             model_name = self.current_model or "—"
             provider_name = "—"
             context_window = 200_000
@@ -321,7 +322,7 @@ class CogitumApp(App):
                         )
                         # Update inspector
                         try:
-                            inspector = self.query_one("#inspector-pane", Inspector)
+                            inspector = self.query_one("#inspector-widget", Inspector)
                             inspector.update_state(
                                 tokens_in=inspector.state.tokens_in + usage.input_tokens,
                                 tokens_out=inspector.state.tokens_out + usage.output_tokens,
@@ -340,7 +341,7 @@ class CogitumApp(App):
                         waiting = None
                     feed.append_error(event.message, meta="agent")
                     try:
-                        inspector = self.query_one("#inspector-pane", Inspector)
+                        inspector = self.query_one("#inspector-widget", Inspector)
                         inspector.update_state(last_error=event.message)
                     except Exception:
                         pass

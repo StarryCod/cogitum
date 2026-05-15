@@ -15,8 +15,7 @@ from rich.console import Group
 from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
-from textual.widget import Widget
-
+from textual.widgets import Static
 from ..design import (
     BRONZE,
     COPPER,
@@ -74,7 +73,7 @@ def _bar(pct: float, width: int = 18, full: str = GOLD, empty: str = MUTED) -> T
     return t
 
 
-class Inspector(Widget):
+class Inspector(Static):
     def __init__(self, state: InspectorState | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.state = state or InspectorState()

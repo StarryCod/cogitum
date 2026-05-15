@@ -69,11 +69,13 @@ Screen {
     padding: 1 2 1 2;
     overflow-y: auto;
 
-    scrollbar-size-vertical: 0;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #161618;
     scrollbar-background: #161618;
     scrollbar-background-active: #161618;
     scrollbar-background-hover: #161618;
-    scrollbar-size: 1 1;
+    scrollbar-color-active: #161618;
+    scrollbar-color-hover: #161618;
 }
 
 /* ───── Feed entries — bubbles & blocks ────────────────────────────────── */

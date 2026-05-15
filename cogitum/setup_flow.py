@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from rich.text import Text
-from textual import on
+from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -982,6 +982,7 @@ class SetupScreen(Screen):
     # --- buttons -------------------------------------------------------
 
     @on(Button.Pressed)
+    @work(exclusive=True)
     async def _on_button(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
 
