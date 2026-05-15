@@ -170,10 +170,10 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
     .krow       { height: 4; margin-bottom: 0; }
     .krow Label { width: 18; color: #9C957D; content-align: left middle; height: 100%; padding: 0 1 0 0; }
     .krow Input {
-        width: 1fr; background: #1C1C1F; border: tall #2A2620;
+        width: 1fr; background: #1C1C1F; border: round #2A2620;
         color: #E6E1CF; height: 3;
     }
-    .krow Input:focus { border: tall #A8732D; }
+    .krow Input:focus { border: round #A8732D; }
     #backend-section { height: auto; margin: 1 0; }
     #backend-label { color: #9C957D; height: 1; margin-bottom: 1; }
     .be-option {
@@ -366,12 +366,8 @@ class AddProviderModal(ModalScreen[ProviderPreset | None]):
     }
     #ap-list > ListItem.--highlight,
     #ap-list > ListItem:hover { background: #261E10; }
-    #ap-foot { height: 3; align: right middle; padding-top: 1; }
-    #ap-foot Button { margin-left: 1; min-width: 12; }
-    #ap-cancel { background: #2A2620; color: #9C957D; }
-    #ap-cancel:hover { background: #3A3630; }
-    #ap-ok { background: #7A5A1A; color: #F5C24A; }
-    #ap-ok:hover { background: #8A6A2A; }
+    #ap-foot { height: auto; align: right middle; padding-top: 1; }
+    #ap-foot Button { margin-left: 1; }
     """
 
     BINDINGS = [
@@ -459,9 +455,9 @@ class CustomProviderModal(ModalScreen[ProviderPreset | None]):
     .cprow { height: 4; margin-bottom: 0; }
     .cprow Label { width: 16; color: #9C957D; content-align: left middle; height: 100%; padding: 0 1 0 0; }
     .cprow Input {
-        width: 1fr; background: #1C1C1F; border: tall #2A2620; color: #E6E1CF; height: 3;
+        width: 1fr; background: #1C1C1F; border: round #2A2620; color: #E6E1CF; height: 3;
     }
-    .cprow Input:focus { border: tall #A8732D; }
+    .cprow Input:focus { border: round #A8732D; }
     #cp-foot { height: 3; align: right middle; margin-top: 1; }
     #cp-foot Button { margin-left: 1; }
     """
