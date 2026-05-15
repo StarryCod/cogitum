@@ -1,14 +1,9 @@
 """
 cogitum.widgets.composer
 ~~~~~~~~~~~~~~~~~~~~~~~~
-Composer — многострочное поле ввода с выпадающим меню команд.
+Composer — поле ввода с выпадающим меню команд.
 
-Фичи:
-  - Растёт до 5 строк, потом скроллится
-  - При вводе / появляется dropdown со списком команд
-  - Enter — отправка сообщения
-  - Ctrl+Enter — новая строка
-  - Стрелки вверх/вниз для навигации по меню
+Enter — отправка. Ctrl+Enter — новая строка.
 """
 from __future__ import annotations
 
@@ -16,9 +11,8 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from rich.text import Text
-from textual import on
+from textual import on, events
 from textual.app import ComposeResult
-from textual.binding import Binding
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -50,7 +44,6 @@ COMMANDS: list[CommandDef] = [
 
 
 def _match_command(text: str) -> CommandDef | None:
-    """Match exact command name or alias."""
     name = text.lower().strip()
     for cmd in COMMANDS:
         if cmd.name == name:
@@ -61,7 +54,6 @@ def _match_command(text: str) -> CommandDef | None:
 
 
 def _filter_commands(query: str) -> list[CommandDef]:
-    """Filter commands by prefix."""
     q = query.lower().strip()
     if not q:
         return list(COMMANDS)
@@ -77,8 +69,6 @@ def _filter_commands(query: str) -> list[CommandDef]:
 # ── Dropdown menu ────────────────────────────────────────────────────────────
 
 class CommandMenu(Static):
-    """Dropdown with filtered command list."""
-
     DEFAULT_CSS = """
     CommandMenu {
         display: none;
@@ -137,38 +127,42 @@ class CommandMenu(Static):
             prefix = "▸ " if is_sel else "  "
             name_style = f"bold {GOLD_HI}" if is_sel else GOLD
             desc_style = TXT if is_sel else TXT_DIM
-            shortcut_style = GOLD_DIM
 
             out.append(prefix, style=GOLD_HI if is_sel else MUTED)
             out.append(f"/{cmd.name}", style=name_style)
             out.append(f"  {cmd.description}", style=desc_style)
             if cmd.shortcut:
-                out.append(f"  [{cmd.shortcut}]", style=shortcut_style)
+                out.append(f"  [{cmd.shortcut}]", style=GOLD_DIM)
             if i < len(self._items) - 1:
                 out.append("\n")
         self.update(out)
 
 
-# ── Custom TextArea that yields Enter to parent ──────────────────────────────
+# ── Custom TextArea — Enter submits, Ctrl+Enter newline ──────────────────────
 
 class ComposerArea(TextArea):
-    """TextArea that sends Enter as submit, Ctrl+Enter as newline."""
-
-    BINDINGS = [
-        Binding("enter", "submit", "Submit", show=False),
-        Binding("ctrl+j", "newline", "New line", show=False),  # Ctrl+Enter
-    ]
+    """TextArea where Enter submits instead of inserting newline."""
 
     @dataclass
     class SubmitRequest(Message):
-        """Fired when user presses Enter."""
         pass
 
-    def action_submit(self) -> None:
-        self.post_message(self.SubmitRequest())
-
-    def action_newline(self) -> None:
-        self.insert("\n")
+    async def _on_key(self, event: events.Key) -> None:
+        """Intercept Enter BEFORE TextArea processes it."""
+        if event.key == "enter":
+            # Submit
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.SubmitRequest())
+            return
+        elif event.key == "ctrl+j" or event.key == "shift+enter":
+            # Newline
+            event.prevent_default()
+            event.stop()
+            self.insert("\n")
+            return
+        # Everything else — let TextArea handle normally
+        await super()._on_key(event)
 
 
 # ── Composer widget ──────────────────────────────────────────────────────────
@@ -187,12 +181,13 @@ class Composer(Widget):
         height: auto;
         min-height: 3;
         max-height: 7;
-        background: #14120E;
+        background: #1A1816;
         color: #E6E1CF;
         border: none;
         padding: 0 1;
     }
     ComposerArea:focus {
+        background: #1E1C18;
         border: none;
     }
     """
@@ -243,7 +238,6 @@ class Composer(Widget):
 
     @on(ComposerArea.SubmitRequest)
     def _on_submit_request(self, event: ComposerArea.SubmitRequest) -> None:
-        """Handle Enter press from ComposerArea."""
         menu = self.query_one("#cmd-menu", CommandMenu)
         area = self.query_one("#composer-area", ComposerArea)
 
@@ -274,7 +268,7 @@ class Composer(Widget):
         self.post_message(self.Submitted(value=text))
 
     def on_key(self, event) -> None:
-        """Handle arrow keys for menu navigation."""
+        """Arrow keys for menu navigation."""
         menu = self.query_one("#cmd-menu", CommandMenu)
         if not self._menu_active or not menu.is_visible:
             return
