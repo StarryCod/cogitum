@@ -41,8 +41,8 @@ log = logging.getLogger(__name__)
 # Retry / compaction constants
 # ---------------------------------------------------------------------------
 
-_MAX_RETRIES = 3
-_BACKOFF_SECONDS = (1.0, 3.0, 9.0)  # exponential: 1s, 3s, 9s
+_MAX_RETRIES = 5
+_BACKOFF_SECONDS = (2.0, 5.0, 10.0, 15.0, 20.0)  # generous backoff for key cooldowns
 _CONTEXT_FILL_THRESHOLD = 0.80  # compact at 80% context usage
 
 _RETRYABLE_STATUS_RE = re.compile(r"\b(429|5\d{2})\b")
@@ -168,6 +168,7 @@ class Agent:
         self.mesh = mesh
         self.registry = registry
         self.cfg = config or AgentConfig()
+        self._active_tool_tasks: list[asyncio.Task] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -354,12 +355,17 @@ class Agent:
                 if not assistant_tool_calls:
                     break
 
-                # ── execute tools in parallel ────────────────────────────
-                tasks = [
-                    self._execute_tool(tc, iteration)
+                # ── execute tools in parallel (cancellable) ────────────────
+                tool_tasks = [
+                    asyncio.create_task(self._execute_tool(tc, iteration))
                     for tc in assistant_tool_calls
                 ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+                # Expose tasks so TUI can cancel them on Esc
+                self._active_tool_tasks = tool_tasks
+                try:
+                    results = await asyncio.gather(*tool_tasks, return_exceptions=True)
+                finally:
+                    self._active_tool_tasks = []
 
                 tool_result_parts: list[ToolResultPart] = []
                 for tc, res in zip(assistant_tool_calls, results):
@@ -423,34 +429,56 @@ class Agent:
         queue: asyncio.Queue[AgentEvent],
         turn: int,
     ) -> AsyncIterator[StreamChunk]:
-        """Wrap _stream() with retry + exponential backoff on transient errors."""
+        """Wrap _stream() with retry + exponential backoff on transient errors.
+
+        Handles both raised exceptions AND ChunkKind.ERROR chunks from mesh
+        (e.g. 'all keys unavailable' which comes as an ERROR chunk, not exception).
+        """
         last_exc: BaseException | None = None
 
         for attempt in range(_MAX_RETRIES + 1):
+            got_error_chunk = False
+            error_msg = ""
             try:
                 async for chunk in self._stream(messages, tools_schema):
+                    # Intercept ERROR chunks — check if retryable before yielding
+                    if chunk.kind == ChunkKind.ERROR:
+                        error_msg = chunk.error or "stream error"
+                        fake_exc = RuntimeError(error_msg)
+                        if _is_retryable_error(fake_exc) and attempt < _MAX_RETRIES:
+                            got_error_chunk = True
+                            last_exc = fake_exc
+                            break  # break inner loop to retry
+                        # Not retryable or last attempt — yield as-is for agent loop to handle
+                        yield chunk
+                        continue
                     yield chunk
-                return  # success — exit the retry loop
-            except (RuntimeError, OSError, asyncio.TimeoutError) as exc:
+                if not got_error_chunk:
+                    return  # success — exit the retry loop
+            except (RuntimeError, OSError, asyncio.TimeoutError, Exception) as exc:
                 last_exc = exc
                 if attempt >= _MAX_RETRIES or not _is_retryable_error(exc):
                     break
-                # Use recovery time from error message if available,
-                # otherwise fall back to default exponential backoff
-                recovery_delay = _parse_recovery_delay(exc)
-                delay = recovery_delay if recovery_delay is not None else _BACKOFF_SECONDS[attempt]
-                log.warning(
-                    "Stream attempt %d failed (%s), retrying in %.1fs",
-                    attempt + 1, exc, delay,
-                )
-                await queue.put(AgentText(
-                    delta=f"\n⟳ retrying (attempt {attempt + 2}) in {delay:.1f}s...\n",
-                    turn=turn,
-                ))
-                await asyncio.sleep(delay)
+                error_msg = str(exc)
+
+            # Retry logic — parse recovery delay or use exponential backoff
+            recovery_delay = _parse_recovery_delay(last_exc) if last_exc else None
+            delay = recovery_delay if recovery_delay is not None else _BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)]
+            log.warning(
+                "Stream attempt %d failed (%s), retrying in %.1fs",
+                attempt + 1, error_msg, delay,
+            )
+            # Silent retry — don't show error to user, just show retrying indicator
+            await queue.put(AgentThinking(
+                delta=f"⟳ retrying ({attempt + 2}/{_MAX_RETRIES + 1})…\n",
+                turn=turn,
+            ))
+            await asyncio.sleep(delay)
 
         # All retries exhausted — raise the original error
-        raise last_exc  # type: ignore[misc]
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("stream failed after retries")
 
     def _get_context_window(self) -> int:
         """Return the context window size for the current model, or 0 if unknown."""
@@ -541,6 +569,8 @@ class Agent:
         try:
             result = await self.registry.execute(tc.name, tc.arguments)
             return str(result)
+        except asyncio.CancelledError:
+            return "ERROR: tool execution cancelled by user"
         except KeyError:
             return f"ERROR: unknown tool '{tc.name}'"
         except Exception as exc:

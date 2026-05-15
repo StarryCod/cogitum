@@ -16,8 +16,8 @@ from ..design import (
 _KEYS = [
     ("⏎",       "send"),
     ("Esc",     "stop"),
-    ("Ctrl+M",  "models"),
-    ("Ctrl+,",  "setup"),
+    ("Ctrl+P",  "models"),
+    ("Ctrl+S",  "setup"),
     ("Ctrl+Q",  "quit"),
 ]
 

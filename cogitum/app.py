@@ -25,7 +25,7 @@ from .widgets.statusbar import StatusBar
 
 
 def _seed(feed: Feed) -> None:
-    feed.append_system("Session ready  ·  type / for commands  ·  Ctrl+M for models", "init")
+    feed.append_system("Session ready  ·  type / for commands  ·  Ctrl+P for models", "init")
     feed.append_agent(
         "Cogitum is online. Pick a model with /models and start with a task.",
         meta="ready",
@@ -45,12 +45,9 @@ class CogitumApp(App):
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "quit"),
-        Binding("ctrl+m", "open_models", "models"),
-        Binding("ctrl+comma", "open_setup", "setup"),
-        Binding("ctrl+r", "noop", "rewind", show=False),
-        Binding("ctrl+s", "noop", "verify", show=False),
-        Binding("ctrl+k", "noop", "swarm", show=False),
-        Binding("escape", "cancel_agent", "cancel", show=False),
+        Binding("ctrl+p", "open_models", "models", priority=True),
+        Binding("ctrl+s", "open_setup", "setup", priority=True),
+        Binding("escape", "cancel_agent", "stop", priority=True),
     ]
 
     def __init__(self) -> None:
@@ -151,15 +148,22 @@ class CogitumApp(App):
     # actions
     # ------------------------------------------------------------------
 
-    def action_noop(self) -> None:
-        pass
-
     def action_cancel_agent(self) -> None:
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
             self._pending_messages.clear()
+            # Cancel any running tool tasks via agent
+            if self._agent and self._agent._active_tool_tasks:
+                for t in self._agent._active_tool_tasks:
+                    if not t.done():
+                        t.cancel()
+                self._agent._active_tool_tasks = []
             feed = self.query_one("#feed-pane", Feed)
-            feed.append_system("⏹ stopped", "esc")
+            # Remove any active WaitingIndicator
+            for w in feed.query("WaitingIndicator"):
+                w.stop()
+            # Show stopped message
+            feed.append_system("⏹ stopped by user", "esc")
             self._set_composer_enabled(True)
 
     def action_open_models(self) -> None:
