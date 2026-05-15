@@ -17,7 +17,7 @@ from .core.tools import REGISTRY
 from .setup_flow import SetupScreen
 from .widgets.banner import Banner, BannerTags
 from .widgets.composer import Composer
-from .widgets.cards import EditCard, RunCard, SearchCard, ReadCard, FetchCard
+from .widgets.cards import EditCard, WriteCard, RunCard, SearchCard, ReadCard, FetchCard
 from .widgets.feed import AgentBlock, Feed, ThinkingBlock, ToolCallCard, WaitingIndicator
 from .widgets.inspector import Inspector, InspectorState
 from .widgets.model_picker import ModelPicker
@@ -167,7 +167,6 @@ class CogitumApp(App):
             w.stop()
         # Show stopped message
         feed.append_system("⏹ stopped by user", "esc")
-        self._set_composer_enabled(True)
 
     def action_open_models(self) -> None:
         if self.mesh is None or not self.mesh.providers:
@@ -250,16 +249,9 @@ class CogitumApp(App):
             feed.append_error("No model selected. /models to pick one.")
             return
 
-        self._set_composer_enabled(False)
         self._agent_task = asyncio.create_task(
             self._run_agent(text, feed)
         )
-
-    def _set_composer_enabled(self, enabled: bool) -> None:
-        try:
-            self.query_one("#composer", Composer).set_enabled(enabled)
-        except Exception:  # noqa: BLE001
-            pass
 
     # ------------------------------------------------------------------
     # agent worker
@@ -389,7 +381,6 @@ class CogitumApp(App):
                         )
                     except Exception:
                         pass
-                    self._set_composer_enabled(True)
                     return
 
                 elif isinstance(event, AgentError):
@@ -402,7 +393,6 @@ class CogitumApp(App):
                         inspector.update_state(last_error=event.message)
                     except Exception:
                         pass
-                    self._set_composer_enabled(True)
                     return
 
         # Run agent + drain concurrently
@@ -432,12 +422,10 @@ class CogitumApp(App):
                 # drain didn't finish — show error directly
                 if agent_fut.exception():
                     feed.append_error(str(agent_fut.exception()), meta="agent")
-                self._set_composer_enabled(True)
                 return
 
             # Check for unhandled errors
             if agent_fut.exception():
-                self._set_composer_enabled(True)
                 return
 
             # Update history with new messages
@@ -447,7 +435,6 @@ class CogitumApp(App):
             # Process any queued messages
             if self._pending_messages:
                 next_msg = self._pending_messages.pop(0)
-                self._set_composer_enabled(False)
                 self._agent_task = asyncio.create_task(
                     self._run_agent(next_msg, feed)
                 )
@@ -458,7 +445,6 @@ class CogitumApp(App):
             drain_fut.cancel()
         except Exception as exc:  # noqa: BLE001
             feed.append_error(str(exc), meta="agent")
-            self._set_composer_enabled(True)
 
     # ------------------------------------------------------------------
     # rich tool cards
@@ -493,11 +479,27 @@ class CogitumApp(App):
         elif tool_name == "write_file":
             path = arguments.get("path", "")
             content = arguments.get("content", "")
-            # Fake a simple diff: all lines are additions
-            diff_lines = [("+", line) for line in content.splitlines()[:10]]
-            if len(content.splitlines()) > 10:
-                diff_lines.append(("", f"… +{len(content.splitlines()) - 10} more lines"))
-            return EditCard(path=path, diff=diff_lines, plus=len(content.splitlines()), minus=0)
+            lines_count = len(content.splitlines())
+            size = f"{len(content)} chars"
+            return WriteCard(path=path, lines=lines_count, size=size)
+
+        elif tool_name == "edit_file":
+            path = arguments.get("path", "")
+            old_str = arguments.get("old_string", "")
+            new_str = arguments.get("new_string", "")
+            # Build real git-style diff
+            diff_lines: list[tuple[str, str]] = []
+            for line in old_str.splitlines()[:8]:
+                diff_lines.append(("-", line))
+            if len(old_str.splitlines()) > 8:
+                diff_lines.append(("", f"… -{len(old_str.splitlines()) - 8} more"))
+            for line in new_str.splitlines()[:8]:
+                diff_lines.append(("+", line))
+            if len(new_str.splitlines()) > 8:
+                diff_lines.append(("", f"… +{len(new_str.splitlines()) - 8} more"))
+            minus = len(old_str.splitlines())
+            plus = len(new_str.splitlines())
+            return EditCard(path=path, diff=diff_lines, plus=plus, minus=minus)
 
         elif tool_name == "search_files":
             pattern = arguments.get("pattern", "")

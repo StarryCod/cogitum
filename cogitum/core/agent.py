@@ -41,8 +41,8 @@ log = logging.getLogger(__name__)
 # Retry / compaction constants
 # ---------------------------------------------------------------------------
 
-_MAX_RETRIES = 5
-_BACKOFF_SECONDS = (2.0, 5.0, 10.0, 15.0, 20.0)  # generous backoff for key cooldowns
+_MAX_RETRIES = 10
+_BACKOFF_SECONDS = (10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 60.0)  # 10→60s ramp
 _CONTEXT_FILL_THRESHOLD = 0.80  # compact at 80% context usage
 
 _RETRYABLE_STATUS_RE = re.compile(r"\b(429|5\d{2})\b")
@@ -468,11 +468,8 @@ class Agent:
                 "Stream attempt %d failed (%s), retrying in %.1fs",
                 attempt + 1, error_msg, delay,
             )
-            # Silent retry — don't show error to user, just show retrying indicator
-            await queue.put(AgentThinking(
-                delta=f"⟳ retrying ({attempt + 2}/{_MAX_RETRIES + 1})…\n",
-                turn=turn,
-            ))
+            # Completely silent retry — user sees nothing, just wait
+            log.info("Silent retry %d/%d, waiting %.1fs", attempt + 1, _MAX_RETRIES, delay)
             await asyncio.sleep(delay)
 
         # All retries exhausted — raise the original error

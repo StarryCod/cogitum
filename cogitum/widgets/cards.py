@@ -101,6 +101,26 @@ class EditCard(Static):
         return _panel(title, body, sub, border_style=BRONZE)
 
 
+
+
+# ── WRITE (write_file) ─────────────────────────────────────────────────────
+
+class WriteCard(Static):
+    DEFAULT_CLASSES = "card card-write"
+
+    def __init__(self, path: str, lines: int, size: str = "", **kw) -> None:
+        super().__init__(self._build(path, lines, size), **kw)
+
+    @staticmethod
+    def _build(path: str, lines: int, size: str) -> Panel:
+        body = Text()
+        body.append("  ", style=GOLD_DIM)
+        body.append(path, style=TXT)
+        title = _title("WRITE", path.split("/")[-1] if "/" in path else path)
+        sub = Text(f"{lines} lines  ·  {size}" if size else f"{lines} lines",
+                   style=GOLD_DIM)
+        return _panel(title, body, sub, border_style=OK)
+
 # ── RUN (terminal) ──────────────────────────────────────────────────────────
 
 class RunCard(Static):

@@ -424,8 +424,10 @@ class Composer(Widget):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def set_enabled(self, enabled: bool) -> None:
-        area = self.query_one("#composer-area", ComposerArea)
-        area.disabled = not enabled
+        """Track enabled state but never disable the TextArea itself.
+        Users should always be able to type (messages get queued)."""
+        # Keep area always enabled — app handles queueing
+        pass
 
     def focus_input(self) -> None:
         self.query_one("#composer-area", ComposerArea).focus()
