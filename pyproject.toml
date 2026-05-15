@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cogitum"
+version = "0.0.1"
+description = "Cogitum — sovereign agentic CLI. Imperial Fists colorway."
+requires-python = ">=3.11"
+authors = [{ name = "Starred" }]
+dependencies = [
+    "textual>=0.83",
+    "rich>=13.7",
+    "pyfiglet>=1.0",
+    "click>=8.1",
+    "httpx>=0.27",
+    "rapidfuzz>=3.9",
+]
+
+[project.optional-dependencies]
+keyring = ["keyring>=25"]
+vault = ["cryptography>=42", "argon2-cffi>=23"]
+all = ["keyring>=25", "cryptography>=42", "argon2-cffi>=23"]
+
+[project.scripts]
+cog = "cogitum.cli:main"
+cogitum = "cogitum.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cogitum"]

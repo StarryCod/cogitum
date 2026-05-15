@@ -1,0 +1,154 @@
+/* Cogitum — Imperial Fists colorway, single warm tonal palette.
+   Charcoal canvas · gold accents · bronze details · rust for errors. */
+
+Screen {
+    background: #0E0E11;
+    color: #E6E1CF;
+    layout: vertical;
+}
+
+/* ───── Banner ─────────────────────────────────────────────────────────── */
+#banner {
+    height: 9;
+    padding: 1 2 0 2;
+    background: #0E0E11;
+    content-align: center middle;
+}
+
+#banner-tags {
+    height: 1;
+    padding: 0 2 1 2;
+    color: #7A5A1A;
+    background: #0E0E11;
+}
+
+/* ───── Full-width horizontal rules ────────────────────────────────────── */
+.hrule, #hrule-top, #hrule-bottom {
+    height: 1;
+    width: 100%;
+}
+
+/* Top rule between header and main — invisible spacer, just a clean cut */
+#hrule-top {
+    background: #0E0E11;
+    color: #0E0E11;
+}
+
+/* Bottom rule above composer — slim, dim warm tone */
+#hrule-bottom {
+    background: #261E10;
+    color: #261E10;
+}
+
+/* ───── Main split ─────────────────────────────────────────────────────── */
+#main {
+    layout: horizontal;
+    height: 1fr;
+}
+
+#feed-pane {
+    width: 2fr;
+    background: #0E0E11;
+    padding: 0 2 1 2;
+    border-right: vkey #2A2620;
+    overflow-y: auto;
+
+    scrollbar-color: #2A2620 #0E0E11;
+    scrollbar-color-active: #7A5A1A;
+    scrollbar-color-hover: #5A4A20;
+    scrollbar-background: #0E0E11;
+    scrollbar-background-active: #0E0E11;
+    scrollbar-background-hover: #0E0E11;
+    scrollbar-size: 1 1;
+}
+
+#inspector-pane {
+    width: 1fr;
+    min-width: 36;
+    background: #161618;
+    padding: 0 2 1 2;
+    overflow-y: auto;
+
+    scrollbar-color: #2A2620 #161618;
+    scrollbar-color-active: #7A5A1A;
+    scrollbar-color-hover: #5A4A20;
+    scrollbar-background: #161618;
+    scrollbar-background-active: #161618;
+    scrollbar-background-hover: #161618;
+    scrollbar-size: 1 1;
+}
+
+/* ───── Feed entries — bubbles & blocks ────────────────────────────────── */
+.feed-entry {
+    height: auto;
+    margin: 1 0 1 0;
+}
+
+.feed-user {
+    background: #1F1B14;
+    border-left: thick #F5C24A;
+    padding: 1 2 1 2;
+    margin: 1 4 1 0;
+}
+
+.feed-agent {
+    padding: 0 0 0 2;
+    margin: 1 0 2 0;
+}
+
+.feed-error {
+    background: #1C1816;
+    border-left: thick #9B3A2A;
+    padding: 1 2 1 2;
+    margin: 1 4 1 0;
+}
+
+.feed-system {
+    padding: 0 0 0 2;
+    margin: 0 0 1 0;
+    height: 1;
+}
+
+/* ───── Tool cards — they self-frame via Rich Panel ─────────────────────── */
+.card {
+    height: auto;
+    margin: 0 0 1 0;
+    background: #16140F;
+}
+
+/* ───── Status bar ────────────────────────────────────────────────────── */
+#statusbar {
+    height: 1;
+    background: #0E0E11;
+    color: #7A5A1A;
+    padding: 0 2;
+}
+
+/* ───── Composer — visible warm panel ─────────────────────────────────── */
+#composer-shell {
+    height: 3;
+    width: 100%;
+    background: #14120E;
+    padding: 0;
+}
+
+#composer-prefix {
+    width: 4;
+    height: 3;
+    color: #F5C24A;
+    background: #14120E;
+    content-align: center middle;
+}
+
+Input#composer {
+    height: 3;
+    background: #14120E;
+    color: #E6E1CF;
+    border: none;
+    padding: 1 1;
+}
+
+Input:focus {
+    border: none;
+}
+
