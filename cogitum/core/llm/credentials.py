@@ -105,7 +105,53 @@ class CredentialResolver:
         if scheme == "vault":
             return self._resolve_vault(rest)
 
+        if scheme == "oauth":
+            return self._resolve_oauth(rest)
+
         raise CredentialError(f"unknown credential scheme: {scheme!r}")
+
+    # ---- oauth backend --------------------------------------------------
+
+    def _resolve_oauth(self, provider_id: str) -> str:
+        """Resolve oauth:<provider_id> — read access token, refresh if expired."""
+        from cogitum.core.auth import storage as auth_storage
+        from cogitum.core.auth.registry import REGISTRY as OAUTH_REGISTRY
+
+        creds = auth_storage.get(provider_id)
+        if creds is None:
+            raise CredentialError(
+                f"oauth:{provider_id} — no tokens found. "
+                f"Run `cog setup` → Subscriptions to authenticate."
+            )
+
+        if creds.expired():
+            # Try to refresh
+            oauth_provider = OAUTH_REGISTRY.get(provider_id)
+            if oauth_provider is None:
+                raise CredentialError(
+                    f"oauth:{provider_id} — token expired and no refresh provider registered"
+                )
+            try:
+                import asyncio
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # We're inside an async context — schedule refresh
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        new_creds = pool.submit(
+                            asyncio.run, oauth_provider.refresh(creds)
+                        ).result(timeout=30)
+                else:
+                    new_creds = asyncio.run(oauth_provider.refresh(creds))
+                auth_storage.set_(provider_id, new_creds)
+                creds = new_creds
+                logger.info("oauth:%s token refreshed successfully", provider_id)
+            except Exception as e:
+                raise CredentialError(
+                    f"oauth:{provider_id} — token expired and refresh failed: {e}"
+                ) from e
+
+        return creds.access
 
     # ---- keyring backend -------------------------------------------------
 

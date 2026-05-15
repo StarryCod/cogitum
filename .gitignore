@@ -32,3 +32,4 @@ htmlcov/
 /tmp/
 *.svg
 *.png
+hermes-agent/

@@ -1181,15 +1181,19 @@ class SetupScreen(Screen):
                     target, name="Claude Pro/Max", format="anthropic_native",
                     base_url="https://api.anthropic.com", auth="bearer", enabled=True,
                 )
-                # Add default models for Claude Pro/Max
-                self._writer.add_model(target, "claude-opus-4-5",
-                    display="Claude Opus 4.5 (Pro)", aliases=["opus-pro"],
-                    capabilities=["text", "vision", "reasoning", "tools", "caching"],
-                    context_window=200000, max_output_tokens=32000)
-                self._writer.add_model(target, "claude-sonnet-4-5",
-                    display="Claude Sonnet 4.5 (Pro)", aliases=["sonnet-pro"],
-                    capabilities=["text", "vision", "reasoning", "tools", "caching"],
-                    context_window=200000, max_output_tokens=16000)
+                # Subscription tokens can't access model listing, add defaults
+                _claude_models = [
+                    ("claude-opus-4-5", "Claude Opus 4.5 (Pro)",
+                     ["text", "vision", "reasoning", "tools", "caching"], 200000, 32000),
+                    ("claude-sonnet-4-5", "Claude Sonnet 4.5 (Pro)",
+                     ["text", "vision", "reasoning", "tools", "caching"], 200000, 16000),
+                    ("claude-haiku-3-5", "Claude Haiku 3.5 (Pro)",
+                     ["text", "vision", "tools", "caching"], 200000, 8192),
+                ]
+                for mid, display, caps, ctx, max_out in _claude_models:
+                    self._writer.add_model(target, mid,
+                        display=display, capabilities=caps,
+                        context_window=ctx, max_output_tokens=max_out)
                 self._writer.set_key(target, "subscription", "oauth:anthropic")
             self._writer.set_enabled(target, True)
             self._writer.save()
@@ -1201,14 +1205,20 @@ class SetupScreen(Screen):
                     target, name="ChatGPT Plus/Pro", format="openai_compat",
                     base_url="https://api.openai.com/v1", auth="bearer", enabled=True,
                 )
-                self._writer.add_model(target, "gpt-5",
-                    display="GPT-5 (Codex)", aliases=["gpt5-codex"],
-                    capabilities=["text", "vision", "reasoning", "tools"],
-                    context_window=256000, max_output_tokens=64000)
-                self._writer.add_model(target, "gpt-5-mini",
-                    display="GPT-5 mini (Codex)", aliases=["gpt5-mini-codex"],
-                    capabilities=["text", "vision", "tools"],
-                    context_window=256000, max_output_tokens=32000)
+                # Subscription tokens can't access /v1/models (403), add defaults
+                _codex_models = [
+                    ("gpt-5", "GPT-5", ["text", "vision", "reasoning", "tools"], 256000, 64000),
+                    ("gpt-5-mini", "GPT-5 mini", ["text", "vision", "tools"], 256000, 32000),
+                    ("o3", "o3", ["text", "reasoning", "tools"], 200000, 100000),
+                    ("o4-mini", "o4-mini", ["text", "reasoning", "tools"], 200000, 65536),
+                    ("gpt-4.1", "GPT-4.1", ["text", "vision", "tools"], 1048576, 32768),
+                    ("gpt-4.1-mini", "GPT-4.1 mini", ["text", "vision", "tools"], 1048576, 32768),
+                    ("gpt-4.1-nano", "GPT-4.1 nano", ["text", "tools"], 1048576, 32768),
+                ]
+                for mid, display, caps, ctx, max_out in _codex_models:
+                    self._writer.add_model(target, mid,
+                        display=display, capabilities=caps,
+                        context_window=ctx, max_output_tokens=max_out)
                 self._writer.set_key(target, "subscription", "oauth:openai-codex")
             self._writer.set_enabled(target, True)
             self._writer.save()

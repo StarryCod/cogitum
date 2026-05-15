@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
@@ -35,6 +36,30 @@ from cogitum.core.llm.mesh import Mesh
 from cogitum.core.tools import ToolRegistry
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Retry / compaction constants
+# ---------------------------------------------------------------------------
+
+_MAX_RETRIES = 3
+_BACKOFF_SECONDS = (1.0, 3.0, 9.0)  # exponential: 1s, 3s, 9s
+_CONTEXT_FILL_THRESHOLD = 0.80  # compact at 80% context usage
+
+_RETRYABLE_STATUS_RE = re.compile(r"\b(429|5\d{2})\b")
+
+
+def _is_retryable_error(exc: BaseException) -> bool:
+    """Determine if an error is transient and worth retrying."""
+    msg = str(exc).lower()
+    # Rate limit or server errors (429, 5xx)
+    if _RETRYABLE_STATUS_RE.search(str(exc)):
+        return True
+    # Connection / timeout errors
+    if any(kw in msg for kw in ("timeout", "timed out", "connection", "connect",
+                                 "reset by peer", "eof", "broken pipe")):
+        return True
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Agent events (sent over asyncio.Queue to the TUI)
@@ -162,11 +187,24 @@ class Agent:
         )
 
         total_usage: Usage | None = None
+        accumulated_tokens: int = 0
         iteration = 0
 
         try:
             while iteration < self.cfg.max_turns:
                 iteration += 1
+
+                # ── context compaction check ───────────────────────────────
+                context_window = self._get_context_window()
+                if (context_window > 0
+                        and accumulated_tokens >= int(context_window * _CONTEXT_FILL_THRESHOLD)):
+                    messages = await self._compact_context(messages, q)
+                    old_tokens = accumulated_tokens
+                    accumulated_tokens = 0  # reset after compaction
+                    await q.put(AgentText(
+                        delta=f"\n⟳ context compacted (was {old_tokens} tokens)\n",
+                        turn=iteration,
+                    ))
 
                 assistant_text_parts: list[TextPart] = []
                 assistant_thinking_parts: list[ThinkingPart] = []
@@ -175,8 +213,8 @@ class Agent:
                 # pending streaming tool calls: call_id → {name, args_buf}
                 pending: dict[str, dict[str, str]] = {}
 
-                # ── stream one LLM turn ──────────────────────────────────
-                async for chunk in self._stream(messages, tools_schema):
+                # ── stream one LLM turn (with retry) ──────────────────────
+                async for chunk in self._stream_with_retry(messages, tools_schema, q, iteration):
 
                     if chunk.kind == ChunkKind.TEXT:
                         delta = chunk.text
@@ -246,6 +284,11 @@ class Agent:
 
                     elif chunk.kind == ChunkKind.USAGE:
                         total_usage = chunk.usage
+                        if chunk.usage:
+                            accumulated_tokens += (
+                                (chunk.usage.input_tokens or 0)
+                                + (chunk.usage.output_tokens or 0)
+                            )
 
                     elif chunk.kind == ChunkKind.STOP:
                         break
@@ -342,6 +385,119 @@ class Agent:
         )
         async for chunk in self.mesh.stream(req):
             yield chunk
+
+    async def _stream_with_retry(
+        self,
+        messages: list[Message],
+        tools_schema: list[dict],
+        queue: asyncio.Queue[AgentEvent],
+        turn: int,
+    ) -> AsyncIterator[StreamChunk]:
+        """Wrap _stream() with retry + exponential backoff on transient errors."""
+        last_exc: BaseException | None = None
+
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                async for chunk in self._stream(messages, tools_schema):
+                    yield chunk
+                return  # success — exit the retry loop
+            except (RuntimeError, OSError, asyncio.TimeoutError) as exc:
+                last_exc = exc
+                if attempt >= _MAX_RETRIES or not _is_retryable_error(exc):
+                    break
+                delay = _BACKOFF_SECONDS[attempt]
+                log.warning(
+                    "Stream attempt %d failed (%s), retrying in %.1fs",
+                    attempt + 1, exc, delay,
+                )
+                await queue.put(AgentText(
+                    delta=f"\n⟳ retrying (attempt {attempt + 2})...\n",
+                    turn=turn,
+                ))
+                await asyncio.sleep(delay)
+
+        # All retries exhausted — raise the original error
+        raise last_exc  # type: ignore[misc]
+
+    def _get_context_window(self) -> int:
+        """Return the context window size for the current model, or 0 if unknown."""
+        model_ref = self.cfg.model or ""
+        if not model_ref:
+            return 0
+        try:
+            resolved = self.mesh.resolve(model_ref)
+            if resolved:
+                return resolved[0].model.context_window
+        except Exception:
+            pass
+        return 0
+
+    async def _compact_context(
+        self,
+        messages: list[Message],
+        queue: asyncio.Queue[AgentEvent],
+    ) -> list[Message]:
+        """Summarize conversation to free context space."""
+        from cogitum.core.llm.mesh import StreamRequest
+
+        # Preserve the system message (first message if role is system-like)
+        system_msg = self.cfg.system
+
+        # Build compaction prompt with the full conversation
+        conversation_text_parts: list[str] = []
+        for msg in messages:
+            role = msg.role
+            for part in msg.parts:
+                if isinstance(part, TextPart):
+                    conversation_text_parts.append(f"[{role}]: {part.text}")
+                elif isinstance(part, ToolCallPart):
+                    conversation_text_parts.append(
+                        f"[{role}]: tool_call({part.name}, {json.dumps(part.arguments)})"
+                    )
+                elif isinstance(part, ToolResultPart):
+                    conversation_text_parts.append(
+                        f"[tool_result]: {part.content[:500]}"
+                    )
+
+        conversation_dump = "\n".join(conversation_text_parts)
+        compaction_prompt = (
+            "Summarize this conversation preserving all key facts, decisions, "
+            "code snippets, and context. Be thorough but concise.\n\n"
+            f"{conversation_dump}"
+        )
+
+        # Stream the compaction (no tools)
+        compaction_messages = [
+            Message(role="user", parts=[TextPart(text=compaction_prompt)])
+        ]
+        req = StreamRequest(
+            messages=compaction_messages,
+            model=self.cfg.model or "",
+            system="You are a precise summarizer. Preserve all important details.",
+            tools=[],
+            max_tokens=self.cfg.max_tokens,
+            temperature=0.0,
+        )
+
+        summary_buf: list[str] = []
+        async for chunk in self.mesh.stream(req):
+            if chunk.kind == ChunkKind.TEXT:
+                summary_buf.append(chunk.text)
+            elif chunk.kind == ChunkKind.ERROR:
+                log.warning("Compaction stream error: %s", chunk.error)
+                return messages  # fall back to original on failure
+
+        compacted_summary = "".join(summary_buf)
+        if not compacted_summary.strip():
+            return messages  # compaction produced nothing, keep original
+
+        # Replace messages with compacted version
+        return [
+            Message(role="user", parts=[TextPart(text=compacted_summary)]),
+            Message(role="assistant", parts=[TextPart(
+                text="Understood. I have the full context. Continuing."
+            )]),
+        ]
 
     async def _execute_tool(
         self,
