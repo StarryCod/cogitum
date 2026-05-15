@@ -185,12 +185,24 @@ class CogitumApp(App):
         except Exception:  # noqa: BLE001
             pass
         self._update_statusbar(self.current_model)
+        self._update_inspector_model(resolved)
         # Update agent config
         if self._agent:
             self._agent.cfg.model = self.current_model
         self.query_one("#feed-pane", Feed).append_system(
             f"model = {self.current_model}", "switched"
         )
+
+    def _update_inspector_model(self, resolved: ResolvedModel) -> None:
+        try:
+            inspector = self.query_one("#inspector-widget", Inspector)
+            inspector.update_state(
+                model=resolved.model.display or resolved.model.id,
+                provider=resolved.provider.id,
+                context_window=resolved.model.context_window or 200_000,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------
     # composer
@@ -247,7 +259,7 @@ class CogitumApp(App):
         tool_calls_data: dict[str, AgentToolCall] = {}
 
         async def drain_queue() -> None:
-            nonlocal agent_block, thinking_block
+            nonlocal agent_block, thinking_block, waiting
             while True:
                 try:
                     event = queue.get_nowait()

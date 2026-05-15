@@ -24,7 +24,7 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Key
 from textual.message import Message
 from textual.screen import ModalScreen
@@ -187,13 +187,24 @@ class ModelPicker(ModalScreen[ResolvedModel | None]):
     #picker-list > ListItem:hover {
         background: #261E10;
     }
-    #picker-detail {
+    #picker-detail-scroll {
         width: 1fr;
         min-width: 32;
         background: #1C1C1F;
         border: round #2A2620;
         padding: 1 2;
         margin-left: 1;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: #1C1C1F;
+        scrollbar-background: #1C1C1F;
+        scrollbar-color-active: #1C1C1F;
+        scrollbar-color-hover: #1C1C1F;
+        scrollbar-background-active: #1C1C1F;
+        scrollbar-background-hover: #1C1C1F;
+    }
+    #picker-detail {
+        height: auto;
     }
     #picker-filters {
         height: 1;
@@ -243,7 +254,8 @@ class ModelPicker(ModalScreen[ResolvedModel | None]):
             yield Input(placeholder="search by id / alias / provider", id="picker-search")
             with Horizontal(id="picker-body"):
                 yield ListView(id="picker-list")
-                yield Static("", id="picker-detail")
+                with VerticalScroll(id="picker-detail-scroll"):
+                    yield Static("", id="picker-detail")
             yield Static(self._render_filters(), id="picker-filters")
             yield Static("", id="picker-status")
 
