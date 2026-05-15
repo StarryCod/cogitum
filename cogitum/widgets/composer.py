@@ -4,13 +4,11 @@ cogitum.widgets.composer
 Composer — многострочное поле ввода с выпадающим меню команд.
 
 Фичи:
-  - TextArea: растёт до 5 строк, потом скроллится
+  - Растёт до 5 строк, потом скроллится
   - При вводе / появляется dropdown со списком команд
-  - Фильтрация по мере ввода
+  - Enter — отправка сообщения
+  - Ctrl+Enter — новая строка
   - Стрелки вверх/вниз для навигации по меню
-  - Enter сразу выполняет выбранную команду
-  - Shift+Enter — новая строка
-  - Enter без меню — отправка сообщения
 """
 from __future__ import annotations
 
@@ -20,6 +18,7 @@ from typing import ClassVar
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -150,6 +149,28 @@ class CommandMenu(Static):
         self.update(out)
 
 
+# ── Custom TextArea that yields Enter to parent ──────────────────────────────
+
+class ComposerArea(TextArea):
+    """TextArea that sends Enter as submit, Ctrl+Enter as newline."""
+
+    BINDINGS = [
+        Binding("enter", "submit", "Submit", show=False),
+        Binding("ctrl+j", "newline", "New line", show=False),  # Ctrl+Enter
+    ]
+
+    @dataclass
+    class SubmitRequest(Message):
+        """Fired when user presses Enter."""
+        pass
+
+    def action_submit(self) -> None:
+        self.post_message(self.SubmitRequest())
+
+    def action_newline(self) -> None:
+        self.insert("\n")
+
+
 # ── Composer widget ──────────────────────────────────────────────────────────
 
 class Composer(Widget):
@@ -162,19 +183,17 @@ class Composer(Widget):
         width: 100%;
         layout: vertical;
     }
-    #composer-area {
+    ComposerArea {
         height: auto;
         min-height: 3;
         max-height: 7;
         background: #14120E;
         color: #E6E1CF;
-        border: tall #2A2620;
+        border: none;
+        padding: 0 1;
     }
-    #composer-area:focus {
-        border: tall #A8732D;
-    }
-    #composer-area .text-area--cursor {
-        color: #F5C24A;
+    ComposerArea:focus {
+        border: none;
     }
     """
 
@@ -198,21 +217,16 @@ class Composer(Widget):
 
     def compose(self) -> ComposeResult:
         yield CommandMenu(id="cmd-menu")
-        yield TextArea(id="composer-area", language=None, show_line_numbers=False)
-
-    def on_mount(self) -> None:
-        area = self.query_one("#composer-area", TextArea)
-        area.theme = "css"  # Use CSS styling, no syntax theme
+        yield ComposerArea(id="composer-area", language=None, show_line_numbers=False, theme="css")
 
     # ── Input handling ────────────────────────────────────────────────────────
 
     @on(TextArea.Changed, "#composer-area")
     def _on_text_changed(self, event: TextArea.Changed) -> None:
-        area = self.query_one("#composer-area", TextArea)
+        area = self.query_one("#composer-area", ComposerArea)
         text = area.text
         menu = self.query_one("#cmd-menu", CommandMenu)
 
-        # Only show menu if first line starts with / and no space yet
         first_line = text.split("\n")[0] if text else ""
         if first_line.startswith("/") and " " not in first_line and "\n" not in text:
             query = first_line[1:]
@@ -227,69 +241,63 @@ class Composer(Widget):
             menu.hide()
             self._menu_active = False
 
-    def on_key(self, event) -> None:
+    @on(ComposerArea.SubmitRequest)
+    def _on_submit_request(self, event: ComposerArea.SubmitRequest) -> None:
+        """Handle Enter press from ComposerArea."""
         menu = self.query_one("#cmd-menu", CommandMenu)
+        area = self.query_one("#composer-area", ComposerArea)
 
-        # Menu navigation
         if self._menu_active and menu.is_visible:
-            if event.key == "up":
-                menu.move_up()
-                event.prevent_default()
-                event.stop()
-                return
-            elif event.key == "down":
-                menu.move_down()
-                event.prevent_default()
-                event.stop()
-                return
-            elif event.key == "escape":
-                menu.hide()
-                self._menu_active = False
-                event.prevent_default()
-                event.stop()
-                return
-            elif event.key == "enter":
-                # Pick command and submit
-                cmd = menu.selected_command
-                menu.hide()
-                self._menu_active = False
-                if cmd:
-                    area = self.query_one("#composer-area", TextArea)
-                    area.clear()
-                    self.post_message(self.Submitted(value=f"/{cmd.name}"))
-                event.prevent_default()
-                event.stop()
-                return
-
-        # Normal Enter (no menu) — submit; Shift+Enter — newline
-        if event.key == "enter":
-            area = self.query_one("#composer-area", TextArea)
-            text = area.text.strip()
-            if not text:
-                event.prevent_default()
-                event.stop()
-                return
-
-            # Resolve aliases
-            if text.startswith("/"):
-                cmd_text = text[1:].split()[0]
-                args = text[1:][len(cmd_text):].strip()
-                matched = _match_command(cmd_text)
-                if matched:
-                    text = f"/{matched.name}" + (f" {args}" if args else "")
-
-            area.clear()
+            cmd = menu.selected_command
             menu.hide()
             self._menu_active = False
-            self.post_message(self.Submitted(value=text))
+            if cmd:
+                area.clear()
+                self.post_message(self.Submitted(value=f"/{cmd.name}"))
+            return
+
+        text = area.text.strip()
+        if not text:
+            return
+
+        # Resolve aliases
+        if text.startswith("/"):
+            cmd_text = text[1:].split()[0]
+            args = text[1:][len(cmd_text):].strip()
+            matched = _match_command(cmd_text)
+            if matched:
+                text = f"/{matched.name}" + (f" {args}" if args else "")
+
+        area.clear()
+        menu.hide()
+        self._menu_active = False
+        self.post_message(self.Submitted(value=text))
+
+    def on_key(self, event) -> None:
+        """Handle arrow keys for menu navigation."""
+        menu = self.query_one("#cmd-menu", CommandMenu)
+        if not self._menu_active or not menu.is_visible:
+            return
+
+        if event.key == "up":
+            menu.move_up()
+            event.prevent_default()
+            event.stop()
+        elif event.key == "down":
+            menu.move_down()
+            event.prevent_default()
+            event.stop()
+        elif event.key == "escape":
+            menu.hide()
+            self._menu_active = False
             event.prevent_default()
             event.stop()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def set_enabled(self, enabled: bool) -> None:
-        area = self.query_one("#composer-area", TextArea)
+        area = self.query_one("#composer-area", ComposerArea)
         area.disabled = not enabled
 
     def focus_input(self) -> None:
-        self.query_one("#composer-area", TextArea).focus()
+        self.query_one("#composer-area", ComposerArea).focus()

@@ -74,7 +74,6 @@ class CogitumApp(App):
             yield Feed(id="feed-pane")
             yield Inspector(id="inspector-pane")
         yield StatusBar(id="statusbar")
-        yield HRule(id="hrule-bottom")
         yield Composer(id="composer")
 
     # ------------------------------------------------------------------
