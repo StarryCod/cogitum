@@ -678,7 +678,8 @@ class SetupScreen(Screen):
         color: #F5C24A; text-style: bold; padding-bottom: 1;
     }
     .card-actions { height: 3; align: left middle; padding-top: 1; }
-    .card-actions Button { margin-right: 1; }
+    .card-actions Button { margin-right: 1; min-width: 16; content-align: center middle; text-align: center; }
+    Button { content-align: center middle; text-align: center; }
     """
 
     BINDINGS = [
@@ -701,6 +702,7 @@ class SetupScreen(Screen):
         super().__init__()
         self._writer: ConfigWriter = ConfigWriter()
         self._active = "providers"
+        self._default_model_map: dict[str, str] = {}
 
     # --- compose -------------------------------------------------------
 
@@ -780,6 +782,8 @@ class SetupScreen(Screen):
     def _render_section(self) -> None:
         content = self.query_one("#setup-content", VerticalScroll)
         content.remove_children()
+        # Force DOM cleanup before re-mounting
+        self.app.refresh()
 
         if self._active == "providers":
             self._render_providers(content)
@@ -821,7 +825,7 @@ class SetupScreen(Screen):
             self._render_provider_card(content, pid, raw)
 
     def _render_provider_card(self, content, pid: str, raw) -> None:
-        card = Vertical(classes="card", id=f"prov-card-{pid}")
+        card = Vertical(classes="card")
         content.mount(card)
         title = Text()
         title.append(f"{pid}", style=f"bold {GOLD_HI}")
@@ -876,7 +880,7 @@ class SetupScreen(Screen):
             "~/.config/cogitum/auth.json (mode 0600).", style=TXT_DIM)))
 
         for pid, oauth in OAUTH_REGISTRY.items():
-            card = Vertical(classes="card", id=f"sub-card-{pid}")
+            card = Vertical(classes="card")
             content.mount(card)
             creds = auth_storage.get(pid)
             title = Text()
@@ -920,7 +924,8 @@ class SetupScreen(Screen):
             content.mount(Static(Text(f"mesh load failed: {e}", style=RUST)))
             return
 
-        for r in mesh.list_resolved():
+        self._default_model_map = {}
+        for idx, r in enumerate(mesh.list_resolved()):
             row = Vertical(classes="card")
             content.mount(row)
             t = Text()
@@ -929,8 +934,10 @@ class SetupScreen(Screen):
             row.mount(Static(t))
             actions = Horizontal(classes="card-actions")
             row.mount(actions)
+            btn_id = f"def-model-{idx}"
+            self._default_model_map[btn_id] = r.qualified_id
             actions.mount(Button(
-                "Set as default", id=f"def-{r.qualified_id.replace('/','--')}",
+                "Set as default", id=btn_id,
                 variant="primary" if r.qualified_id != cur else "default",
             ))
 
@@ -1039,8 +1046,10 @@ class SetupScreen(Screen):
                 self._render_section()
             return
 
-        if bid.startswith("def-"):
-            qid = bid.removeprefix("def-").replace("--", "/")
+        if bid.startswith("def-model-"):
+            qid = getattr(self, "_default_model_map", {}).get(bid, "")
+            if not qid:
+                return
             settings = load_settings()
             settings["default_model"] = qid
             write_settings(settings)

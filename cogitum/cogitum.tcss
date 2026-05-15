@@ -78,6 +78,10 @@ Screen {
     scrollbar-color-hover: #161618;
 }
 
+#inspector-widget {
+    height: auto;
+}
+
 /* ───── Feed entries — bubbles & blocks ────────────────────────────────── */
 .feed-entry {
     height: auto;
