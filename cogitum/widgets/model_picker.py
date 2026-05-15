@@ -142,6 +142,14 @@ class ModelPicker(ModalScreen[ResolvedModel | None]):
         background: #161618;
         border: round #7A5A1A;
         padding: 1 2;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: #161618;
+        scrollbar-background: #161618;
+        scrollbar-background-active: #161618;
+        scrollbar-background-hover: #161618;
+        scrollbar-color-active: #161618;
+        scrollbar-color-hover: #161618;
     }
     #picker-title {
         height: 1;
@@ -167,6 +175,13 @@ class ModelPicker(ModalScreen[ResolvedModel | None]):
         background: #0E0E11;
         border: round #2A2620;
         padding: 0 1;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: #0E0E11;
+        scrollbar-background: #0E0E11;
+        scrollbar-background-active: #0E0E11;
+        scrollbar-background-hover: #0E0E11;
+        scrollbar-color-active: #0E0E11;
+        scrollbar-color-hover: #0E0E11;
     }
     #picker-list > ListItem.--highlight,
     #picker-list > ListItem:hover {

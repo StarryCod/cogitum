@@ -1111,11 +1111,56 @@ class SetupScreen(Screen):
         # Auto-enable provider once it has a key
         self._writer.set_enabled(pid, True)
         self._writer.save()
+
+        # Auto-discover models if provider has none
+        await self._auto_discover_models(pid, result.secret_ref)
+
         await self.app.push_screen_wait(MessageModal(
             "Key saved",
             f"{pid} now uses secret_ref = {result.secret_ref}\nProvider enabled.",
         ))
         self._render_section()
+
+    async def _auto_discover_models(self, pid: str, secret_ref: str) -> None:
+        """Try to discover models from /v1/models endpoint."""
+        from .core.llm.discovery import discover_models, resolve_secret_ref
+
+        provider_data = self._writer.provider(pid)
+        if not provider_data:
+            return
+
+        # Skip if provider already has models defined
+        existing_models = provider_data.get("models", {})
+        if existing_models and len(existing_models) > 0:
+            return
+
+        base_url = provider_data.get("base_url", "")
+        if not base_url:
+            return
+
+        # Resolve the key
+        api_key = resolve_secret_ref(secret_ref)
+        if not api_key:
+            return
+
+        try:
+            models = await discover_models(base_url, api_key)
+        except Exception:  # noqa: BLE001
+            return
+
+        if not models:
+            return
+
+        # Add discovered models to config
+        for m in models:
+            self._writer.add_model(
+                pid, m["model_id"],
+                display=m.get("display", m["model_id"]),
+                capabilities=m.get("capabilities", ["text", "tools"]),
+                context_window=m.get("context_window", 128000),
+                max_output_tokens=m.get("max_output_tokens", 16000),
+            )
+        self._writer.save()
 
     async def _oauth_flow(self, pid: str) -> None:
         if pid not in OAUTH_REGISTRY:
