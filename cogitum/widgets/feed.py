@@ -71,14 +71,19 @@ class UserBubble(Static):
 
 class AgentBlock(Static):
     """Streaming agent response. Call .append_delta() to add text live.
-    Renders final content as Rich Markdown for tables, code blocks, etc."""
+    Renders Rich Markdown in real-time (debounced) during streaming."""
     DEFAULT_CLASSES = "feed-entry feed-agent"
+
+    # Debounce interval in seconds for markdown re-renders during streaming
+    _RENDER_INTERVAL = 0.1
 
     def __init__(self, text: str = "", meta: str = "", **kw) -> None:
         self._text = text
         self._meta = meta
         self._streaming = True
-        super().__init__(self._build_streaming(), **kw)
+        self._render_pending = False
+        self._render_timer = None
+        super().__init__(self._build_markdown(), **kw)
 
     def _header(self) -> Text:
         out = Text()
@@ -90,34 +95,40 @@ class AgentBlock(Static):
         out.append(datetime.now().strftime("%H:%M"), style=GOLD_DIM)
         return out
 
-    def _build_streaming(self) -> Text:
-        """While streaming, render as plain text for speed."""
-        out = self._header()
-        out.append("\n")
-        for line in self._text.splitlines() or [""]:
-            out.append(line + "\n", style=TXT)
-        if out.plain.endswith("\n"):
-            out.right_crop(1)
-        return out
-
-    def _build_final(self):
-        """After streaming done, render as Rich Markdown."""
+    def _build_markdown(self):
+        """Render accumulated text as Rich Markdown with header."""
         from rich.console import Group
         header = self._header()
+        if not self._text.strip():
+            return header
         md = Markdown(self._text, code_theme="monokai")
         return Group(header, md)
 
-    def append_delta(self, delta: str) -> None:
-        """Append streaming text delta and refresh."""
-        self._text += delta
-        self.update(self._build_streaming())
+    def _do_render(self) -> None:
+        """Perform the actual markdown render and reset debounce state."""
+        self._render_pending = False
+        self._render_timer = None
+        self.update(self._build_markdown())
         if self.parent:
             self.parent.scroll_end(animate=False)
 
+    def append_delta(self, delta: str) -> None:
+        """Append streaming text delta and schedule a debounced re-render."""
+        self._text += delta
+        if not self._render_pending:
+            self._render_pending = True
+            self._render_timer = self.set_timer(
+                self._RENDER_INTERVAL, self._do_render
+            )
+
     def finish_streaming(self) -> None:
-        """Switch from streaming plain text to final Markdown render."""
+        """Final render — cancel any pending debounce and render immediately."""
         self._streaming = False
-        self.update(self._build_final())
+        if self._render_timer is not None:
+            self._render_timer.stop()
+            self._render_timer = None
+            self._render_pending = False
+        self.update(self._build_markdown())
 
 
 # ── Thinking block ───────────────────────────────────────────────────────────
@@ -160,12 +171,13 @@ class ToolCallCard(Static):
     """Compact card shown when agent invokes a tool."""
     DEFAULT_CLASSES = "feed-entry feed-agent"
 
-    def __init__(self, tool_name: str, arguments: dict, call_id: str = "", **kw) -> None:
+    def __init__(self, tool_name: str, arguments: dict, call_id: str = "", preparing: bool = False, **kw) -> None:
         self._tool_name = tool_name
         self._arguments = arguments
         self._call_id = call_id
         self._result: str | None = None
         self._error = False
+        self._preparing = preparing
         super().__init__(self._build(), **kw)
 
     def _build(self) -> Text:
@@ -177,14 +189,17 @@ class ToolCallCard(Static):
             out.append(f"  {self._call_id[:8]}", style=MUTED)
         out.append("\n")
         # args (compact, one line per key)
-        for k, v in list(self._arguments.items())[:4]:
-            val = str(v)
-            if len(val) > 60:
-                val = val[:57] + "…"
-            out.append(f"    {k}: ", style=TXT_DIM)
-            out.append(val + "\n", style=TXT)
-        if len(self._arguments) > 4:
-            out.append(f"    … +{len(self._arguments) - 4} more args\n", style=MUTED)
+        if self._preparing and not self._arguments:
+            out.append("    preparing…\n", style=MUTED)
+        else:
+            for k, v in list(self._arguments.items())[:4]:
+                val = str(v)
+                if len(val) > 60:
+                    val = val[:57] + "…"
+                out.append(f"    {k}: ", style=TXT_DIM)
+                out.append(val + "\n", style=TXT)
+            if len(self._arguments) > 4:
+                out.append(f"    … +{len(self._arguments) - 4} more args\n", style=MUTED)
         # result
         if self._result is not None:
             color = RUST if self._error else COPPER
@@ -200,9 +215,16 @@ class ToolCallCard(Static):
             out.right_crop(1)
         return out
 
+    def set_arguments(self, arguments: dict) -> None:
+        """Update arguments (e.g. after preliminary card gets full args)."""
+        self._arguments = arguments
+        self._preparing = False
+        self.update(self._build())
+
     def set_result(self, result: str, error: bool = False) -> None:
         self._result = result
         self._error = error
+        self._preparing = False
         self.update(self._build())
 
 
@@ -316,8 +338,8 @@ class Feed(VerticalScroll):
         self.scroll_end(animate=False)
         return block
 
-    def append_tool_call(self, tool_name: str, arguments: dict, call_id: str = "") -> ToolCallCard:
-        card = ToolCallCard(tool_name, arguments, call_id)
+    def append_tool_call(self, tool_name: str, arguments: dict, call_id: str = "", preparing: bool = False) -> ToolCallCard:
+        card = ToolCallCard(tool_name, arguments, call_id, preparing=preparing)
         self.mount(card)
         self.scroll_end(animate=False)
         return card

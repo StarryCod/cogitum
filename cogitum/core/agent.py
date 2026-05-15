@@ -46,6 +46,7 @@ _BACKOFF_SECONDS = (1.0, 3.0, 9.0)  # exponential: 1s, 3s, 9s
 _CONTEXT_FILL_THRESHOLD = 0.80  # compact at 80% context usage
 
 _RETRYABLE_STATUS_RE = re.compile(r"\b(429|5\d{2})\b")
+_RECOVERY_TIME_RE = re.compile(r"next recovery in\s+(\d+[.,]?\d*)\s*s?", re.IGNORECASE)
 
 
 def _is_retryable_error(exc: BaseException) -> bool:
@@ -54,11 +55,31 @@ def _is_retryable_error(exc: BaseException) -> bool:
     # Rate limit or server errors (429, 5xx)
     if _RETRYABLE_STATUS_RE.search(str(exc)):
         return True
+    # All keys unavailable in pool (mesh/keypool cooldown)
+    if "keys unavailable" in msg or "recovery" in msg:
+        return True
     # Connection / timeout errors
     if any(kw in msg for kw in ("timeout", "timed out", "connection", "connect",
                                  "reset by peer", "eof", "broken pipe")):
         return True
     return False
+
+
+def _parse_recovery_delay(exc: BaseException) -> float | None:
+    """Extract recovery time from 'next recovery in Xs' error messages.
+
+    Handles both '15.4' and '15,4' decimal formats.
+    Returns the delay in seconds, or None if not found.
+    """
+    match = _RECOVERY_TIME_RE.search(str(exc))
+    if match:
+        # Normalize comma decimal separator to dot
+        value_str = match.group(1).replace(",", ".")
+        try:
+            return float(value_str)
+        except ValueError:
+            return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +104,7 @@ class AgentToolCall:
     arguments: dict[str, Any]
     call_id: str
     turn: int = 0
+    preliminary: bool = False
 
 
 @dataclass
@@ -246,6 +268,14 @@ class Agent:
                                 "name": chunk.tool_call_name or "",
                                 "args_buf": "",
                             }
+                            # Emit preliminary event so TUI can show 'preparing...' card
+                            await q.put(AgentToolCall(
+                                tool_name=chunk.tool_call_name or "",
+                                arguments={},
+                                call_id=cid,
+                                turn=iteration,
+                                preliminary=True,
+                            ))
                         if chunk.tool_call_name:
                             pending[cid]["name"] = chunk.tool_call_name
                         pending[cid]["args_buf"] += chunk.tool_call_args_delta or ""
@@ -405,13 +435,16 @@ class Agent:
                 last_exc = exc
                 if attempt >= _MAX_RETRIES or not _is_retryable_error(exc):
                     break
-                delay = _BACKOFF_SECONDS[attempt]
+                # Use recovery time from error message if available,
+                # otherwise fall back to default exponential backoff
+                recovery_delay = _parse_recovery_delay(exc)
+                delay = recovery_delay if recovery_delay is not None else _BACKOFF_SECONDS[attempt]
                 log.warning(
                     "Stream attempt %d failed (%s), retrying in %.1fs",
                     attempt + 1, exc, delay,
                 )
                 await queue.put(AgentText(
-                    delta=f"\n⟳ retrying (attempt {attempt + 2})...\n",
+                    delta=f"\n⟳ retrying (attempt {attempt + 2}) in {delay:.1f}s...\n",
                     turn=turn,
                 ))
                 await asyncio.sleep(delay)

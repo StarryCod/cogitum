@@ -63,6 +63,37 @@ def append_file(path: str, content: str) -> str:
     return f"OK: appended {len(content)} bytes to {path}"
 
 
+@tool(tags=["fs", "write"])
+def edit_file(path: str, old_string: str, new_string: str) -> str:
+    """Targeted find-and-replace in a file. Errors if old_string is not found or matches multiple locations.
+
+    path: Absolute or relative path to the file.
+    old_string: Exact text to find (must match exactly once in the file).
+    new_string: Replacement text.
+    """
+    p = Path(path).expanduser()
+    if not p.exists():
+        return f"ERROR: file not found: {path}"
+    content = p.read_text(errors="replace")
+    count = content.count(old_string)
+    if count == 0:
+        return "ERROR: old_string not found in file"
+    if count > 1:
+        return f"ERROR: old_string matches {count} locations (must be unique)"
+    # Find line number of the match for context
+    idx = content.index(old_string)
+    line_num = content[:idx].count("\n") + 1
+    new_content = content.replace(old_string, new_string, 1)
+    p.write_text(new_content)
+    # Show context around the replacement
+    lines = new_content.splitlines()
+    new_line_count = new_string.count("\n") + 1
+    start = max(0, line_num - 2)
+    end = min(len(lines), line_num + new_line_count + 1)
+    context = "\n".join(f"{start + i + 1}|{lines[start + i]}" for i in range(end - start))
+    return f"OK: replaced at line {line_num}\n{context}"
+
+
 @tool(tags=["fs", "search"])
 def search_files(pattern: str, path: str = ".", file_glob: Optional[str] = None) -> str:
     """Search file contents with ripgrep (regex).

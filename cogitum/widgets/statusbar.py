@@ -15,9 +15,9 @@ from ..design import (
 
 _KEYS = [
     ("⏎",       "send"),
-    ("Ctrl+R",  "rewind"),
-    ("Ctrl+S",  "verify"),
-    ("Ctrl+K",  "swarm"),
+    ("Esc",     "stop"),
+    ("Ctrl+M",  "models"),
+    ("Ctrl+,",  "setup"),
     ("Ctrl+Q",  "quit"),
 ]
 
@@ -54,6 +54,4 @@ class StatusBar(Widget):
         out.append(self._model, style=GOLD)
         out.append("   ·   ")
         out.append(self._channel, style=BRONZE)
-        out.append("   ·   ")
-        out.append("yolo: off", style=GOLD_DIM)
         return out

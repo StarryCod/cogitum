@@ -61,6 +61,7 @@ class CogitumApp(App):
         self._agent: Agent | None = None
         self._agent_task: asyncio.Task | None = None
         self._history: list = []   # list[Message] — persists across turns
+        self._pending_messages: list[str] = []  # queued while agent is running
 
     # ------------------------------------------------------------------
     # compose
@@ -156,8 +157,9 @@ class CogitumApp(App):
     def action_cancel_agent(self) -> None:
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
+            self._pending_messages.clear()
             feed = self.query_one("#feed-pane", Feed)
-            feed.append_system("agent cancelled", "esc")
+            feed.append_system("⏹ stopped", "esc")
             self._set_composer_enabled(True)
 
     def action_open_models(self) -> None:
@@ -219,6 +221,17 @@ class CogitumApp(App):
             self._handle_command(text, feed)
             return
 
+        # If agent is running, queue the message for next turn
+        if self._agent_task and not self._agent_task.done():
+            self._pending_messages.append(text)
+            feed.append_system(f"queued: {text[:60]}{'…' if len(text) > 60 else ''}", "queued")
+            return
+
+        # Normal flow continues below
+        if False:
+            pass  # placeholder to keep elif chain valid
+            return
+
         # Don't allow concurrent runs
         if self._agent_task and not self._agent_task.done():
             feed.append_system("agent is busy — press Esc to cancel", "busy")
@@ -257,6 +270,8 @@ class CogitumApp(App):
         tool_cards: dict[str, ToolCallCard] = {}
         # Map call_id → AgentToolCall event for rich card creation
         tool_calls_data: dict[str, AgentToolCall] = {}
+        # Track streamed text for approximate token counting
+        self._streamed_text = ""
 
         async def drain_queue() -> None:
             nonlocal agent_block, thinking_block, waiting
@@ -275,6 +290,7 @@ class CogitumApp(App):
                     if agent_block is None:
                         agent_block = feed.append_agent()
                     agent_block.append_delta(event.delta)
+                    self._streamed_text += event.delta
 
                 elif isinstance(event, AgentThinking):
                     # Stop waiting animation on first thinking
@@ -286,18 +302,34 @@ class CogitumApp(App):
                     thinking_block.append_delta(event.delta)
 
                 elif isinstance(event, AgentToolCall):
+                    # Stop waiting on first tool call
+                    if waiting is not None:
+                        waiting.stop()
+                        waiting = None
                     # Finish thinking block if open
                     if thinking_block is not None:
                         thinking_block.finish()
                         thinking_block = None
                     # New turn → new agent block next time
                     agent_block = None
-                    # Show a pending card (will be replaced with proper card on result)
-                    card = feed.append_tool_call(
-                        event.tool_name, event.arguments, event.call_id
-                    )
-                    tool_cards[event.call_id] = card
-                    tool_calls_data[event.call_id] = event
+
+                    if getattr(event, "preliminary", False):
+                        # Show "preparing..." card immediately
+                        card = feed.append_tool_call(
+                            event.tool_name, {}, event.call_id, preparing=True
+                        )
+                        tool_cards[event.call_id] = card
+                    else:
+                        # Full tool call — update existing card or create new
+                        existing = tool_cards.get(event.call_id)
+                        if existing:
+                            existing.set_arguments(event.arguments)
+                        else:
+                            card = feed.append_tool_call(
+                                event.tool_name, event.arguments, event.call_id
+                            )
+                            tool_cards[event.call_id] = card
+                        tool_calls_data[event.call_id] = event
 
                 elif isinstance(event, AgentToolResult):
                     card = tool_cards.get(event.call_id)
@@ -326,24 +358,30 @@ class CogitumApp(App):
                     if agent_block is not None:
                         agent_block.finish_streaming()
                     usage = event.usage
-                    if usage:
-                        feed.append_system(
-                            f"done · {event.turns} turn(s) · "
-                            f"in={usage.input_tokens} out={usage.output_tokens}",
-                            "usage",
+                    # Approximate token count from streamed text if no usage reported
+                    approx_out = len(self._streamed_text) // 4 if not usage else 0
+                    approx_in = len(user_message) // 4 if not usage else 0
+
+                    in_tokens = usage.input_tokens if usage else approx_in
+                    out_tokens = usage.output_tokens if usage else approx_out
+
+                    feed.append_system(
+                        f"done · {event.turns} turn(s) · "
+                        f"in≈{in_tokens} out≈{out_tokens}",
+                        "usage",
+                    )
+                    # Update inspector
+                    try:
+                        inspector = self.query_one("#inspector-widget", Inspector)
+                        inspector.update_state(
+                            tokens_in=inspector.state.tokens_in + in_tokens,
+                            tokens_out=inspector.state.tokens_out + out_tokens,
+                            tokens_used=inspector.state.tokens_used + in_tokens + out_tokens,
+                            turns=inspector.state.turns + event.turns,
+                            messages=len(self._history),
                         )
-                        # Update inspector
-                        try:
-                            inspector = self.query_one("#inspector-widget", Inspector)
-                            inspector.update_state(
-                                tokens_in=inspector.state.tokens_in + usage.input_tokens,
-                                tokens_out=inspector.state.tokens_out + usage.output_tokens,
-                                tokens_used=inspector.state.tokens_used + usage.input_tokens + usage.output_tokens,
-                                turns=inspector.state.turns + event.turns,
-                                messages=len(self._history),
-                            )
-                        except Exception:
-                            pass
+                    except Exception:
+                        pass
                     self._set_composer_enabled(True)
                     return
 
@@ -398,6 +436,15 @@ class CogitumApp(App):
             # Update history with new messages
             if not agent_fut.cancelled():
                 self._history = agent_fut.result()
+
+            # Process any queued messages
+            if self._pending_messages:
+                next_msg = self._pending_messages.pop(0)
+                self._set_composer_enabled(False)
+                self._agent_task = asyncio.create_task(
+                    self._run_agent(next_msg, feed)
+                )
+                return
 
         except asyncio.CancelledError:
             agent_fut.cancel()
