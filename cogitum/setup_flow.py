@@ -156,32 +156,31 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
         width: 78; padding: 1 2;
         background: #161618; border: round #7A5A1A;
     }
-    #key-title  { color: #F5C24A; text-style: bold; height: 1; }
-    #key-sub    { color: #9C957D; height: 1; padding-bottom: 1; }
-    .row        { height: 3; padding: 0 0 1 0; }
-    .row Label  { width: 18; color: #9C957D; padding-top: 1; }
-    .row Input  {
-        width: 1fr; background: #1C1C1F; border: round #2A2620;
-        color: #E6E1CF;
+    #key-title  { color: #F5C24A; text-style: bold; height: 1; margin-bottom: 1; }
+    #key-sub    { color: #9C957D; height: 1; margin-bottom: 1; }
+    .krow       { height: 4; margin-bottom: 0; }
+    .krow Label { width: 18; color: #9C957D; content-align: left middle; height: 100%; padding: 0 1 0 0; }
+    .krow Input {
+        width: 1fr; background: #1C1C1F; border: tall #2A2620;
+        color: #E6E1CF; height: 3;
     }
-    .row Input:focus { border: round #A8732D; }
-    #backend-row { height: 5; padding-bottom: 1; }
-    #backend-row Label { padding-top: 0; }
-    #backend-row Vertical { width: 1fr; }
-    .backend-opt {
-        height: 1; color: #9C957D;
+    .krow Input:focus { border: tall #A8732D; }
+    #backend-section { height: auto; margin: 1 0; }
+    #backend-label { color: #9C957D; height: 1; margin-bottom: 1; }
+    .be-option {
+        height: 2; padding: 0 1; margin-bottom: 0;
+        color: #9C957D;
     }
-    .backend-opt.selected { color: #F5C24A; text-style: bold; }
-    #key-hint { color: #7A5A1A; padding: 1 0; }
-    #key-foot { height: 3; align: right middle; }
+    .be-option:hover { background: #1C1C1F; }
+    .be-option.selected { color: #F5C24A; background: #1A1610; }
+    #key-hint { color: #7A5A1A; height: auto; margin: 1 0; }
+    #key-foot { height: 3; align: right middle; margin-top: 1; }
     #key-foot Button { margin-left: 1; }
     """
 
     BINDINGS = [
         Binding("escape", "cancel", "cancel"),
         Binding("ctrl+s", "save", "save"),
-        Binding("up", "backend_prev", "", show=False),
-        Binding("down", "backend_next", "", show=False),
     ]
 
     BACKENDS = (
@@ -207,24 +206,23 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
             yield Static(Text(f"Add API key — {self._pname}", style=f"bold {GOLD_HI}"), id="key-title")
             yield Static(Text("Pick a storage backend, then paste the key.", style=TXT_DIM), id="key-sub")
 
-            with Horizontal(classes="row"):
+            with Horizontal(classes="krow"):
                 yield Label("Label")
                 yield Input(value="primary", id="key-label", placeholder="primary, team-2, …")
-            with Horizontal(classes="row"):
+            with Horizontal(classes="krow"):
                 yield Label("Env var name")
                 yield Input(value=self._suggested_env, id="key-env")
-            with Horizontal(classes="row"):
+            with Horizontal(classes="krow"):
                 yield Label("Secret value")
                 yield Input(password=True, id="key-secret",
                             placeholder="paste key (hidden — never logged)")
 
-            with Horizontal(id="backend-row"):
-                yield Label("Storage")
-                with Vertical():
-                    for i, (bid, blabel) in enumerate(self.BACKENDS):
-                        cls = "backend-opt selected" if i == 0 else "backend-opt"
-                        yield Static(self._render_backend(i, bid, blabel),
-                                     classes=cls, id=f"be-{bid}")
+            with Vertical(id="backend-section"):
+                yield Static(Text("Storage backend", style=GOLD_DIM), id="backend-label")
+                for i, (bid, blabel) in enumerate(self.BACKENDS):
+                    cls = "be-option selected" if i == 0 else "be-option"
+                    yield Static(self._render_backend(i, bid, blabel),
+                                 classes=cls, id=f"be-{bid}")
 
             yield Static(self._hint(), id="key-hint")
 
@@ -249,6 +247,20 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
             else:
                 w.remove_class("selected")
         self.query_one("#key-hint", Static).update(self._hint())
+
+    def on_click(self, event) -> None:
+        """Handle clicks on backend options."""
+        target = event.widget
+        if target is None:
+            return
+        tid = target.id or ""
+        if tid.startswith("be-"):
+            # Find which backend was clicked
+            for i, (bid, _) in enumerate(self.BACKENDS):
+                if tid == f"be-{bid}":
+                    self._backend_idx = i
+                    self._refresh_backends()
+                    break
 
     def _hint(self) -> Text:
         backend = self.BACKENDS[self._backend_idx][0]
@@ -275,13 +287,7 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
         except Exception:
             return self._suggested_env
 
-    def action_backend_prev(self) -> None:
-        self._backend_idx = (self._backend_idx - 1) % len(self.BACKENDS)
-        self._refresh_backends()
 
-    def action_backend_next(self) -> None:
-        self._backend_idx = (self._backend_idx + 1) % len(self.BACKENDS)
-        self._refresh_backends()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -436,14 +442,14 @@ class CustomProviderModal(ModalScreen[ProviderPreset | None]):
     DEFAULT_CSS = """
     CustomProviderModal { align: center middle; background: rgba(0,0,0,0.55); }
     #cp-shell { width: 78; padding: 1 2; background: #161618; border: round #7A5A1A; }
-    #cp-title { color: #F5C24A; text-style: bold; height: 1; padding-bottom: 1; }
-    .row { height: 3; padding: 0 0 1 0; }
-    .row Label { width: 16; color: #9C957D; padding-top: 1; }
-    .row Input {
-        width: 1fr; background: #1C1C1F; border: round #2A2620; color: #E6E1CF;
+    #cp-title { color: #F5C24A; text-style: bold; height: 1; margin-bottom: 1; }
+    .cprow { height: 4; margin-bottom: 0; }
+    .cprow Label { width: 16; color: #9C957D; content-align: left middle; height: 100%; padding: 0 1 0 0; }
+    .cprow Input {
+        width: 1fr; background: #1C1C1F; border: tall #2A2620; color: #E6E1CF; height: 3;
     }
-    .row Input:focus { border: round #A8732D; }
-    #cp-foot { height: 3; align: right middle; }
+    .cprow Input:focus { border: tall #A8732D; }
+    #cp-foot { height: 3; align: right middle; margin-top: 1; }
     #cp-foot Button { margin-left: 1; }
     """
 
@@ -452,20 +458,20 @@ class CustomProviderModal(ModalScreen[ProviderPreset | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="cp-shell"):
             yield Static(Text("Custom provider", style=f"bold {GOLD_HI}"), id="cp-title")
-            with Horizontal(classes="row"):
+            with Horizontal(classes="cprow"):
                 yield Label("ID")
                 yield Input(id="cp-id", placeholder="lowercase-slug, e.g. my-vllm")
-            with Horizontal(classes="row"):
+            with Horizontal(classes="cprow"):
                 yield Label("Name")
                 yield Input(id="cp-name", placeholder="display name")
-            with Horizontal(classes="row"):
+            with Horizontal(classes="cprow"):
                 yield Label("Format")
                 yield Input(id="cp-format", value="openai_compat",
                             placeholder="openai_compat | anthropic_native")
-            with Horizontal(classes="row"):
+            with Horizontal(classes="cprow"):
                 yield Label("Base URL")
                 yield Input(id="cp-url", placeholder="https://… /v1")
-            with Horizontal(classes="row"):
+            with Horizontal(classes="cprow"):
                 yield Label("Auth")
                 yield Input(id="cp-auth", value="bearer",
                             placeholder="bearer | x_api_key | header_custom")
@@ -677,9 +683,8 @@ class SetupScreen(Screen):
     .card-title {
         color: #F5C24A; text-style: bold; padding-bottom: 1;
     }
-    .card-actions { height: 3; align: left middle; padding-top: 1; }
-    .card-actions Button { margin-right: 1; min-width: 16; content-align: center middle; text-align: center; }
-    Button { content-align: center middle; text-align: center; }
+    .card-actions { height: auto; align: left middle; padding-top: 1; }
+    .card-actions Button { margin-right: 1; }
     """
 
     BINDINGS = [
