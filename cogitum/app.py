@@ -211,6 +211,10 @@ class CogitumApp(App):
             )
 
     def action_open_models(self) -> None:
+        # Always reload mesh from disk so newly-added providers/models
+        # appear immediately (user may have edited providers.toml or
+        # used /setup since last picker open).
+        self._load_mesh_async()
         if self.mesh is None or not self.mesh.providers:
             self.query_one("#feed-pane", Feed).append_error(
                 "No mesh available — configure providers first (Ctrl+, or /setup)."
@@ -223,7 +227,13 @@ class CogitumApp(App):
         self.push_screen(SetupScreen(), self._on_setup_close)
 
     def _on_setup_close(self, _result: object) -> None:
+        # Reload mesh + settings + agent so providers/models/default_model
+        # changes from the wizard take effect immediately.
         self._load_mesh_async()
+        self.query_one("#feed-pane", Feed).append_system(
+            f"config reloaded — {len(self.mesh.list_resolved()) if self.mesh else 0} models available",
+            "setup closed",
+        )
 
     def _on_model_picked(self, resolved: ResolvedModel | None) -> None:
         if resolved is None:

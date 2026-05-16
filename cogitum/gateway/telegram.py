@@ -269,6 +269,7 @@ class CogitumBot:
             {"command": "tools", "description": "🔧 List available tools"},
             {"command": "models", "description": "🤖 Pick model"},
             {"command": "model", "description": "🔄 Switch model directly"},
+            {"command": "reload", "description": "♻️ Reload providers/models from disk"},
             {"command": "stop", "description": "⏹ Cancel generation"},
             {"command": "help", "description": "❓ All commands"},
         ])
@@ -293,6 +294,70 @@ class CogitumBot:
         self._running = False
         for session in self.sessions.values():
             session.cancel()
+
+    # ── Mesh reload ──────────────────────────────────────────────────────────
+
+    async def _reload_mesh(self, *, silent: bool = False, chat_id: int | None = None) -> None:
+        """Re-read providers.toml and rebuild the mesh in place.
+
+        Preserves the current model if still available; falls back to first
+        resolved model otherwise. Updates self.agent.mesh and cfg.model so the
+        next request uses the fresh mesh.
+        """
+        old_model = self.agent.cfg.model if self.agent else None
+        old_mesh = self.mesh
+        try:
+            new_mesh = load_mesh()
+        except Exception as e:  # noqa: BLE001
+            log.exception("mesh reload failed")
+            if not silent and chat_id is not None:
+                await self.api.send_message(
+                    chat_id, escape_md(f"❌ reload failed: {e}")
+                )
+            return
+
+        if not new_mesh.providers:
+            if not silent and chat_id is not None:
+                await self.api.send_message(
+                    chat_id, escape_md("No providers in providers.toml. Run `cog setup`.")
+                )
+            return
+
+        # Pick a model: keep current if still available, else first resolved
+        if old_model and new_mesh.resolve(old_model):
+            current_model = old_model
+        else:
+            pairs = new_mesh.list_resolved()
+            current_model = pairs[0].qualified_id if pairs else None
+
+        if not current_model:
+            if not silent and chat_id is not None:
+                await self.api.send_message(
+                    chat_id, escape_md("No models available after reload.")
+                )
+            return
+
+        # Swap mesh on agent + close old one
+        self.mesh = new_mesh
+        if self.agent is not None:
+            self.agent.mesh = new_mesh
+            self.agent.cfg.model = current_model
+        if old_mesh is not None and old_mesh is not new_mesh:
+            try:
+                await old_mesh.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+
+        if not silent and chat_id is not None:
+            n_models = len(new_mesh.list_resolved())
+            n_providers = len(new_mesh.providers)
+            await self.api.send_message(
+                chat_id,
+                f"🔄 *Reloaded*\n"
+                f"Providers: `{n_providers}`\n"
+                f"Models: `{n_models}`\n"
+                f"Current: `{escape_md(current_model)}`",
+            )
 
     # ── Polling ──────────────────────────────────────────────────────────────
 
@@ -399,6 +464,7 @@ class CogitumBot:
                 "/title — rename session\n"
                 "/tools — list tools\n"
                 "/models — pick model\n"
+                "/reload — reload providers/models\n"
                 "/stop — cancel generation\n"
                 "/help — all commands"
             )
@@ -495,10 +561,17 @@ class CogitumBot:
             )
 
         elif cmd == "models":
+            # Reload mesh from disk so newly-added providers/models show up
+            await self._reload_mesh(silent=True)
             if not self.mesh:
                 await self.api.send_message(chat_id, escape_md("Mesh not loaded."))
                 return
             pairs = self.mesh.list_resolved()
+            if not pairs:
+                await self.api.send_message(
+                    chat_id, escape_md("No models available. Run `cog setup` to add providers.")
+                )
+                return
             buttons = []
             for r in pairs[:12]:
                 display = r.model.display or r.model.id
@@ -508,11 +581,20 @@ class CogitumBot:
                 }])
             markup = {"inline_keyboard": buttons}
             current = self.agent.cfg.model if self.agent else "—"
+            total = len(pairs)
+            shown = min(12, total)
+            header = f"Current: `{escape_md(current or '—')}`"
+            if total > shown:
+                header += f"\n_{escape_md(f'showing {shown} of {total}')}_"
             await self.api.send_message(
                 chat_id,
-                f"Current: `{escape_md(current or '—')}`\nPick a model:",
+                f"{header}\nPick a model:",
                 reply_markup=markup,
             )
+
+        elif cmd == "reload":
+            # Manual mesh reload after editing providers.toml
+            await self._reload_mesh(silent=False, chat_id=chat_id)
 
         elif cmd == "model":
             if not rest:
@@ -550,6 +632,7 @@ class CogitumBot:
                 "/tools — list available tools\n"
                 "/models — pick model \\(keyboard\\)\n"
                 "/model `<id>` — switch model directly\n"
+                "/reload — reload providers/models from disk\n"
                 "/stop — cancel current generation\n"
                 "/help — this message"
             )
