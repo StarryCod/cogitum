@@ -617,26 +617,7 @@ class CogitumBot:
             )
             session.session_id = meta.id
 
-        # Status message (will be edited with tool calls)
-        status_msg_id: int | None = None
-        status_lines: list[str] = []
         _last_typing = time.time()
-
-        async def send_status(line: str) -> None:
-            nonlocal status_msg_id, status_lines, _last_typing
-            status_lines.append(line)
-            text = "\n".join(status_lines[-8:])  # show last 8 lines
-            if status_msg_id is None:
-                resp = await self.api.send_message(chat_id, text, parse_mode="MarkdownV2")
-                if resp.get("ok"):
-                    status_msg_id = resp["result"]["message_id"]
-            else:
-                await self.api.edit_message(chat_id, status_msg_id, text, parse_mode="MarkdownV2")
-            # Refresh typing indicator
-            now = time.time()
-            if now - _last_typing > 4:
-                await self.api.send_typing(chat_id)
-                _last_typing = now
 
         async def keep_typing() -> None:
             """Background task to keep 'typing...' indicator alive."""
@@ -670,10 +651,47 @@ class CogitumBot:
         thinking_buf = ""
         text_buf = ""
         tool_results_shown = 0
-        _thinking_sent = False
+
+        # Message IDs for editing
+        thinking_msg_id: int | None = None
+        status_msg_id: int | None = None
+        status_lines: list[str] = []
+
+        async def _send_or_edit_thinking(buf: str) -> None:
+            """Send or update thinking spoiler message."""
+            nonlocal thinking_msg_id
+            if not buf.strip() or not self.config.show_thinking:
+                return
+            formatted = format_thinking(buf)
+            if thinking_msg_id is None:
+                resp = await self.api.send_message(chat_id, formatted)
+                if resp.get("ok"):
+                    thinking_msg_id = resp["result"]["message_id"]
+            else:
+                await self.api.edit_message(chat_id, thinking_msg_id, formatted)
+
+        async def _send_or_edit_status(line: str) -> None:
+            """Send or update tool status message."""
+            nonlocal status_msg_id, status_lines, _last_typing
+            status_lines.append(line)
+            text = "\n".join(status_lines[-10:])
+            if status_msg_id is None:
+                resp = await self.api.send_message(chat_id, text, parse_mode="MarkdownV2")
+                if resp.get("ok"):
+                    status_msg_id = resp["result"]["message_id"]
+            else:
+                await self.api.edit_message(chat_id, status_msg_id, text, parse_mode="MarkdownV2")
+            # Refresh typing
+            now = time.time()
+            if now - _last_typing > 4:
+                await self.api.send_typing(chat_id)
+                _last_typing = now
 
         try:
-            # Drain events until done
+            # Drain events until done — mirror TUI order:
+            # 1. Thinking (spoiler, updated live)
+            # 2. Tool calls (status message, edited)
+            # 3. Final response (separate message)
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=180)
@@ -682,26 +700,22 @@ class CogitumBot:
 
                 if isinstance(event, AgentThinking):
                     thinking_buf += event.delta
-                    # Send thinking as spoiler inline (once, when first tool call comes or at end)
 
                 elif isinstance(event, AgentText):
                     text_buf += event.delta
 
                 elif isinstance(event, AgentToolCall):
-                    # Send accumulated thinking before first tool call
-                    if not _thinking_sent and thinking_buf.strip() and self.config.show_thinking:
-                        thinking_msg = format_thinking(thinking_buf)
-                        await self.api.send_message(chat_id, thinking_msg)
-                        _thinking_sent = True
-                        thinking_buf = ""
+                    # Flush thinking before first tool call
+                    if thinking_buf.strip() and thinking_msg_id is None:
+                        await _send_or_edit_thinking(thinking_buf)
                     if not event.preliminary and self.config.show_tool_calls:
                         line = format_tool_call(event.tool_name, event.arguments)
-                        await send_status(line)
+                        await _send_or_edit_status(line)
 
                 elif isinstance(event, AgentToolResult):
                     if self.config.show_tool_calls:
                         line = format_tool_result(event.tool_name, event.result, event.error)
-                        await send_status(line)
+                        await _send_or_edit_status(line)
                     tool_results_shown += 1
                     # Check if result contains a file path (screenshot, etc.)
                     if "screenshot saved to" in event.result.lower():
@@ -722,12 +736,11 @@ class CogitumBot:
                     )
                     break
 
-            # Send remaining thinking BEFORE main response (if not sent yet)
-            if not _thinking_sent and thinking_buf.strip() and self.config.show_thinking:
-                thinking_msg = format_thinking(thinking_buf)
-                await self.api.send_message(chat_id, thinking_msg)
+            # If thinking was never sent (no tool calls happened), send it now
+            if thinking_buf.strip() and thinking_msg_id is None and self.config.show_thinking:
+                await _send_or_edit_thinking(thinking_buf)
 
-            # Send main response
+            # Send main response (always last, like in TUI)
             if text_buf.strip():
                 formatted = markdown_to_tg(text_buf.strip())
                 chunks = split_message(formatted)
