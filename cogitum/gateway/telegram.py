@@ -321,6 +321,14 @@ class CogitumBot:
         old_model = self.agent.cfg.model if self.agent else None
         old_mesh = self.mesh
 
+        # Re-read secrets.env so freshly-saved keys (via TUI wizard or
+        # `cog secret set`) are picked up without a daemon restart.
+        try:
+            from ..core.llm.secrets_env import load_secrets_into_environ
+            load_secrets_into_environ(override=False)
+        except Exception:  # noqa: BLE001
+            pass
+
         # Auto-discover models for every provider first
         try:
             refresh = await refresh_all_providers(timeout=6.0, only_empty=False)

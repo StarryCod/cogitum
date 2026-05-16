@@ -230,16 +230,21 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
                "Available models depend on your tier — Refresh after adding "
                "the key to fetch what's actually accessible."),
         models=(
-            # Minimal seed — only models confirmed available on the free
-            # / standard tier. Auto-discovery (Refresh) fills in the rest
-            # based on the user's actual API access.
-            ModelPreset("llama-3.1-8b", "Llama 3.1 8B",
+            # Confirmed via live `/v1/models` curl 2026-05.
+            # Auto-discovery (Refresh after key save) re-syncs this list.
+            ModelPreset("llama3.1-8b", "Llama 3.1 8B",
                         ("cb-llama-8b",), ("text", "tools"),
                         128_000, 8_000),
             ModelPreset("qwen-3-235b-a22b-instruct-2507",
                         "Qwen 3 235B Instruct",
                         ("cb-qwen3-235",), ("text", "tools"),
                         128_000, 32_000),
+            ModelPreset("gpt-oss-120b", "GPT-OSS 120B",
+                        ("cb-oss-120b",), ("text", "tools", "reasoning"),
+                        131_000, 32_000),
+            ModelPreset("zai-glm-4.7", "GLM 4.7 (Cerebras)",
+                        ("cb-glm",), ("text", "tools"),
+                        128_000, 16_000),
         ),
     ),
     ProviderPreset(

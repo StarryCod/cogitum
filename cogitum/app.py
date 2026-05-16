@@ -131,6 +131,13 @@ class CogitumApp(App):
 
     def _load_mesh_async(self) -> None:
         feed = self.query_one("#feed-pane", Feed)
+        # Always re-read secrets.env so freshly-saved keys (from setup wizard)
+        # are picked up without requiring a TUI restart.
+        try:
+            from .core.llm.secrets_env import load_secrets_into_environ
+            load_secrets_into_environ(override=False)
+        except Exception:  # noqa: BLE001
+            pass
         # Close old mesh if reloading (prevents httpx client leaks)
         old_mesh = getattr(self, "mesh", None)
         if old_mesh is not None:

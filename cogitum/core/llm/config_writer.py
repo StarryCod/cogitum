@@ -156,6 +156,17 @@ class ConfigWriter:
         m["max_output_tokens"] = int(max_output_tokens)
         models[model_id] = m
 
+    def remove_model(self, pid: str, model_id: str) -> bool:
+        """Remove a single model from a provider. Returns True if removed."""
+        p = self._provider_table(pid)
+        models = p.get("models")
+        if not isinstance(models, Table):
+            return False
+        if model_id not in models:
+            return False
+        del models[model_id]
+        return True
+
     # ---- save ---------------------------------------------------------
 
     def save(self) -> None:

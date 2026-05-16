@@ -23,12 +23,9 @@ async def refresh_all_providers(
 ) -> dict[str, dict[str, Any]]:
     """Fetch /v1/models for every provider that has a usable key.
 
-    Args:
-        timeout: per-provider HTTP timeout in seconds
-        only_empty: if True, skip providers that already have models
-
-    Returns:
-        Map of pid -> {status: 'ok'|'skipped'|'error', count: int, message: str}
+    Network calls run in parallel (fast). The TOML write phase runs
+    sequentially against a single shared ConfigWriter to avoid race
+    conditions where parallel writers would clobber each other's edits.
     """
     writer = ConfigWriter()
     providers = writer.providers()
@@ -36,14 +33,14 @@ async def refresh_all_providers(
         return {}
 
     results: dict[str, dict[str, Any]] = {}
-    tasks = []
+    discoverable: list[tuple[str, str, str]] = []  # (pid, base_url, secret_ref)
+
     for pid, raw in providers.items():
         if not raw.get("enabled", True):
             results[pid] = {"status": "skipped", "count": 0,
                            "message": "disabled"}
             continue
 
-        # Find first usable key
         keys = raw.get("keys") or {}
         if not keys:
             results[pid] = {"status": "skipped", "count": 0,
@@ -56,13 +53,11 @@ async def refresh_all_providers(
                            "message": "no secret_ref"}
             continue
 
-        # Skip OAuth providers (subscription tokens can't list models)
         if secret_ref.startswith("oauth:"):
             results[pid] = {"status": "skipped", "count": 0,
                            "message": "oauth subscription"}
             continue
 
-        # Skip anthropic-native (no /v1/models, hardcoded list is fine)
         if raw.get("format") == "anthropic_native":
             results[pid] = {"status": "skipped", "count": 0,
                            "message": "anthropic_native (no /v1/models)"}
@@ -80,13 +75,68 @@ async def refresh_all_providers(
                            "message": "no base_url"}
             continue
 
-        tasks.append(_refresh_one(pid, base_url, secret_ref, timeout, results))
+        discoverable.append((pid, base_url, secret_ref))
 
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    # Phase 1: parallel network fetch — gather raw model lists
+    fetch_tasks = [
+        _fetch_one(pid, base_url, secret_ref, timeout)
+        for pid, base_url, secret_ref in discoverable
+    ]
+    fetched = await asyncio.gather(*fetch_tasks, return_exceptions=False)
 
-    # Persist any model additions
-    if any(r.get("status") == "ok" for r in results.values()):
+    # Phase 2: serialised TOML edits against the shared writer
+    any_changed = False
+    for pid, status, models, message in fetched:
+        if status != "ok":
+            results[pid] = {"status": status, "count": 0, "message": message}
+            continue
+
+        raw = writer.provider(pid)
+        if not raw:
+            results[pid] = {"status": "error", "count": 0,
+                           "message": "provider vanished mid-flight"}
+            continue
+
+        existing = raw.get("models") or {}
+        live_ids = {m.get("model_id") for m in models if m.get("model_id")}
+        added = 0
+        for m in models:
+            mid = m.get("model_id")
+            if not mid or mid in existing:
+                continue
+            writer.add_model(
+                pid, mid,
+                display=m.get("display", mid),
+                capabilities=m.get("capabilities", ["text", "tools"]),
+                context_window=m.get("context_window", 128000),
+                max_output_tokens=m.get("max_output_tokens", 16000),
+            )
+            added += 1
+
+        # Prune phantom models that the live API does not actually serve.
+        pruned = 0
+        for mid in list(existing.keys()):
+            if mid not in live_ids:
+                try:
+                    writer.remove_model(pid, mid)
+                    pruned += 1
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if added or pruned:
+            any_changed = True
+
+        msg_parts = [f"added {added} new"]
+        if pruned:
+            msg_parts.append(f"pruned {pruned} stale")
+        msg_parts.append(f"({len(live_ids)} total)")
+        results[pid] = {
+            "status": "ok",
+            "count": added,
+            "message": " · ".join(msg_parts),
+        }
+
+    if any_changed:
         try:
             writer.save()
         except Exception as e:  # noqa: BLE001
@@ -95,63 +145,27 @@ async def refresh_all_providers(
     return results
 
 
-async def _refresh_one(
+async def _fetch_one(
     pid: str,
     base_url: str,
     secret_ref: str,
     timeout: float,
-    results: dict[str, dict[str, Any]],
-) -> None:
+) -> tuple[str, str, list[dict[str, Any]], str]:
+    """Returns (pid, status, models, message). Pure I/O, no writes."""
     try:
         api_key = resolve_secret_ref(secret_ref)
     except Exception as e:  # noqa: BLE001
-        results[pid] = {"status": "error", "count": 0,
-                       "message": f"resolve failed: {e}"}
-        return
+        return pid, "error", [], f"resolve failed: {e}"
+
     if not api_key:
-        results[pid] = {"status": "skipped", "count": 0,
-                       "message": "key empty (env var missing?)"}
-        return
+        return pid, "skipped", [], "key empty (env var missing?)"
 
     try:
         models = await discover_models(base_url, api_key, timeout=timeout)
     except Exception as e:  # noqa: BLE001
-        results[pid] = {"status": "error", "count": 0,
-                       "message": f"discovery error: {e}"}
-        return
+        return pid, "error", [], f"discovery error: {e}"
 
     if not models:
-        results[pid] = {"status": "error", "count": 0,
-                       "message": "endpoint returned 0 models"}
-        return
+        return pid, "error", [], "endpoint returned 0 models"
 
-    # Merge into config — only add NEW model ids, don't clobber existing
-    writer = ConfigWriter()
-    raw = writer.provider(pid)
-    if not raw:
-        results[pid] = {"status": "error", "count": 0,
-                       "message": "provider vanished mid-flight"}
-        return
-
-    existing = raw.get("models") or {}
-    added = 0
-    for m in models:
-        mid = m.get("model_id")
-        if not mid or mid in existing:
-            continue
-        writer.add_model(
-            pid, mid,
-            display=m.get("display", mid),
-            capabilities=m.get("capabilities", ["text", "tools"]),
-            context_window=m.get("context_window", 128000),
-            max_output_tokens=m.get("max_output_tokens", 16000),
-        )
-        added += 1
-
-    writer.save()
-    total = len(existing) + added
-    results[pid] = {
-        "status": "ok",
-        "count": added,
-        "message": f"added {added} new ({total} total)",
-    }
+    return pid, "ok", models, ""
