@@ -17,7 +17,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from ..core.sessions import SessionMeta, get_store
-from ..design import BRONZE, GOLD, GOLD_DIM, GOLD_HI, MUTED, TXT, TXT_DIM
+from ..design import BRONZE, GOLD, GOLD_HI, MUTED, TXT, TXT_DIM
 
 
 class SessionItem(Static):

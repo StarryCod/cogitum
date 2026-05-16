@@ -1,7 +1,6 @@
 """Tests for refresh_all_providers — auto-discovery for all providers at once."""
 from __future__ import annotations
 
-import asyncio
 import pytest
 
 

@@ -13,7 +13,6 @@ Pure functions — no state, no side effects.
 
 from __future__ import annotations
 
-import copy
 from typing import Any
 
 

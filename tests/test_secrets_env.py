@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import pytest
 
 
 def test_save_and_load_secret(tmp_path, monkeypatch):
@@ -129,14 +128,13 @@ def test_load_handles_missing_file(tmp_path, monkeypatch):
 def test_wizard_save_persists_to_disk(tmp_path, monkeypatch):
     """Integration: KeyEntryModal env-backend save → secrets.env populated."""
     monkeypatch.setenv("COGITUM_CONFIG_DIR", str(tmp_path))
-    import importlib, sys
+    import sys
     for mod in list(sys.modules):
         if mod.startswith("cogitum"):
             sys.modules.pop(mod, None)
 
     from textual.app import App
-    from cogitum.setup_flow import KeyEntryModal, KeyEntryResult
-    from cogitum.core.llm.secrets_env import load_secrets_into_environ
+    from cogitum.setup_flow import KeyEntryModal
     from textual.widgets import Input
 
     captured = {}

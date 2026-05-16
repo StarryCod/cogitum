@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import ClassVar, Literal
 
 from rich.markdown import Markdown
 from rich.text import Text
@@ -36,7 +36,6 @@ from ..design import (
     TXT_DIM,
     BG,
     BG_SOFT,
-    SURFACE,
 )
 
 EntryKind = Literal["user", "agent", "error", "system"]
@@ -47,7 +46,7 @@ EntryKind = Literal["user", "agent", "error", "system"]
 class MessageViewer(ModalScreen):
     """Read-only popup for selecting and copying message text."""
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "dismiss", "close"),
         Binding("ctrl+c", "copy_selected", "copy", priority=True),
         Binding("ctrl+a", "select_all", "select all", priority=True),
@@ -278,7 +277,7 @@ class ToolCallCard(Static):
     DEFAULT_CLASSES = "feed-entry feed-agent"
 
     # Tools that get special card styling
-    _SPECIAL_TOOLS = {
+    _SPECIAL_TOOLS: ClassVar[dict[str, tuple[str, str, str]]] = {
         "delegate_task": ("⚔", "DELEGATE", "Spawning sub-agents…"),
         "cogit": ("◆", "COGIT", "Checkpoint…"),
         "memory": ("◈", "MEMORY", "Updating memory…"),
@@ -506,7 +505,13 @@ class ToolCallCard(Static):
             out.append(f"    … +{len(self._arguments) - 4} more\n", style=MUTED)
 
     def _render_result(self, out: Text) -> None:
-        """Render tool result."""
+        """Render tool result.
+
+        We show up to ~12 lines of preview (was 4) — enough to see most
+        terminal/tool outputs without forcing the user to dig into the
+        message viewer for trivial calls. Truncated lines get a hint with
+        the full count so it's obvious there's more.
+        """
         color = RUST if self._error else COPPER
         glyph = "✗" if self._error else "✓"
         if self._tool_name in self._SPECIAL_TOOLS:
@@ -517,21 +522,25 @@ class ToolCallCard(Static):
 
         # Compact result preview
         result_lines = self._result.splitlines() if self._result else []
+        max_preview = 12  # was 4 — too aggressive, hid useful output
         if not result_lines:
             out.append("done\n", style=color)
         elif len(result_lines) == 1:
-            line = result_lines[0][:70]
+            line = result_lines[0][:80]
             out.append(line + "\n", style=TXT_DIM)
         else:
-            out.append(result_lines[0][:70] + "\n", style=TXT_DIM)
-            for line in result_lines[1:4]:
+            out.append(result_lines[0][:80] + "\n", style=TXT_DIM)
+            for line in result_lines[1:max_preview]:
                 prefix = "  │ " if self._tool_name in self._SPECIAL_TOOLS else "    "
                 out.append(prefix, style=COPPER)
-                out.append(f"  {line[:68]}\n", style=TXT_DIM)
-            if len(result_lines) > 4:
+                out.append(f"  {line[:78]}\n", style=TXT_DIM)
+            if len(result_lines) > max_preview:
                 prefix = "  │ " if self._tool_name in self._SPECIAL_TOOLS else "    "
                 out.append(prefix, style=COPPER)
-                out.append(f"  … +{len(result_lines) - 4} lines\n", style=MUTED)
+                out.append(
+                    f"  … +{len(result_lines) - max_preview} more line(s)\n",
+                    style=MUTED,
+                )
 
     def set_arguments(self, arguments: dict) -> None:
         """Update arguments (e.g. after preliminary card gets full args)."""
@@ -606,7 +615,7 @@ class WaitingIndicator(Static):
     """Animated waiting indicator while model is thinking (TTFS)."""
     DEFAULT_CLASSES = "feed-entry feed-waiting"
 
-    FRAMES = [
+    FRAMES: ClassVar[list[str]] = [
         "◇ · · ·",
         "· ◆ · ·",
         "· · ◆ ·",
@@ -616,7 +625,7 @@ class WaitingIndicator(Static):
     ]
 
     # Friendly status messages cycled during retry
-    _RETRY_LABELS = [
+    _RETRY_LABELS: ClassVar[list[str]] = [
         "thinking…",
         "connecting…",
         "preparing…",

@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from .types import OAuthCredentials
+import logging
+
+log = logging.getLogger(__name__)
 
 
 _CONFIG_DIR = Path(
@@ -58,7 +61,7 @@ def get(provider_id: str) -> OAuthCredentials | None:
         return None
     try:
         return OAuthCredentials.from_dict(entry)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 

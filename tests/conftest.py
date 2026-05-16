@@ -5,8 +5,6 @@ COGITUM_CONFIG_DIR at a tmp directory before any cogitum import.
 """
 from __future__ import annotations
 
-import os
-import shutil
 from pathlib import Path
 
 import pytest
@@ -19,7 +17,7 @@ def _isolated_config(tmp_path, monkeypatch):
     monkeypatch.setenv("COGITUM_CONFIG_DIR", str(cfg))
     # Force cogitum.core.llm.loader module-level paths to refresh —
     # they read the env var at import. Reload if already imported.
-    import importlib, sys
+    import sys
     for mod in list(sys.modules):
         if mod.startswith("cogitum"):
             sys.modules.pop(mod, None)

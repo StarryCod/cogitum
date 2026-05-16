@@ -19,7 +19,7 @@ Everything in warm palette only.
 """
 from __future__ import annotations
 
-from rich.console import Group, RenderableType
+from rich.console import RenderableType
 from rich.panel import Panel
 from rich.text import Text
 from textual.widgets import Static
@@ -32,9 +32,7 @@ from ..design import (
     GOLD_HI,
     MUTED,
     OK,
-    OLIVE,
     RUST,
-    SURFACE,
     TXT,
     TXT_DIM,
 )

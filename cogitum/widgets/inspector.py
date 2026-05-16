@@ -17,8 +17,6 @@ from rich.table import Table
 from rich.text import Text
 from textual.widgets import Static
 from ..design import (
-    BRONZE,
-    COPPER,
     GLYPH_BAR_EMPTY,
     GLYPH_BAR_FULL,
     GLYPH_BULLET,

@@ -73,7 +73,7 @@ def load_mesh(
     for pid, raw in (cfg.get("providers") or {}).items():
         try:
             pcfg = _provider_config_from_dict(pid, raw)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("provider %s skipped: bad config (%s)", pid, e)
             continue
         if not pcfg.enabled:

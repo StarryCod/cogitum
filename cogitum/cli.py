@@ -30,7 +30,7 @@ from typing import Any
 from .core.auth import storage as auth_storage
 from .core.auth.registry import REGISTRY as OAUTH_REGISTRY, get_provider
 from .core.auth.types import OAuthAuthInfo, OAuthPrompt
-from .core.llm.credentials import CredentialResolver, default_resolver
+from .core.llm.credentials import default_resolver
 from .core.llm.loader import (
     _PROVIDERS_PATH,
     _SETTINGS_PATH,
@@ -135,7 +135,7 @@ def _setup_api_keys() -> None:
                 print(f"  ✓ stored in system keyring as cogitum / {env_name}")
                 print(f"    To use it, add to ~/.config/cogitum/providers.toml:")
                 print(f'    secret_ref = "keyring:cogitum:{env_name}"')
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 print(f"  keyring failed: {e}")
                 print("  Falling back to plain in providers.toml (NOT recommended).")
                 _patch_provider_secret(provider_id, f"plain:{key}")
@@ -183,8 +183,8 @@ async def _setup_oauth() -> None:
         print()
         try:
             webbrowser.open(info.url)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            logger.debug("swallowed exception", exc_info=True)
 
     async def on_prompt(p: OAuthPrompt) -> str:
         return await asyncio.to_thread(input, f"  {p.message}\n  > ")
@@ -194,7 +194,7 @@ async def _setup_oauth() -> None:
 
     try:
         creds = await prov.login(on_auth=on_auth, on_prompt=on_prompt, on_progress=on_progress)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"  ✗ login failed: {e}")
         return
 
@@ -209,7 +209,7 @@ async def _setup_oauth() -> None:
 def _setup_default_model() -> None:
     try:
         mesh = load_mesh()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"  cannot load mesh: {e}")
         return
 
@@ -369,8 +369,8 @@ def _auth_command(args: argparse.Namespace) -> int:
                 print(f"\n  Open: {info.url}\n  {info.instructions}\n")
                 try:
                     webbrowser.open(info.url)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:
+                    logger.debug("swallowed exception", exc_info=True)
             async def on_prompt(p: OAuthPrompt) -> str:
                 return await asyncio.to_thread(input, f"  {p.message}\n  > ")
             async def on_progress(msg: str) -> None:
@@ -378,7 +378,7 @@ def _auth_command(args: argparse.Namespace) -> int:
             return await prov.login(on_auth=on_auth, on_prompt=on_prompt, on_progress=on_progress)
         try:
             creds = asyncio.run(run())
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"  ✗ {e}")
             return 1
         auth_storage.set_(args.provider, creds)
@@ -715,7 +715,7 @@ def main(argv: list[str] | None = None) -> int:
         from cogitum.core.llm.secrets_env import load_secrets_into_environ
         load_secrets_into_environ(override=False)
     except Exception:
-        pass
+        logger.debug("swallowed exception", exc_info=True)
 
     # Configure logging to file (not stderr) to avoid breaking TUI rendering
     log_dir = Path(

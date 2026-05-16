@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 import time
 from dataclasses import dataclass, field
 from typing import Optional

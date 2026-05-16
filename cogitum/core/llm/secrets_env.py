@@ -67,6 +67,24 @@ def load_secrets_into_environ(*, override: bool = False) -> int:
     path = _config_dir() / "secrets.env"
     if not path.exists():
         return 0
+
+    # H10: secrets.env should be 0600 (owner read/write only). The wizard
+    # creates it with the right mode, but a user could have copied or
+    # restored it from backup with looser permissions and not noticed.
+    # We don't auto-fix (could be intentional in some sandboxes), but we
+    # do warn on every load so the leak is visible.
+    try:
+        st = path.stat()
+        # Only check the low 9 perm bits (rwx for u/g/o).
+        mode = st.st_mode & 0o777
+        if mode & 0o077:  # any group/other bits set
+            logger.warning(
+                "%s has permissive mode %o (expected 0600). Run: chmod 600 %s",
+                path, mode, path,
+            )
+    except OSError:
+        pass
+
     count = 0
     try:
         for line in path.read_text(encoding="utf-8").splitlines():

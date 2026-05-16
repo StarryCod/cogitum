@@ -8,7 +8,6 @@ from ..design import (
     BRONZE,
     GOLD,
     GOLD_DIM,
-    MUTED,
     TXT_DIM,
 )
 

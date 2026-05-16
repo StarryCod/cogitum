@@ -1,9 +1,7 @@
 """Tests for ConfigWriter — the underlying config mutation layer."""
 from __future__ import annotations
 
-from pathlib import Path
 
-import pytest
 
 
 def test_writer_starts_with_seeded_defaults(writer_path):

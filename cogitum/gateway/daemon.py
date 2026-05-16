@@ -5,7 +5,6 @@ Systemd user service management for the Telegram gateway.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path

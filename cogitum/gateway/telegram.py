@@ -13,9 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
-import json
 import logging
-import os
 import signal
 import tempfile
 import time
@@ -36,8 +34,8 @@ from cogitum.core.agent import (
     AgentToolCall,
     AgentToolResult,
 )
-from cogitum.core.builtin_tools import *  # noqa: F401,F403 — registers tools
-from cogitum.core.events import Message, TextPart
+from cogitum.core.builtin_tools import *
+from cogitum.core.events import Message
 from cogitum.core.llm.loader import load_mesh, load_settings
 from cogitum.core.llm.refresh import refresh_all_providers
 from cogitum.core.sessions import get_store
@@ -297,7 +295,7 @@ class CogitumBot:
             refresh = await refresh_all_providers(timeout=6.0, only_empty=False)
             for pid, r in refresh.items():
                 log.info("  %-20s %s — %s", pid, r["status"], r["message"])
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("model refresh failed (non-fatal): %s", e)
 
         # Load mesh
@@ -332,11 +330,11 @@ class CogitumBot:
         # Register bot commands menu
         await self.api.set_my_commands([
             {"command": "new", "description": "✦ New session"},
-            {"command": "resume", "description": "📋 Resume session (or /resume <name>)"},
+            {"command": "resume", "description": "◆ Resume session (or /resume <name>)"},
             {"command": "title", "description": "✏️ Rename current session"},
-            {"command": "tools", "description": "🔧 List available tools"},
-            {"command": "models", "description": "🤖 Pick model"},
-            {"command": "model", "description": "🔄 Switch model directly"},
+            {"command": "tools", "description": "⚙ List available tools"},
+            {"command": "models", "description": "◇ Pick model"},
+            {"command": "model", "description": "⟳ Switch model directly"},
             {"command": "reload", "description": "♻️ Reload providers/models from disk"},
             {"command": "stop", "description": "⏹ Cancel generation"},
             {"command": "help", "description": "❓ All commands"},
@@ -345,9 +343,9 @@ class CogitumBot:
         # Notify user that gateway restarted (session reset)
         await self.api.send_message(
             self.config.allowed_user_id,
-            "🔄 *Cogitum Gateway restarted*\n\n"
+            "⟳ *Cogitum Gateway restarted*\n\n"
             f"Model: `{escape_md(current_model)}`\n"
-            f"⚠️ {escape_md('Previous session was reset. Use /resume to continue a saved session.')}\n\n"
+            f"▲ {escape_md('Previous session was reset. Use /resume to continue a saved session.')}\n\n"
             f"{escape_md('Tools:')} `{escape_md(str(len(REGISTRY.names())))}`"
         )
 
@@ -383,23 +381,23 @@ class CogitumBot:
         try:
             from ..core.llm.secrets_env import load_secrets_into_environ
             load_secrets_into_environ(override=False)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            log.debug("swallowed exception", exc_info=True)
 
         # Auto-discover models for every provider first
         try:
             refresh = await refresh_all_providers(timeout=6.0, only_empty=False)
             log.info("reload refresh: %s", {k: v["message"] for k, v in refresh.items()})
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("reload refresh failed: %s", e)
 
         try:
             new_mesh = load_mesh()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.exception("mesh reload failed")
             if not silent and chat_id is not None:
                 await self.api.send_message(
-                    chat_id, escape_md(f"❌ reload failed: {e}")
+                    chat_id, escape_md(f"✕ reload failed: {e}")
                 )
             return
 
@@ -432,15 +430,15 @@ class CogitumBot:
         if old_mesh is not None and old_mesh is not new_mesh:
             try:
                 await old_mesh.aclose()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:
+                log.debug("swallowed exception", exc_info=True)
 
         if not silent and chat_id is not None:
             n_models = len(new_mesh.list_resolved())
             n_providers = len(new_mesh.providers)
             await self.api.send_message(
                 chat_id,
-                f"🔄 *Reloaded*\n"
+                f"⟳ *Reloaded*\n"
                 f"Providers: `{n_providers}`\n"
                 f"Models: `{n_models}`\n"
                 f"Current: `{escape_md(current_model)}`",
@@ -503,7 +501,7 @@ class CogitumBot:
         # Auth check
         if user_id != self.config.allowed_user_id:
             await self.api.send_message(
-                chat_id, escape_md("⛔ Access denied."), parse_mode="MarkdownV2"
+                chat_id, escape_md("✕ Access denied."), parse_mode="MarkdownV2"
             )
             return
 
@@ -622,7 +620,7 @@ class CogitumBot:
                     msg_count = len(messages)
                     await self.api.send_message(
                         chat_id,
-                        escape_md(f"📋 Loaded {msg_count} messages. Continue the conversation."),
+                        escape_md(f"◆ Loaded {msg_count} messages. Continue the conversation."),
                     )
                     return
                 else:
@@ -633,7 +631,7 @@ class CogitumBot:
             for s in sessions[:8]:
                 title = s.title or s.id[:12]
                 buttons.append([{
-                    "text": f"📋 {title}",
+                    "text": f"◆ {title}",
                     "callback_data": f"resume:{s.id}",
                 }])
             markup = {"inline_keyboard": buttons}
@@ -652,7 +650,7 @@ class CogitumBot:
             if session.session_id:
                 get_store().set_title(session.session_id, rest)
                 await self.api.send_message(
-                    chat_id, f"✅ Session title: *{escape_md(rest)}*"
+                    chat_id, f"◈ Session title: *{escape_md(rest)}*"
                 )
             else:
                 await self.api.send_message(
@@ -664,7 +662,7 @@ class CogitumBot:
             tool_list = "\n".join(f"• `{n}`" for n in names)
             await self.api.send_message(
                 chat_id,
-                f"🔧 *{len(names)} tools:*\n{tool_list}",
+                f"⚙ *{len(names)} tools:*\n{tool_list}",
             )
 
         elif cmd == "models":
@@ -683,7 +681,7 @@ class CogitumBot:
             for r in pairs[:12]:
                 display = r.model.display or r.model.id
                 buttons.append([{
-                    "text": f"🤖 {display}",
+                    "text": f"◇ {display}",
                     "callback_data": f"model:{r.qualified_id}",
                 }])
             markup = {"inline_keyboard": buttons}
@@ -716,11 +714,11 @@ class CogitumBot:
                     self.agent.cfg.model = candidates[0].qualified_id
                     await self.api.send_message(
                         chat_id,
-                        f"✅ Model: `{escape_md(candidates[0].qualified_id)}`",
+                        f"◈ Model: `{escape_md(candidates[0].qualified_id)}`",
                     )
                 else:
                     await self.api.send_message(
-                        chat_id, escape_md(f"❌ No model matches: {rest}")
+                        chat_id, escape_md(f"✕ No model matches: {rest}")
                     )
 
         elif cmd == "stop":
@@ -763,14 +761,14 @@ class CogitumBot:
             try:
                 await self.api.answer_callback(cb_id)
             except Exception:
-                pass
+                log.debug("swallowed exception", exc_info=True)
             return
         data = callback.get("data", "")
         chat_id = callback["message"]["chat"]["id"]
         user_id = callback.get("from", {}).get("id", 0)
 
         if user_id != self.config.allowed_user_id:
-            await self.api.answer_callback(cb_id, "⛔ Access denied")
+            await self.api.answer_callback(cb_id, "✕ Access denied")
             return
 
         session = self.sessions.setdefault(chat_id, ChatSession(chat_id))
@@ -789,7 +787,7 @@ class CogitumBot:
             msg_count = len(messages)
             await self.api.send_message(
                 chat_id,
-                escape_md(f"📋 Loaded {msg_count} messages. Continue the conversation."),
+                escape_md(f"◆ Loaded {msg_count} messages. Continue the conversation."),
             )
             await self.api.answer_callback(cb_id, f"Resumed: {title}")
 
@@ -799,7 +797,7 @@ class CogitumBot:
                 self.agent.cfg.model = model_id
             await self.api.answer_callback(cb_id, f"Model: {model_id}")
             await self.api.send_message(
-                chat_id, f"✅ Model: `{escape_md(model_id)}`"
+                chat_id, f"◈ Model: `{escape_md(model_id)}`"
             )
 
         elif data.startswith("approve:") or data.startswith("reject:"):
@@ -816,7 +814,7 @@ class CogitumBot:
                 decision_text = f"{'◈ Sanctioned' if action == 'approve' else '✕ Forbidden'}"
                 await self.api.edit_message(chat_id, msg_id, escape_md(decision_text))
             else:
-                await self.api.answer_callback(cb_id, "⚠️ No pending approval")
+                await self.api.answer_callback(cb_id, "▲ No pending approval")
 
         else:
             await self.api.answer_callback(cb_id)
@@ -828,13 +826,13 @@ class CogitumBot:
     ) -> None:
         if not self.agent:
             await self.api.send_message(
-                session.chat_id, escape_md("❌ Agent not initialized.")
+                session.chat_id, escape_md("✕ Agent not initialized.")
             )
             return
 
         if session.is_busy:
             await self.api.send_message(
-                session.chat_id, escape_md("⏳ Still working... /stop to cancel.")
+                session.chat_id, escape_md("… Still working... /stop to cancel.")
             )
             return
 
@@ -989,7 +987,7 @@ class CogitumBot:
 
                 elif isinstance(event, AgentError):
                     await self.api.send_message(
-                        chat_id, f"❌ *Error:* {escape_md(event.message)}"
+                        chat_id, f"✕ *Error:* {escape_md(event.message)}"
                     )
                     break
 
@@ -1016,7 +1014,7 @@ class CogitumBot:
         except Exception as e:
             log.exception("Agent run error")
             await self.api.send_message(
-                chat_id, f"❌ {escape_md(str(e))}"
+                chat_id, f"✕ {escape_md(str(e))}"
             )
         finally:
             typing_task.cancel()
@@ -1038,10 +1036,19 @@ async def run_bot(config: TelegramConfig | None = None) -> None:
 
     bot = CogitumBot(cfg)
 
-    # Handle signals for graceful shutdown
+    # Handle signals for graceful shutdown. We hold the stop tasks in a
+    # set so the asyncio event loop doesn't GC them before they finish
+    # (RUF006). The set is local to run() and dies with the loop.
+    shutdown_tasks: set[asyncio.Task] = set()
+
+    def _request_stop() -> None:
+        t = asyncio.create_task(bot.stop())
+        shutdown_tasks.add(t)
+        t.add_done_callback(shutdown_tasks.discard)
+
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.stop()))
+        loop.add_signal_handler(sig, _request_stop)
 
     await bot.start()
 
@@ -1053,7 +1060,7 @@ def main() -> None:
         from cogitum.core.llm.secrets_env import load_secrets_into_environ
         load_secrets_into_environ(override=False)
     except Exception:
-        pass
+        log.debug("swallowed exception", exc_info=True)
 
     logging.basicConfig(
         level=logging.INFO,

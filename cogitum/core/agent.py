@@ -17,19 +17,17 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from cogitum.core.events import (
     ChunkKind,
     Message,
-    Role,
     StreamChunk,
     TextPart,
     ThinkingPart,
     ToolCallPart,
     ToolResultPart,
-    Turn,
     Usage,
 )
 from cogitum.core.llm.mesh import Mesh
@@ -667,7 +665,7 @@ class Agent:
                             break
                         messages.append(Message(role="user", parts=[TextPart(text=injected_text)]))
                         await q.put(AgentText(
-                            delta=f"\n📨 injected: {injected_text[:60]}{'…' if len(injected_text) > 60 else ''}\n",
+                            delta=f"\n▸ injected: {injected_text[:60]}{'…' if len(injected_text) > 60 else ''}\n",
                             turn=iteration,
                         ))
 
@@ -812,7 +810,7 @@ class Agent:
             if resolved:
                 return resolved[0].model.context_window
         except Exception:
-            pass
+            log.debug("swallowed exception", exc_info=True)
         return 0
 
     async def _compact_context(

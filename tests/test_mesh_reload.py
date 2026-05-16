@@ -5,8 +5,6 @@ without restarting the process.
 """
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
 
 import pytest
 
@@ -18,7 +16,6 @@ import pytest
 @pytest.mark.asyncio
 async def test_tui_setup_close_reloads_mesh(monkeypatch):
     """When SetupScreen closes, _on_setup_close must rebuild self.mesh."""
-    from textual.app import App
     from cogitum.app import CogitumApp
     from cogitum.core.llm.config_writer import ConfigWriter
 

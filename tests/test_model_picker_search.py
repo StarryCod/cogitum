@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import pytest
 
 
 def _make_entry(qualified_id: str, model_id: str, display: str = "",

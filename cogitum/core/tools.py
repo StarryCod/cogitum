@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import textwrap
 from dataclasses import dataclass, field
 from typing import Any, Callable, get_type_hints

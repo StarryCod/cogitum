@@ -31,7 +31,7 @@ import re
 import time
 import webbrowser
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import ClassVar, Awaitable, Callable
 
 from rich.text import Text
 from textual import on, work
@@ -59,6 +59,9 @@ from .design import (
     TXT,
     TXT_DIM,
 )
+import logging
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +88,7 @@ class MessageModal(ModalScreen[None]):
     #msg-body  { color: #E6E1CF; padding: 1 0; }
     #msg-foot  { height: 3; align: right middle; }
     """
-    BINDINGS = [Binding("escape", "dismiss", "close"), Binding("enter", "dismiss", "close")]
+    BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "dismiss", "close"), Binding("enter", "dismiss", "close")]
 
     def __init__(self, title: str, body: str, *, error: bool = False) -> None:
         super().__init__()
@@ -118,7 +121,7 @@ class ConfirmModal(ModalScreen[bool]):
     #conf-foot  { height: 3; align: right middle; }
     #conf-foot Button { margin-left: 1; }
     """
-    BINDINGS = [Binding("escape", "no", "cancel")]
+    BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "no", "cancel")]
 
     def __init__(self, title: str, body: str) -> None:
         super().__init__()
@@ -188,7 +191,7 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
     #key-foot Button { margin-left: 1; min-width: 10; }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "cancel", "cancel"),
         Binding("ctrl+s", "save", "save"),
     ]
@@ -197,7 +200,7 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
         ("env",     "Environment variable",      "Set in your shell rc — most portable, recommended"),
         ("vault",   "Encrypted local vault",     "AES-GCM encrypted file in ~/.config/cogitum/"),
         ("keyring", "System keyring",            "OS password manager (libsecret/KWallet/macOS)"),
-        ("plain",   "Plain text in config",      "⚠ Stored unencrypted — dev/testing only"),
+        ("plain",   "Plain text in config",      "▲ Stored unencrypted — dev/testing only"),
     )
 
     @classmethod
@@ -314,10 +317,10 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
                 out.append("cogitum / <env-var>", style=BRONZE)
                 out.append("\nUnlocked automatically when you log in.", style=TXT_DIM)
             except Exception:
-                out.append("⚠ keyring package not installed.\n", style=RUST)
+                out.append("▲ keyring package not installed.\n", style=RUST)
                 out.append("Cogitum will offer to install it when you Save.", style=TXT_DIM)
         else:  # plain
-            out.append("⚠ The key will be written into providers.toml in clear text.\n", style=RUST)
+            out.append("▲ The key will be written into providers.toml in clear text.\n", style=RUST)
             out.append("Use only for local testing. Rotate the key after.", style=TXT_DIM)
         return out
 
@@ -375,7 +378,7 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
         self.app.notify(f"Testing {base_url}…", timeout=2)
         try:
             models = await discover_models(base_url, secret, timeout=8.0)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             self.app.push_screen(MessageModal(
                 "Test failed",
                 f"Could not reach {base_url}/models:\n\n{e}\n\n"
@@ -445,7 +448,7 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
                     "'env' and 'vault' work without extra packages.",
                     error=True))
                 return
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 self.app.push_screen(MessageModal(
                     "Keyring save failed",
                     f"Could not write to system keyring:\n\n{e}\n\n"
@@ -460,7 +463,7 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
                 resolver = CredentialResolver()
                 # Vault unlock will prompt for password if needed (first time → set up)
                 resolver.vault_set(env_var, secret)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 self.app.push_screen(MessageModal(
                     "Vault save failed",
                     f"Could not write to encrypted vault:\n\n{e}",
@@ -475,7 +478,7 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
             if secret:
                 try:
                     save_secret(env_var, secret)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     self.app.push_screen(MessageModal(
                         "Save failed",
                         f"Could not write secrets.env: {e}",
@@ -524,7 +527,7 @@ class AddProviderModal(ModalScreen[ProviderPreset | str | None]):
     #ap-foot Button { margin-left: 1; min-width: 12; }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "cancel", "cancel"),
         Binding("enter", "select", "select"),
     ]
@@ -617,7 +620,7 @@ class CustomProviderModal(ModalScreen[ProviderPreset | None]):
     #cp-foot Button { margin-left: 1; min-width: 12; }
     """
 
-    BINDINGS = [Binding("escape", "cancel", "cancel")]
+    BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "cancel", "cancel")]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="cp-shell"):
@@ -698,7 +701,7 @@ class KeyManagerModal(ModalScreen[str]):
     #km-foot Button { margin-left: 1; min-width: 12; }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "close", "close"),
         Binding("delete", "remove_selected", "remove"),
         Binding("d", "remove_selected", "remove"),
@@ -841,7 +844,7 @@ class ManageModelsModal(ModalScreen[bool]):
     #mm-foot Button { margin-left: 1; min-width: 10; height: 3; }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "close", "close"),
         Binding("delete", "remove_selected", "remove"),
         Binding("d", "remove_selected", "remove"),
@@ -1025,7 +1028,7 @@ class OAuthLoginModal(ModalScreen[OAuthCredentials | None]):
     #oa-foot Button { margin-left: 1; }
     """
 
-    BINDINGS = [Binding("escape", "cancel", "cancel")]
+    BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "cancel", "cancel")]
 
     def __init__(self, provider_id: str) -> None:
         super().__init__()
@@ -1065,7 +1068,7 @@ class OAuthLoginModal(ModalScreen[OAuthCredentials | None]):
             try:
                 webbrowser.open(info.url)
                 self._append_progress("browser launched.")
-            except Exception:  # noqa: BLE001
+            except Exception:
                 self._append_progress("could not auto-open browser — copy URL manually.")
 
         async def on_prompt(p: OAuthPrompt) -> str:
@@ -1082,7 +1085,7 @@ class OAuthLoginModal(ModalScreen[OAuthCredentials | None]):
             )
         except asyncio.CancelledError:
             return
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             self._append_progress(f"✗ failed: {e}")
             await asyncio.sleep(2.0)
             self.dismiss(None)
@@ -1181,7 +1184,7 @@ class SetupScreen(Screen):
     .card-actions Button { margin-right: 1; min-width: 10; }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "back_to_app", "back to TUI"),
         Binding("ctrl+q", "quit", "quit"),
         Binding("up", "rail_prev", "", show=False),
@@ -1338,7 +1341,7 @@ class SetupScreen(Screen):
         enabled = bool(raw.get("enabled", True))
 
         if not keys:
-            return ("⚠", "no key — click '+ Add key' to enable")
+            return ("▲", "no key — click '+ Add key' to enable")
         if not enabled:
             return ("○", "disabled — click 'Enable' to use")
 
@@ -1350,17 +1353,17 @@ class SetupScreen(Screen):
             pid_oauth = ref.removeprefix("oauth:")
             creds = auth_storage.get(pid_oauth)
             if not creds:
-                return ("⚠", "OAuth not connected — click 'Connect' in Subscriptions")
+                return ("▲", "OAuth not connected — click 'Connect' in Subscriptions")
         elif ref.startswith("env:") or ref.startswith("vault:") or ref.startswith("plain:"):
             try:
                 value = resolve_secret_ref(ref)
                 if not value:
-                    return ("⚠", f"key not resolvable ({ref}) — re-enter via 'Manage keys'")
-            except Exception as e:  # noqa: BLE001
-                return ("⚠", f"key error: {e}")
+                    return ("▲", f"key not resolvable ({ref}) — re-enter via 'Manage keys'")
+            except Exception as e:
+                return ("▲", f"key error: {e}")
 
         if not models:
-            return ("⚠", "no models — click 'Refresh models' to discover")
+            return ("▲", "no models — click 'Refresh models' to discover")
 
         return ("✓", f"ready · {len(models)} models")
 
@@ -1370,7 +1373,7 @@ class SetupScreen(Screen):
 
         # Status line at top — at-a-glance health
         icon, status_msg = self._provider_status(pid, raw)
-        status_style = OK if icon == "✓" else (COPPER if icon == "⚠" else TXT_DIM)
+        status_style = OK if icon == "✓" else (COPPER if icon == "▲" else TXT_DIM)
 
         title = Text()
         title.append(f"{icon} ", style=status_style)
@@ -1457,7 +1460,7 @@ class SetupScreen(Screen):
                             classes="card-title"))
         try:
             settings = load_settings()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             settings = {}
             content.mount(_Static(Text(f"settings load failed: {e}", style=RUST)))
         cur = settings.get("default_model", "—")
@@ -1468,7 +1471,7 @@ class SetupScreen(Screen):
 
         try:
             mesh = load_mesh()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             content.mount(_Static(Text(f"mesh load failed: {e}", style=RUST)))
             return
 
@@ -1506,7 +1509,7 @@ class SetupScreen(Screen):
     # ---- telegram gateway ----
 
     def _render_telegram(self, content: VerticalScroll) -> None:
-        from .gateway.tg_config import load_tg_config, save_tg_config, TelegramConfig, TG_CONFIG_PATH
+        from .gateway.tg_config import load_tg_config, TG_CONFIG_PATH
         from .gateway.daemon import status_service
 
         cfg = load_tg_config()
@@ -1537,7 +1540,7 @@ class SetupScreen(Screen):
             status_card.mount(_Static(Text(f"  Token: {token_display}", style=TXT_DIM)))
             status_card.mount(_Static(Text(f"  User ID: {cfg.allowed_user_id}", style=TXT_DIM)))
         else:
-            status_card.mount(_Static(Text("  ⚠ Not configured", style=RUST)))
+            status_card.mount(_Static(Text("  ▲ Not configured", style=RUST)))
 
         # Config card
         config_card = Vertical(classes="card")
@@ -1664,7 +1667,7 @@ class SetupScreen(Screen):
                           classes="card-title"))
         try:
             mesh = load_mesh()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             card.mount(_Static(Text(f"mesh load failed: {e}", style=RUST)))
             return
 
@@ -1812,7 +1815,7 @@ class SetupScreen(Screen):
                 return
             try:
                 api_key = resolve_secret_ref(secret_ref)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 await self.app.push_screen_wait(MessageModal(
                     "Key error", f"Could not resolve {secret_ref}: {e}", error=True,
                 ))
@@ -1830,7 +1833,7 @@ class SetupScreen(Screen):
             base_url = raw.get("base_url", "")
             try:
                 models = await discover_models(base_url, api_key, timeout=10.0)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 msg = f"Endpoint: {base_url}\nError: {e}\n\nPossible causes: invalid key, wrong base_url, network down."
                 if preset_added:
                     msg = f"Backfilled {preset_added} known models from preset.\n\nLive discovery still failed:\n{msg}"
@@ -1999,14 +2002,14 @@ class SetupScreen(Screen):
         # Resolve the key
         try:
             api_key = resolve_secret_ref(secret_ref)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return (0, f"could not resolve key ({secret_ref}): {e}")
         if not api_key:
             return (0, f"key not yet available (env var not exported?)")
 
         try:
             models = await discover_models(base_url, api_key)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return (0, f"discovery request failed: {e}")
 
         if not models:

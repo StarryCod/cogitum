@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from rich.text import Text
-from textual.app import ComposeResult
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget

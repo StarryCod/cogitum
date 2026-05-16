@@ -52,7 +52,7 @@ def _decode_jwt(token: str) -> dict[str, Any] | None:
         pad = "=" * (-len(payload) % 4)
         decoded = base64.urlsafe_b64decode((payload + pad).encode("ascii"))
         return json.loads(decoded)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 

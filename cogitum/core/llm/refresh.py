@@ -120,8 +120,8 @@ async def refresh_all_providers(
                 try:
                     writer.remove_model(pid, mid)
                     pruned += 1
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:
+                    logger.debug("swallowed exception", exc_info=True)
 
         if added or pruned:
             any_changed = True
@@ -139,7 +139,7 @@ async def refresh_all_providers(
     if any_changed:
         try:
             writer.save()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("refresh_all: writer.save() failed: %s", e)
 
     return results
@@ -154,7 +154,7 @@ async def _fetch_one(
     """Returns (pid, status, models, message). Pure I/O, no writes."""
     try:
         api_key = resolve_secret_ref(secret_ref)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return pid, "error", [], f"resolve failed: {e}"
 
     if not api_key:
@@ -162,7 +162,7 @@ async def _fetch_one(
 
     try:
         models = await discover_models(base_url, api_key, timeout=timeout)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return pid, "error", [], f"discovery error: {e}"
 
     if not models:

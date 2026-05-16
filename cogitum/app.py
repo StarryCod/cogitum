@@ -1,6 +1,8 @@
 """Cogitum TUI app — bubbles + specialised tool cards + model picker."""
 from __future__ import annotations
 
+from typing import ClassVar
+
 import asyncio
 
 from textual import on
@@ -10,12 +12,12 @@ from textual.containers import Container, VerticalScroll
 from textual.widgets import Static
 
 from .core.agent import Agent, AgentApprovalRequest, AgentConfig, AgentDone, AgentError, AgentRetry, AgentText, AgentThinking, AgentToolCall, AgentToolResult
-from .core.builtin_tools import *  # noqa: F401,F403 — registers tools into REGISTRY
+from .core.builtin_tools import *
 from .widgets.approval import ApprovalWidget
 from .core.llm.loader import load_mesh, load_settings, write_settings
 from .core.llm.refresh import refresh_all_providers
 from .core.llm.mesh import Mesh, ResolvedModel
-from .core.sessions import get_store, SessionStore
+from .core.sessions import get_store
 from .core.events import _id
 from .core.tools import REGISTRY
 from .setup_flow import SetupScreen
@@ -23,11 +25,14 @@ from .widgets.banner import Banner, BannerTags
 from .widgets.composer import Composer, ComposerArea
 from .widgets.cards import EditCard, WriteCard, RunCard, SearchCard, ReadCard, FetchCard
 from .widgets.feed import AgentBlock, Feed, ThinkingBlock, ToolCallCard, WaitingIndicator
-from .widgets.inspector import Inspector, InspectorState
+from .widgets.inspector import Inspector
 from .widgets.model_picker import ModelPicker
 from .widgets.queue_bar import QueueBar
 from .widgets.session_picker import SessionPicker
 from .widgets.statusbar import StatusBar
+import logging
+
+log = logging.getLogger(__name__)
 
 
 def _seed(feed: Feed) -> None:
@@ -49,7 +54,7 @@ class CogitumApp(App):
     TITLE = "COGITUM"
     SUB_TITLE = "forge mark vii"
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("ctrl+c", "copy_selection", "copy", priority=True),
         Binding("ctrl+q", "quit", "quit"),
         Binding("ctrl+p", "open_models", "models", priority=True),
@@ -70,6 +75,8 @@ class CogitumApp(App):
         # Session persistence
         self._session_id: str | None = None
         self._session_msg_count: int = 0  # messages already saved to disk
+        # Hard refs to background tasks we don't want GC'd mid-flight.
+        self._bg_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     # compose
@@ -95,8 +102,12 @@ class CogitumApp(App):
         feed = self.query_one("#feed-pane", Feed)
         _seed(feed)
         self._load_mesh_async()
-        # Kick off model auto-discovery in the background — doesn't block UI
-        asyncio.ensure_future(self._auto_refresh_models())
+        # Kick off model auto-discovery in the background. We MUST keep a
+        # hard reference (asyncio runs may GC tasks otherwise — RUF006), so
+        # the task lives in self._bg_tasks until its done-callback removes it.
+        bg = asyncio.ensure_future(self._auto_refresh_models())
+        self._bg_tasks.add(bg)
+        bg.add_done_callback(self._bg_tasks.discard)
 
     async def on_unmount(self) -> None:
         """Clean up resources on exit."""
@@ -113,7 +124,7 @@ class CogitumApp(App):
         try:
             await asyncio.sleep(0.3)  # let UI settle first
             results = await refresh_all_providers(timeout=6.0, only_empty=False)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return
 
         added_total = sum(r["count"] for r in results.values()
@@ -126,8 +137,8 @@ class CogitumApp(App):
                     f"discovered {added_total} new model(s) across providers",
                     "auto-refresh",
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:
+                log.debug("swallowed exception", exc_info=True)
 
     def _load_mesh_async(self) -> None:
         feed = self.query_one("#feed-pane", Feed)
@@ -136,8 +147,8 @@ class CogitumApp(App):
         try:
             from .core.llm.secrets_env import load_secrets_into_environ
             load_secrets_into_environ(override=False)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            log.debug("swallowed exception", exc_info=True)
         # Close old mesh if reloading (prevents httpx client leaks)
         old_mesh = getattr(self, "mesh", None)
         if old_mesh is not None:
@@ -145,7 +156,7 @@ class CogitumApp(App):
         try:
             self.mesh = load_mesh()
             self.settings = load_settings()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             feed.append_error(f"mesh load failed: {e}", meta="config")
             return
 
@@ -197,8 +208,8 @@ class CogitumApp(App):
     def _update_statusbar(self, model: str) -> None:
         try:
             self.query_one("#statusbar", StatusBar).set_model(model)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            log.debug("swallowed exception", exc_info=True)
 
     # ------------------------------------------------------------------
     # actions
@@ -277,8 +288,8 @@ class CogitumApp(App):
         self.settings["default_model"] = self.current_model
         try:
             write_settings(self.settings)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            log.debug("swallowed exception", exc_info=True)
         self._update_statusbar(self.current_model)
         self._update_inspector_model(resolved)
         # Update agent config
@@ -296,8 +307,8 @@ class CogitumApp(App):
                 provider=resolved.provider.id,
                 context_window=resolved.model.context_window or 200_000,
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            log.debug("swallowed exception", exc_info=True)
 
     # ------------------------------------------------------------------
     # composer
@@ -412,7 +423,7 @@ class CogitumApp(App):
                 is_streaming=True,
             )
         except Exception:
-            pass
+            log.debug("swallowed exception", exc_info=True)
 
         async def drain_queue() -> None:
             nonlocal agent_block, thinking_block, waiting
@@ -432,7 +443,7 @@ class CogitumApp(App):
                     try:
                         self.query_one("#inspector-widget", Inspector).stream_delta(len(event.delta))
                     except Exception:
-                        pass
+                        log.debug("swallowed exception", exc_info=True)
 
                 elif isinstance(event, AgentThinking):
                     # Stop waiting animation on first thinking
@@ -446,7 +457,7 @@ class CogitumApp(App):
                     try:
                         self.query_one("#inspector-widget", Inspector).stream_delta(len(event.delta))
                     except Exception:
-                        pass
+                        log.debug("swallowed exception", exc_info=True)
 
                 elif isinstance(event, AgentRetry):
                     # Show/restore friendly waiting indicator during retry
@@ -538,6 +549,14 @@ class CogitumApp(App):
                     if waiting is not None:
                         waiting.stop()
                         waiting = None
+                    # H12: belt-and-suspenders — kill any stray
+                    # WaitingIndicator widgets that might have been mounted
+                    # via paths the local `waiting` variable doesn't track.
+                    for w in feed.query("WaitingIndicator"):
+                        try:
+                            w.stop()
+                        except Exception:
+                            log.debug("waiting.stop failed", exc_info=True)
                     usage = event.usage
                     # Approximate token count from streamed text if no usage reported
                     approx_out = len(self._streamed_text) // 4 if not usage else 0
@@ -567,7 +586,7 @@ class CogitumApp(App):
                             messages=len(self._history),
                         )
                     except Exception:
-                        pass
+                        log.debug("swallowed exception", exc_info=True)
                     return
 
                 elif isinstance(event, AgentError):
@@ -586,7 +605,7 @@ class CogitumApp(App):
                         inspector.stream_end()
                         inspector.update_state(last_error=event.message)
                     except Exception:
-                        pass
+                        log.debug("swallowed exception", exc_info=True)
                     return
 
         # Run agent + drain concurrently
@@ -642,7 +661,7 @@ class CogitumApp(App):
             # DON'T clear pending_messages — user cancelled current turn,
             # but queued messages should still be processed on next submit.
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             feed.append_error(str(exc), meta="agent")
 
         # Sync: remove from _pending_messages any items that were already

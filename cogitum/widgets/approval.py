@@ -8,6 +8,8 @@ User navigates with ↑/↓ arrows and confirms with Enter.
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from dataclasses import dataclass
 
 from textual import events
@@ -18,6 +20,9 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from ..design import GOLD, GOLD_HI, BRONZE, COPPER, TXT_DIM, RUST
+import logging
+
+log = logging.getLogger(__name__)
 
 
 # ── Danger level glyphs (Imperial Fists / 40K aesthetic) ─────────────────────
@@ -89,7 +94,7 @@ class ApprovalWidget(Widget, can_focus=True):
 
     selected: reactive[int] = reactive(0)
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[tuple[str, str, str]]] = [
         ("up", "move_up", "up"),
         ("down", "move_down", "down"),
         ("k", "move_up", "up"),
@@ -144,6 +149,18 @@ class ApprovalWidget(Widget, can_focus=True):
         # Take focus immediately so arrow keys work without an extra click.
         self.focus()
 
+    # H13: if the user clicks somewhere else in the TUI while we're waiting
+    # for their decision, focus drifts and arrow keys / Y/N stop working.
+    # Whenever this widget loses focus, reclaim it on the next tick — the
+    # widget removes itself from the tree on decision, so this loop ends
+    # naturally when _dispatch() is called.
+    def on_blur(self, event: events.Blur) -> None:
+        if not self.is_mounted:
+            return
+        # call_after_refresh to avoid re-entering focus during the same
+        # event dispatch cycle.
+        self.call_after_refresh(self.focus)
+
     def _describe_tool(self) -> str:
         """Generate compact description of what the tool will do."""
         args = self.arguments
@@ -178,8 +195,8 @@ class ApprovalWidget(Widget, can_focus=True):
     def watch_selected(self) -> None:
         try:
             self.query_one("#approval-options", Static).update(self._render_options())
-        except Exception:  # noqa: BLE001
-            pass  # not yet composed
+        except Exception:
+            log.debug("swallowed exception", exc_info=True)
 
     # ── Actions (driven by BINDINGS) ──────────────────────────────────────────
 

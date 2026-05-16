@@ -188,7 +188,7 @@ class Mesh:
             except asyncio.CancelledError:
                 lease.record(LeaseOutcome.CANCELLED)
                 raise
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.exception("provider %s stream raised", provider.id)
                 yield StreamChunk(
                     kind=ChunkKind.ERROR,

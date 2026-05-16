@@ -18,7 +18,7 @@ Layout:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import ClassVar
 
 from rich.text import Text
 from textual import on
@@ -28,7 +28,6 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Key
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widget import Widget
 from textual.widgets import Input, ListItem, ListView, Static
 
 from ..core.llm.capabilities import Capability
@@ -227,7 +226,7 @@ class ModelPicker(ModalScreen[ResolvedModel | None]):
     }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "cancel", "close"),
         Binding("enter", "select", "select"),
         Binding("tab", "cycle_filter", "filter", show=False),

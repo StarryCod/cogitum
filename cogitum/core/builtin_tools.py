@@ -15,6 +15,9 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from cogitum.core.tools import tool
+import logging
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Security: path sandbox
@@ -491,7 +494,7 @@ async def terminal(
                     if proc.stdout:
                         partial = await asyncio.wait_for(proc.stdout.read(8192), timeout=0.5)
                 except Exception:
-                    pass
+                    log.debug("swallowed exception", exc_info=True)
                 proc.kill()
                 await proc.wait()
                 tail = partial.decode(errors="replace").strip()[-2000:]
