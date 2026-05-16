@@ -192,11 +192,29 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
         Binding("ctrl+s", "save", "save"),
     ]
 
-    BACKENDS = (
-        ("keyring", "system keyring (libsecret/KWallet) — recommended"),
-        ("env", "environment variable (set in shell rc)"),
-        ("plain", "plain text in providers.toml (dev only)"),
+    BACKENDS_BASE = (
+        ("env",     "Environment variable",      "Set in your shell rc — most portable, recommended"),
+        ("vault",   "Encrypted local vault",     "AES-GCM encrypted file in ~/.config/cogitum/"),
+        ("keyring", "System keyring",            "OS password manager (libsecret/KWallet/macOS)"),
+        ("plain",   "Plain text in config",      "⚠ Stored unencrypted — dev/testing only"),
     )
+
+    @classmethod
+    def available_backends(cls):
+        """Return only backends that work on this system."""
+        out = []
+        for bid, name, desc in cls.BACKENDS_BASE:
+            if bid == "keyring":
+                try:
+                    import keyring  # type: ignore[import-not-found]
+                    # Test that a backend exists
+                    _ = keyring.get_keyring()
+                    out.append((bid, name, desc))
+                except Exception:
+                    out.append((bid, name, desc + " (not installed — pip install keyring)"))
+            else:
+                out.append((bid, name, desc))
+        return out
 
     def __init__(
         self,
@@ -208,6 +226,8 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
         self._pid = provider_id
         self._pname = provider_name
         self._suggested_env = suggested_env or f"{provider_id.upper().replace('-','_')}_API_KEY"
+        self.BACKENDS = self.available_backends()
+        # Default to first non-disabled backend (usually 'env')
         self._backend_idx = 0
 
     def compose(self) -> ComposeResult:
@@ -227,10 +247,10 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
                             placeholder="paste key (hidden — never logged)")
 
             with Vertical(id="backend-section"):
-                yield _Static(Text("Storage backend", style=GOLD_DIM), id="backend-label")
-                for i, (bid, blabel) in enumerate(self.BACKENDS):
+                yield _Static(Text("Where to store the key", style=GOLD_DIM), id="backend-label")
+                for i, (bid, name, desc) in enumerate(self.BACKENDS):
                     cls = "be-option selected" if i == 0 else "be-option"
-                    yield _Static(self._render_backend(i, bid, blabel),
+                    yield _Static(self._render_backend(i, bid, name, desc),
                                  classes=cls, id=f"be-{bid}")
 
             yield _Static(self._hint(), id="key-hint")
@@ -239,18 +259,18 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
                 yield Button("Cancel", id="key-cancel")
                 yield Button("Save",   id="key-save", variant="primary")
 
-    def _render_backend(self, idx: int, bid: str, blabel: str) -> Text:
+    def _render_backend(self, idx: int, bid: str, name: str, desc: str) -> Text:
         prefix = "● " if idx == self._backend_idx else "○ "
         out = Text()
         out.append(prefix, style=GOLD_HI if idx == self._backend_idx else GOLD_DIM)
-        out.append(f"{bid:<10}", style=GOLD if idx == self._backend_idx else TXT_DIM)
-        out.append(blabel, style=TXT if idx == self._backend_idx else TXT_DIM)
+        out.append(f"{name:<26}", style=GOLD if idx == self._backend_idx else TXT_DIM)
+        out.append(desc, style=TXT if idx == self._backend_idx else TXT_DIM)
         return out
 
     def _refresh_backends(self) -> None:
-        for i, (bid, blabel) in enumerate(self.BACKENDS):
+        for i, (bid, name, desc) in enumerate(self.BACKENDS):
             w = self.query_one(f"#be-{bid}", _Static)
-            w.update(self._render_backend(i, bid, blabel))
+            w.update(self._render_backend(i, bid, name, desc))
             if i == self._backend_idx:
                 w.add_class("selected")
             else:
@@ -264,8 +284,7 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
             return
         tid = target.id or ""
         if tid.startswith("be-"):
-            # Find which backend was clicked
-            for i, (bid, _) in enumerate(self.BACKENDS):
+            for i, (bid, _, _) in enumerate(self.BACKENDS):
                 if tid == f"be-{bid}":
                     self._backend_idx = i
                     self._refresh_backends()
@@ -274,20 +293,30 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
     def _hint(self) -> Text:
         backend = self.BACKENDS[self._backend_idx][0]
         out = Text()
-        if backend == "keyring":
-            out.append("Saves to your system keyring under ", style=TXT_DIM)
-            out.append("cogitum / <env-var>", style=BRONZE)
-            out.append("\nproviders.toml will reference it as ", style=TXT_DIM)
-            out.append("keyring:cogitum:<env-var>", style=GOLD)
-        elif backend == "env":
-            out.append("Add to your shell rc:  ", style=TXT_DIM)
-            out.append(f"export {self._env()}=…", style=GOLD)
-            out.append("\nproviders.toml will reference it as ", style=TXT_DIM)
-            out.append(f"env:{self._env()}", style=GOLD)
-        else:
-            out.append("⚠ key will be written into providers.toml in clear text. ",
-                       style=RUST)
-            out.append("Rotate later.", style=TXT_DIM)
+        if backend == "env":
+            env = self._env()
+            out.append("Add to ~/.bashrc or ~/.zshrc:\n", style=TXT_DIM)
+            out.append(f"  export {env}=…\n", style=GOLD)
+            out.append("Then restart the shell. Cogitum will read it as ", style=TXT_DIM)
+            out.append(f"env:{env}", style=GOLD)
+        elif backend == "vault":
+            out.append("Encrypted with AES-GCM, key derived from a master password.\n", style=TXT_DIM)
+            out.append("File: ", style=TXT_DIM)
+            out.append("~/.config/cogitum/vault.enc", style=GOLD)
+            out.append("\nYou'll be asked for the password once per session.", style=TXT_DIM)
+        elif backend == "keyring":
+            try:
+                import keyring as _k
+                _ = _k.get_keyring()
+                out.append("Stores in your OS password manager under ", style=TXT_DIM)
+                out.append("cogitum / <env-var>", style=BRONZE)
+                out.append("\nUnlocked automatically when you log in.", style=TXT_DIM)
+            except Exception:
+                out.append("⚠ keyring package not installed.\n", style=RUST)
+                out.append("Cogitum will offer to install it when you Save.", style=TXT_DIM)
+        else:  # plain
+            out.append("⚠ The key will be written into providers.toml in clear text.\n", style=RUST)
+            out.append("Use only for local testing. Rotate the key after.", style=TXT_DIM)
         return out
 
     def _env(self) -> str:
@@ -318,24 +347,71 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
         secret = (self.query_one("#key-secret", Input).value or "").strip()
         backend = self.BACKENDS[self._backend_idx][0]
 
-        if backend in ("keyring", "plain") and not secret:
-            self.app.push_screen(MessageModal("Missing key", "Paste a secret first.", error=True))
+        # Validation
+        if backend in ("keyring", "vault", "plain") and not secret:
+            self.app.push_screen(MessageModal(
+                "Missing key",
+                "Paste the API key first.",
+                error=True))
             return
-        if backend in ("keyring", "env") and not env_var:
-            self.app.push_screen(MessageModal("Missing env name", "Provide an env var name.", error=True))
+        if backend in ("keyring", "env", "vault") and not env_var:
+            self.app.push_screen(MessageModal(
+                "Missing name",
+                "Provide a name for the key (e.g. CEREBRAS_API_KEY).",
+                error=True))
             return
 
+        # Backend-specific save logic
         if backend == "keyring":
             try:
                 import keyring as _kr
                 _kr.set_password("cogitum", env_var, secret)
+            except ImportError:
+                # Detect package manager and suggest the right install command
+                import shutil as _sh
+                hints = []
+                if _sh.which("pacman"):
+                    hints.append("Arch:   sudo pacman -S python-keyring")
+                if _sh.which("apt"):
+                    hints.append("Debian: sudo apt install python3-keyring")
+                if _sh.which("brew"):
+                    hints.append("macOS:  brew install python-keyring")
+                hints.append("Other:  pipx install keyring  (or pip install --user keyring)")
+                self.app.push_screen(MessageModal(
+                    "keyring not installed",
+                    "The 'keyring' Python package isn't available.\n\n"
+                    + "\n".join(hints) +
+                    "\n\nOr pick a different backend below — "
+                    "'env' and 'vault' work without extra packages.",
+                    error=True))
+                return
             except Exception as e:  # noqa: BLE001
-                self.app.push_screen(MessageModal("keyring failed", str(e), error=True))
+                self.app.push_screen(MessageModal(
+                    "Keyring save failed",
+                    f"Could not write to system keyring:\n\n{e}\n\n"
+                    "On headless systems (no D-Bus), use 'env' or 'vault' instead.",
+                    error=True))
                 return
             ref = f"keyring:cogitum:{env_var}"
+
+        elif backend == "vault":
+            try:
+                from cogitum.core.llm.credentials import CredentialResolver
+                resolver = CredentialResolver()
+                # Vault unlock will prompt for password if needed (first time → set up)
+                resolver.vault_set(env_var, secret)
+            except Exception as e:  # noqa: BLE001
+                self.app.push_screen(MessageModal(
+                    "Vault save failed",
+                    f"Could not write to encrypted vault:\n\n{e}",
+                    error=True))
+                return
+            ref = f"vault:{env_var}"
+
         elif backend == "env":
             ref = f"env:{env_var}"
-        else:
+
+        else:  # plain
             ref = f"plain:{secret}"
 
         self.dismiss(KeyEntryResult(
