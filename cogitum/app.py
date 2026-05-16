@@ -9,8 +9,9 @@ from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.widgets import Static
 
-from .core.agent import Agent, AgentConfig, AgentDone, AgentError, AgentRetry, AgentText, AgentThinking, AgentToolCall, AgentToolResult
+from .core.agent import Agent, AgentApprovalRequest, AgentConfig, AgentDone, AgentError, AgentRetry, AgentText, AgentThinking, AgentToolCall, AgentToolResult
 from .core.builtin_tools import *  # noqa: F401,F403 — registers tools into REGISTRY
+from .widgets.approval import ApprovalWidget
 from .core.llm.loader import load_mesh, load_settings, write_settings
 from .core.llm.mesh import Mesh, ResolvedModel
 from .core.sessions import get_store, SessionStore
@@ -255,6 +256,14 @@ class CogitumApp(App):
 
     # ------------------------------------------------------------------
     # composer
+    # ── Approval handler ───────────────────────────────────────────────────
+
+    @on(ApprovalWidget.Decided)
+    def _on_approval_widget_decided(self, event: ApprovalWidget.Decided) -> None:
+        """Handle approval decision from TUI widget."""
+        if self._approval_queue:
+            self._approval_queue.put_nowait(event.decision)
+
     # ------------------------------------------------------------------
 
     @on(Composer.Submitted)
@@ -336,6 +345,8 @@ class CogitumApp(App):
     async def _run_agent(self, user_message: str, feed: Feed) -> None:
         """Run one agent turn, streaming events into the feed."""
         queue: asyncio.Queue = asyncio.Queue()
+        approval_queue: asyncio.Queue = asyncio.Queue()
+        self._approval_queue = approval_queue
 
         # Current agent block and thinking block (updated live)
         agent_block: AgentBlock | None = None
@@ -431,6 +442,18 @@ class CogitumApp(App):
                             tool_cards[event.call_id] = card
                         tool_calls_data[event.call_id] = event
 
+                elif isinstance(event, AgentApprovalRequest):
+                    # Show approval widget and wait for user decision
+                    from .widgets.approval import ApprovalWidget
+                    approval_widget = ApprovalWidget(
+                        tool_name=event.tool_name,
+                        arguments=event.arguments,
+                        call_id=event.call_id,
+                        danger_level=event.danger_level,
+                    )
+                    feed.mount(approval_widget)
+                    approval_widget.focus()
+
                 elif isinstance(event, AgentToolResult):
                     card = tool_cards.get(event.call_id)
                     # Replace generic card with a beautiful typed card
@@ -512,6 +535,7 @@ class CogitumApp(App):
             history=self._history,
             queue=queue,
             inject_queue=self._inject_queue,
+            approval_queue=approval_queue,
         )
 
         try:
