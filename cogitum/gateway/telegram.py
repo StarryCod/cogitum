@@ -270,6 +270,14 @@ class CogitumBot:
             {"command": "help", "description": "❓ All commands"},
         ])
 
+        # Notify user that gateway restarted (session reset)
+        await self.api.send_message(
+            self.config.allowed_user_id,
+            "🔄 *Cogitum Gateway restarted*\n\n"
+            f"Model: `{escape_md(current_model)}`\n"
+            "Session reset to new\\. Use /resume to continue a previous session\\.",
+        )
+
         try:
             await self._poll_loop()
         finally:
