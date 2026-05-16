@@ -120,12 +120,27 @@ class ProcessManager:
             return f"ERROR: no process with PID {pid}"
         if bp.finished:
             return f"ERROR: process {pid} already finished"
-        if bp.proc.stdin is None:
-            return f"ERROR: process {pid} has no stdin"
+        if bp.proc.stdin is None or bp.proc.stdin.is_closing():
+            return f"ERROR: process {pid} stdin is closed"
         try:
             bp.proc.stdin.write((data + "\n").encode())
             await bp.proc.stdin.drain()
-            return f"OK: sent to PID {pid}"
+            return f"OK: sent {len(data)} chars to PID {pid}"
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    async def close_stdin(self, pid: int) -> str:
+        """Close stdin (send EOF) so the process can exit normally."""
+        bp = self._processes.get(pid)
+        if not bp:
+            return f"ERROR: no process with PID {pid}"
+        if bp.finished:
+            return f"ERROR: process {pid} already finished"
+        if bp.proc.stdin is None or bp.proc.stdin.is_closing():
+            return f"ERROR: process {pid} stdin already closed"
+        try:
+            bp.proc.stdin.close()
+            return f"OK: closed stdin for PID {pid}"
         except Exception as e:
             return f"ERROR: {e}"
 
@@ -143,6 +158,29 @@ class ProcessManager:
     def cleanup_finished(self) -> int:
         """Remove finished processes from tracking. Returns count removed."""
         to_remove = [pid for pid, bp in self._processes.items() if bp.finished]
+        for pid in to_remove:
+            if self._processes[pid]._reader_task:
+                self._processes[pid]._reader_task.cancel()
+            del self._processes[pid]
+        return len(to_remove)
+
+    def cleanup_finished_older_than(self, seconds: float = 300) -> int:
+        """Drop finished processes whose exit was more than `seconds` ago.
+
+        Used as housekeeping on every `terminal(command='list')` so the agent
+        sees a clean roster without surprises (PID reuse, leaks, etc.).
+        Live processes and recently-finished ones are kept so the agent can
+        still read their final output.
+        """
+        now = time.time()
+        to_remove = []
+        for pid, bp in self._processes.items():
+            if not bp.finished:
+                continue
+            # Track finish time roughly via uptime — if reader_task is done and
+            # it's been a while, drop it.
+            if bp.uptime > seconds:
+                to_remove.append(pid)
         for pid in to_remove:
             if self._processes[pid]._reader_task:
                 self._processes[pid]._reader_task.cancel()

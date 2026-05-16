@@ -721,11 +721,11 @@ class CogitumBot:
             session = self.sessions.get(chat_id)
             if session and hasattr(session, '_approval_queue') and session._approval_queue:
                 await session._approval_queue.put((call_id, action))
-                icon = "✅" if action == "approve" else "❌"
-                await self.api.answer_callback(cb_id, f"{icon} {'Allowed' if action == 'approve' else 'Denied'}")
+                glyph = "◈" if action == "approve" else "✕"
+                await self.api.answer_callback(cb_id, f"{glyph} {'Sanctioned' if action == 'approve' else 'Forbidden'}")
                 # Edit the approval message to show decision
                 msg_id = callback["message"]["message_id"]
-                decision_text = f"{'✅ Allowed' if action == 'approve' else '❌ Denied'}"
+                decision_text = f"{'◈ Sanctioned' if action == 'approve' else '✕ Forbidden'}"
                 await self.api.edit_message(chat_id, msg_id, escape_md(decision_text))
             else:
                 await self.api.answer_callback(cb_id, "⚠️ No pending approval")
@@ -876,20 +876,20 @@ class CogitumBot:
                             await self.api.send_photo(chat_id, path_match.group(1))
 
                 elif isinstance(event, AgentApprovalRequest):
-                    # Show approval buttons to user
-                    danger_icon = "🔴" if event.danger_level == "danger" else "🟡"
+                    # Show approval buttons to user (40K-styled glyphs).
+                    danger_rune = "▲" if event.danger_level == "danger" else "◈"
                     from cogitum.gateway.tg_formatter import escape_md
                     from cogitum.core.builtin_tools import _tool_subtitle_for_approval
 
                     desc = _tool_subtitle_for_approval(event.tool_name, event.arguments)
                     approval_text = (
-                        f"{danger_icon} *Approval required* \({escape_md(event.danger_level)}\)\n\n"
+                        f"{danger_rune} *Sanction required* \\({escape_md(event.danger_level)}\\)\n\n"
                         f"`{escape_md(event.tool_name)}`\n"
                         f"{escape_md(desc)}"
                     )
                     markup = {"inline_keyboard": [[
-                        {"text": "✅ Allow", "callback_data": f"approve:{event.call_id}"},
-                        {"text": "❌ Deny", "callback_data": f"reject:{event.call_id}"},
+                        {"text": "◈ Sanction", "callback_data": f"approve:{event.call_id}"},
+                        {"text": "✕ Forbid", "callback_data": f"reject:{event.call_id}"},
                     ]]}
                     await self.api.send_message(chat_id, approval_text, reply_markup=markup)
 

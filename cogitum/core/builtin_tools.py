@@ -356,26 +356,47 @@ async def terminal(
     stdin_data: str = "",
     last_n: int = 50,
 ) -> str:
-    """Run shell commands in 3 modes.
+    """Run shell commands in three modes: normal, timeout, background.
 
-    command: Shell command to execute (or action for background: 'list', 'read', 'kill', 'write').
-    workdir: Working directory (defaults to cwd).
-    mode: 'normal' (default), 'timeout', or 'background'.
-    timeout: Max seconds for 'timeout' mode (default 120). Normal mode has no timeout.
-    pid: PID for background process actions (read/kill/write).
-    stdin_data: Data to send to background process stdin (for 'write' action).
-    last_n: Number of output lines to read from background process (default 50).
+    PARAMETERS
+      command:     Shell command to run, OR a background action verb
+                   ('list' / 'read' / 'kill' / 'write' / 'close') when
+                   mode='background' and you're managing an existing process.
+      workdir:     Working directory (defaults to current).
+      mode:        'normal' | 'timeout' | 'background'.  Default 'normal'.
+      timeout:     Hard time-limit in seconds for mode='timeout' (default 120).
+                   Ignored otherwise.
+      pid:         PID of an existing background process for read/kill/write/close.
+      stdin_data:  Text to send to a background process's stdin via 'write'.
+      last_n:      Tail size when reading background output (default 50).
 
-    Modes:
-      normal   — run command, wait for completion, return output. No timeout.
-      timeout  — run command with a time limit. Killed if exceeds timeout.
-      background — start command in background, return PID immediately.
-                   Then use command='list'/'read'/'kill'/'write' with pid= to manage.
+    MODES
+
+      normal     Run synchronously, no timeout. Returns full stdout+stderr
+                 once the command exits. Best for short interactive things
+                 (ls, cat, git status). Output is capped at 50KB.
+
+      timeout    Same as normal, but the command is killed if it exceeds
+                 `timeout` seconds. On kill returns the message
+                 "TIMEOUT: command killed after Ns. Last output: ...". Use
+                 this when you want a hard guarantee the call won't hang.
+
+      background Spawn the command and return its PID immediately. The agent
+                 keeps working while the process runs. Then issue follow-ups:
+                   command='list',  mode='background'             → all PIDs
+                   command='read',  mode='background', pid=N      → tail output
+                   command='write', mode='background', pid=N,
+                                   stdin_data='answer'            → send to stdin (\\n appended)
+                   command='close', mode='background', pid=N      → close stdin (EOF)
+                   command='kill',  mode='background', pid=N      → terminate
+                 Use background for servers, watchers, long builds, anything
+                 that needs interactive stdin, or work you want to overlap
+                 with other tool calls.
     """
     from cogitum.core.process_manager import ProcessManager
 
     # Auto-save checkpoint before dangerous commands
-    if _is_dangerous_command(command) and command not in ("list", "read", "kill", "write"):
+    if _is_dangerous_command(command) and command not in ("list", "read", "kill", "write", "close"):
         _auto_cogit_save(f"before terminal: {command[:50]}")
 
     cwd = workdir or os.getcwd()
@@ -384,6 +405,7 @@ async def terminal(
     # ── Background mode: management actions ──
     if mode == "background":
         if command == "list":
+            pm.cleanup_finished_older_than(seconds=300)  # housekeeping
             procs = pm.list_processes()
             if not procs:
                 return "No background processes running."
@@ -410,14 +432,25 @@ async def terminal(
                 return "ERROR: stdin_data required for 'write' action"
             return await pm.write_stdin(pid, stdin_data)
 
+        elif command == "close":
+            if not pid:
+                return "ERROR: pid required for 'close' action"
+            return await pm.close_stdin(pid)
+
         else:
             # Start a new background process
             bp = await pm.spawn(command, workdir=cwd)
             await asyncio.sleep(0.3)  # brief wait to catch immediate failures
             if bp.finished:
                 output = "\n".join(bp.output_lines[-20:])
-                return f"Process exited immediately (exit {bp.exit_code}):\n{output}"
-            return f"OK: started background process PID {bp.pid}\nUse terminal(command='read', mode='background', pid={bp.pid}) to check output."
+                return (
+                    f"Process exited immediately (exit {bp.exit_code}):\n{output}"
+                )
+            return (
+                f"OK: started background process PID {bp.pid}\n"
+                f"Use terminal(command='read', mode='background', pid={bp.pid}) to check output, "
+                f"'write' to send stdin, 'kill' to stop."
+            )
 
     # ── Normal mode: no timeout ──
     if mode == "normal":
@@ -452,9 +485,21 @@ async def terminal(
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
+                # Capture any partial output before killing
+                partial = b""
+                try:
+                    if proc.stdout:
+                        partial = await asyncio.wait_for(proc.stdout.read(8192), timeout=0.5)
+                except Exception:
+                    pass
                 proc.kill()
                 await proc.wait()
-                return f"TIMEOUT: command killed after {timeout}s. Use mode='background' for long-running commands."
+                tail = partial.decode(errors="replace").strip()[-2000:]
+                return (
+                    f"TIMEOUT: command killed after {timeout}s.\n"
+                    f"Last output:\n{tail or '(none captured)'}\n"
+                    f"Hint: switch to mode='background' if the command is long-running."
+                )
             output = stdout.decode(errors="replace").strip()
             if len(output) > 50000:
                 output = output[:50000] + "\n… (truncated, 50KB limit)"

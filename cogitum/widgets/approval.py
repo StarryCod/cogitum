@@ -4,14 +4,12 @@ cogitum.widgets.approval
 Tool approval widget — shows when agent wants to execute medium/danger commands.
 
 User navigates with ↑/↓ arrows and confirms with Enter.
-Options: ✅ Allow, ❌ Deny, ✏️ Edit (for advanced users).
+40K-styled glyphs (no consumer emoji): ◈ Sanction · ✕ Forbid.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar
 
-from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.message import Message
@@ -19,40 +17,63 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
 
-from ..design import GOLD, GOLD_DIM, BRONZE, TXT, TXT_DIM, RUST, BG
+from ..design import GOLD, GOLD_HI, BRONZE, COPPER, TXT_DIM, RUST
 
 
-# ── Danger level colors ───────────────────────────────────────────────────────
+# ── Danger level glyphs (Imperial Fists / 40K aesthetic) ─────────────────────
 
 _DANGER_COLORS = {
-    "medium": BRONZE,
+    "low": BRONZE,
+    "medium": COPPER,
     "danger": RUST,
 }
 
-_DANGER_ICONS = {
-    "medium": "🟡",
-    "danger": "🔴",
+# No emoji. Geometric runes only.
+_DANGER_RUNES = {
+    "low": "◇",       # hollow diamond — minor
+    "medium": "◈",    # diamond with mark — caution
+    "danger": "▲",    # triangle — alert
 }
 
+# Action glyphs
+_RUNE_ALLOW = "◈"   # sanctioned
+_RUNE_DENY = "✕"    # forbidden
 
-class ApprovalWidget(Widget):
+
+class ApprovalWidget(Widget, can_focus=True):
     """Inline approval prompt for tool calls.
-    
+
+    Mounted into the feed. Steals focus on mount so arrow keys + Enter work.
     Shows tool name, arguments summary, danger level.
-    User picks: Allow / Deny with arrow keys + Enter.
+    User picks: Sanction / Forbid with arrow keys + Enter, or [Y]/[N].
     """
 
     DEFAULT_CSS = """
     ApprovalWidget {
         height: auto;
-        max-height: 8;
-        margin: 0 1;
+        margin: 1 1;
         padding: 1 2;
-        border: solid $warning;
-        background: $surface;
+        border: tall #A8732D;
+        background: #14110C;
     }
     ApprovalWidget.danger {
-        border: solid $error;
+        border: tall #9B3A2A;
+        background: #1A0E0C;
+    }
+    ApprovalWidget:focus {
+        border: tall #F5C24A;
+    }
+    ApprovalWidget #approval-header {
+        height: auto;
+        margin-bottom: 1;
+    }
+    ApprovalWidget #approval-options {
+        height: auto;
+    }
+    ApprovalWidget #approval-hint {
+        height: 1;
+        color: #7A5A1A;
+        margin-top: 1;
     }
     """
 
@@ -68,6 +89,17 @@ class ApprovalWidget(Widget):
 
     selected: reactive[int] = reactive(0)
 
+    BINDINGS = [
+        ("up", "move_up", "up"),
+        ("down", "move_down", "down"),
+        ("k", "move_up", "up"),
+        ("j", "move_down", "down"),
+        ("enter", "confirm", "confirm"),
+        ("y", "quick_approve", "approve"),
+        ("n", "quick_deny", "deny"),
+        ("escape", "quick_deny", "deny"),
+    ]
+
     def __init__(
         self,
         tool_name: str,
@@ -81,32 +113,48 @@ class ApprovalWidget(Widget):
         self.arguments = arguments
         self.call_id = call_id
         self.danger_level = danger_level
-        self._options = ["✅ Allow", "❌ Deny"]
+        self._options = [
+            (_RUNE_ALLOW, "Sanction"),
+            (_RUNE_DENY, "Forbid"),
+        ]
         if danger_level == "danger":
             self.add_class("danger")
 
     def compose(self) -> ComposeResult:
-        icon = _DANGER_ICONS.get(self.danger_level, "🟡")
+        rune = _DANGER_RUNES.get(self.danger_level, "◈")
         color = _DANGER_COLORS.get(self.danger_level, BRONZE)
 
-        # Build description
         desc = self._describe_tool()
+        level_label = self.danger_level.upper()
 
         yield Static(
-            f"{icon} [bold {color}]Approval required[/] ({self.danger_level})\n"
-            f"[bold]{self.tool_name}[/]: {desc}",
+            f"[bold {color}]{rune}  Sanction required[/]  "
+            f"[{TXT_DIM}]· {level_label}[/]\n"
+            f"[bold {GOLD_HI}]{self.tool_name}[/]  [{TXT_DIM}]{desc}[/]",
             id="approval-header",
         )
         yield Static(self._render_options(), id="approval-options")
+        yield Static(
+            f"[{TXT_DIM}]↑↓ select · enter confirm · "
+            f"[{GOLD}]Y[/] sanction · [{GOLD}]N[/]/esc forbid[/]",
+            id="approval-hint",
+        )
+
+    def on_mount(self) -> None:
+        # Take focus immediately so arrow keys work without an extra click.
+        self.focus()
 
     def _describe_tool(self) -> str:
         """Generate compact description of what the tool will do."""
         args = self.arguments
         if self.tool_name == "terminal":
             cmd = args.get("command", "")
-            mode = args.get("mode", "normal")
+            mode = args.get("mode", args.get("kind", "normal"))
             if mode == "background":
                 return f"[bg] {cmd[:80]}"
+            if mode == "timed":
+                t = args.get("timeout", "?")
+                return f"[t={t}s] {cmd[:80]}"
             return cmd[:100]
         elif self.tool_name == "write_file":
             path = args.get("path", "")
@@ -119,48 +167,43 @@ class ApprovalWidget(Widget):
         return str(args)[:80]
 
     def _render_options(self) -> str:
-        """Render option list with selection indicator."""
         parts = []
-        for i, opt in enumerate(self._options):
+        for i, (rune, label) in enumerate(self._options):
             if i == self.selected:
-                parts.append(f"  [bold {GOLD}]▸ {opt}[/]")
+                parts.append(f"  [bold {GOLD_HI}]▸ {rune}  {label}[/]")
             else:
-                parts.append(f"    [{TXT_DIM}]{opt}[/]")
+                parts.append(f"    [{TXT_DIM}]{rune}  {label}[/]")
         return "\n".join(parts)
 
     def watch_selected(self) -> None:
-        """Update display when selection changes."""
         try:
-            options_widget = self.query_one("#approval-options", Static)
-            options_widget.update(self._render_options())
-        except Exception:
-            pass  # Widget not yet composed
+            self.query_one("#approval-options", Static).update(self._render_options())
+        except Exception:  # noqa: BLE001
+            pass  # not yet composed
 
-    def on_key(self, event: events.Key) -> None:
-        """Handle arrow keys and Enter."""
-        if event.key in ("up", "k"):
-            self.selected = max(0, self.selected - 1)
-            event.stop()
-        elif event.key in ("down", "j"):
-            self.selected = min(len(self._options) - 1, self.selected + 1)
-            event.stop()
-        elif event.key == "enter":
-            decision = "approve" if self.selected == 0 else "reject"
-            self.post_message(self.Decided(call_id=self.call_id, decision=decision))
-            self.remove()
-            event.stop()
-        elif event.key == "escape":
-            # Escape = deny
-            self.post_message(self.Decided(call_id=self.call_id, decision="reject"))
-            self.remove()
-            event.stop()
-        elif event.key in ("y", "Y"):
-            # Quick approve
-            self.post_message(self.Decided(call_id=self.call_id, decision="approve"))
-            self.remove()
-            event.stop()
-        elif event.key in ("n", "N"):
-            # Quick deny
-            self.post_message(self.Decided(call_id=self.call_id, decision="reject"))
-            self.remove()
-            event.stop()
+    # ── Actions (driven by BINDINGS) ──────────────────────────────────────────
+
+    def action_move_up(self) -> None:
+        self.selected = max(0, self.selected - 1)
+
+    def action_move_down(self) -> None:
+        self.selected = min(len(self._options) - 1, self.selected + 1)
+
+    def action_confirm(self) -> None:
+        decision = "approve" if self.selected == 0 else "reject"
+        self._dispatch(decision)
+
+    def action_quick_approve(self) -> None:
+        self._dispatch("approve")
+
+    def action_quick_deny(self) -> None:
+        self._dispatch("reject")
+
+    def _dispatch(self, decision: str) -> None:
+        self.post_message(self.Decided(call_id=self.call_id, decision=decision))
+        self.remove()
+
+    # Mouse click on an option line confirms it (best-effort).
+    def on_click(self, event: events.Click) -> None:
+        # Click anywhere on the widget = focus (so kbd works after mouse).
+        self.focus()
