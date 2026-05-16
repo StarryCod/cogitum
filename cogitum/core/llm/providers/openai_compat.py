@@ -22,6 +22,7 @@ import httpx
 from ..capabilities import Capability
 from ..events_helpers import normalize_messages_openai
 from ..keypool import LeaseOutcome
+from ..prompt_caching import apply_cache_control, should_cache
 from ...events import ChunkKind, StreamChunk, Usage
 from ..provider import CompletionRequest, Provider
 
@@ -48,6 +49,9 @@ class OpenAICompatProvider(Provider):
                 timeout=httpx.Timeout(
                     self.config.timeout_s,
                     connect=self.config.connect_timeout_s,
+                    # Read timeout: max time between receiving chunks.
+                    # If no data arrives for 120s, the connection is stale.
+                    read=min(self.config.timeout_s, 120.0),
                 ),
             )
         return self._client
@@ -95,6 +99,10 @@ class OpenAICompatProvider(Provider):
             "messages": normalize_messages_openai(req.messages, system=req.system),
             "stream": req.stream,
         }
+
+        # Apply prompt caching if provider supports it
+        if should_cache(self.config.base_url, req.model.id):
+            body["messages"] = apply_cache_control(body["messages"])
 
         if req.tools:
             body["tools"] = req.tools
@@ -171,6 +179,10 @@ class OpenAICompatProvider(Provider):
 
                 if resp.status_code == 429:
                     body_text = (await resp.aread()).decode("utf-8", "replace")[:400]
+                    # Parse Retry-After header if present (omniroute/providers may send it)
+                    retry_after = resp.headers.get("retry-after", "")
+                    if retry_after:
+                        body_text = f"[Retry-After: {retry_after}] {body_text}"
                     lease.record(LeaseOutcome.RATE_LIMITED, error=body_text)
                     yield StreamChunk(
                         kind=ChunkKind.ERROR,
@@ -218,6 +230,11 @@ class OpenAICompatProvider(Provider):
         total_usage = Usage()
         stop_reason: str | None = None
         ok = False
+        # Buffer for detecting inline tool call markers (Kimi K2.6, etc.)
+        # These models emit tool calls as special tokens in content/reasoning
+        # instead of using the standard delta.tool_calls field.
+        _inline_tc_buf: str = ""
+        _in_inline_tc: bool = False
 
         async for raw_line in resp.aiter_lines():
             if not raw_line:
@@ -244,14 +261,40 @@ class OpenAICompatProvider(Provider):
 
                 # 1) text content
                 if isinstance(delta.get("content"), str) and delta["content"]:
-                    ok = True
-                    yield StreamChunk(kind=ChunkKind.TEXT, text=delta["content"])
+                    text_chunk = delta["content"]
+                    # Detect inline tool call markers (Kimi K2.6, Moonshot)
+                    # Format: <|tool_calls_section_begin|>...<|tool_calls_section_end|>
+                    if "<|tool_calls_section_begin|>" in text_chunk or _in_inline_tc:
+                        _in_inline_tc = True
+                        _inline_tc_buf += text_chunk
+                        if "<|tool_calls_section_end|>" in _inline_tc_buf:
+                            _in_inline_tc = False
+                            # Parse inline tool calls
+                            for tc_chunk in self._parse_inline_tool_calls(_inline_tc_buf, tool_buffers):
+                                yield tc_chunk
+                            _inline_tc_buf = ""
+                            ok = True
+                        # Don't yield as TEXT while buffering tool calls
+                    else:
+                        ok = True
+                        yield StreamChunk(kind=ChunkKind.TEXT, text=text_chunk)
 
                 # 2) reasoning (OpenAI o-series + many compats use reasoning_content)
                 rc = delta.get("reasoning_content") or delta.get("reasoning")
                 if isinstance(rc, str) and rc:
-                    ok = True
-                    yield StreamChunk(kind=ChunkKind.THINKING, thinking=rc)
+                    # Same inline tool call detection for reasoning stream
+                    if "<|tool_calls_section_begin|>" in rc or _in_inline_tc:
+                        _in_inline_tc = True
+                        _inline_tc_buf += rc
+                        if "<|tool_calls_section_end|>" in _inline_tc_buf:
+                            _in_inline_tc = False
+                            for tc_chunk in self._parse_inline_tool_calls(_inline_tc_buf, tool_buffers):
+                                yield tc_chunk
+                            _inline_tc_buf = ""
+                            ok = True
+                    else:
+                        ok = True
+                        yield StreamChunk(kind=ChunkKind.THINKING, thinking=rc)
 
                 # 3) tool calls (deltas)
                 for tc in delta.get("tool_calls") or []:
@@ -297,8 +340,72 @@ class OpenAICompatProvider(Provider):
             kind=ChunkKind.STOP,
             stop_reason=stop_reason or "end_turn",
         )
-        if ok or stop_reason:
+        # Only record OK if we actually got meaningful content.
+        # Empty responses (out=0) should NOT reset error_streak — they indicate
+        # the model refused or the provider returned nothing useful.
+        if ok or tool_buffers:
             lease.record(LeaseOutcome.OK, tokens=lease.tokens_used)
+        elif stop_reason:
+            # Got a stop but no content — record as OK but don't reset streak
+            # (lease default is ERROR, which would penalize — use OK but the
+            # streak reset is handled by the OK branch in _release)
+            # Actually: treat empty-but-stopped as OK to not penalize the key.
+            # The key worked fine, the model just chose to say nothing.
+            lease.record(LeaseOutcome.OK, tokens=lease.tokens_used)
+
+    # ------------------------------------------------------------------
+    # Inline tool call parsing (Kimi K2.6, Moonshot, etc.)
+    # ------------------------------------------------------------------
+
+    def _parse_inline_tool_calls(
+        self, buf: str, tool_buffers: dict[int, dict[str, Any]]
+    ) -> list[StreamChunk]:
+        """Parse tool calls from inline markers in content/reasoning stream.
+
+        Format:
+          <|tool_calls_section_begin|>
+          <|tool_call_begin|> functions.tool_name:index <|tool_call_argument_begin|>
+          {"arg": "value"}
+          <|tool_call_end|>
+          <|tool_calls_section_end|>
+        """
+        import re
+        chunks: list[StreamChunk] = []
+
+        # Extract individual tool calls
+        tc_pattern = re.compile(
+            r"<\|tool_call_begin\|>\s*"
+            r"(?:functions\.)?(\w+)(?::(\d+))?\s*"
+            r"<\|tool_call_argument_begin\|>\s*"
+            r"(.*?)\s*"
+            r"<\|tool_call_end\|>",
+            re.DOTALL,
+        )
+
+        for match in tc_pattern.finditer(buf):
+            name = match.group(1)
+            idx = int(match.group(2)) if match.group(2) else len(tool_buffers)
+            raw_args = match.group(3).strip()
+
+            try:
+                args_obj = json.loads(raw_args) if raw_args else {}
+            except json.JSONDecodeError:
+                args_obj = {"_raw": raw_args}
+
+            # Generate a call ID if not provided
+            call_id = f"call_inline_{name}_{idx}"
+
+            # Register in tool_buffers so finish_reason logic works
+            tool_buffers[idx] = {"id": call_id, "name": name, "args": raw_args}
+
+            chunks.append(StreamChunk(
+                kind=ChunkKind.TOOL_CALL_DONE,
+                tool_call_id=call_id,
+                tool_call_name=name,
+                tool_call_args=args_obj,
+            ))
+
+        return chunks
 
 
 def _usage_from_openai(u: dict[str, Any]) -> Usage:

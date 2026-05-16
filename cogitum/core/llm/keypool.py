@@ -49,7 +49,7 @@ class KeyStatus(str, Enum):
 # Cooldown ladder for 429 / transient
 # ---------------------------------------------------------------------------
 
-_COOLDOWN_LADDER_S: tuple[float, ...] = (15.0, 30.0, 60.0, 300.0, 900.0, 3600.0)
+_COOLDOWN_LADDER_S: tuple[float, ...] = (5.0, 10.0, 20.0, 40.0, 60.0, 120.0)
 
 
 def _next_cooldown(streak: int) -> float:
@@ -329,15 +329,20 @@ class KeyPool:
 
         if lease.outcome == LeaseOutcome.OK:
             s.error_streak = 0
-            if s.status == KeyStatus.RATE_LIMITED and time.monotonic() >= s.cooldown_until:
-                s.status = KeyStatus.ACTIVE
+            s.status = KeyStatus.ACTIVE
+            s.cooldown_until = 0.0
             s.last_error = ""
             return
 
         if lease.outcome == LeaseOutcome.RATE_LIMITED:
             s.error_streak += 1
             s.status = KeyStatus.RATE_LIMITED
-            s.cooldown_until = time.monotonic() + _next_cooldown(s.error_streak - 1)
+            # For single-key pools, use minimal cooldown — let agent-level
+            # retry handle the backoff. Don't punish the only key for minutes.
+            if len(self.states) == 1:
+                s.cooldown_until = time.monotonic() + min(_next_cooldown(s.error_streak - 1), 5.0)
+            else:
+                s.cooldown_until = time.monotonic() + _next_cooldown(s.error_streak - 1)
             s.last_error = lease.error_msg or "rate limited"
             logger.info(
                 "key %s/%s rate-limited (streak=%d, cooldown=%.1fs)",
@@ -368,10 +373,16 @@ class KeyPool:
 
         s.error_streak += 1
         s.last_error = lease.error_msg or "error"
-        # Soft cooldown after 5 consecutive errors (was 3 — too aggressive for single-key pools)
-        if s.error_streak >= 5:
+        # Soft cooldown after 3 consecutive errors (network issues, timeouts)
+        # Cap streak influence at 8 to prevent absurd cooldowns
+        if s.error_streak >= 3:
+            effective_streak = min(s.error_streak - 3, len(_COOLDOWN_LADDER_S) - 1)
+            cooldown = _next_cooldown(effective_streak)
+            # Single-key pool: cap at 10s for generic errors
+            if len(self.states) == 1:
+                cooldown = min(cooldown, 10.0)
             s.status = KeyStatus.RATE_LIMITED
-            s.cooldown_until = time.monotonic() + _next_cooldown(s.error_streak - 5)
+            s.cooldown_until = time.monotonic() + cooldown
 
     def _auto_recover(self, now: float) -> None:
         for s in self.states:

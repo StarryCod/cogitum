@@ -187,11 +187,6 @@ class Mesh:
                     yield chunk
             except asyncio.CancelledError:
                 lease.record(LeaseOutcome.CANCELLED)
-                yield StreamChunk(
-                    kind=ChunkKind.ERROR,
-                    error=f"{provider.id}: cancelled",
-                )
-                yield StreamChunk(kind=ChunkKind.STOP, stop_reason="interrupted")
                 raise
             except Exception as e:  # noqa: BLE001
                 logger.exception("provider %s stream raised", provider.id)

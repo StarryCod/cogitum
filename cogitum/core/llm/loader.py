@@ -245,8 +245,8 @@ base_url = "https://inference.canopywave.io/v1"
 auth = "bearer"
 
 [providers.canopywave.keys.primary]
-secret_ref = "plain:2hC_uRJSoTM65hNwNvetB7X5LWwbIrkZ2MEsqkZizf4"
-notes = "imported from ~/.pi/agent/extensions/canopywave.ts"
+secret_ref = "env:CANOPYWAVE_API_KEY"
+notes = "set CANOPYWAVE_API_KEY in your environment or .env file"
 
 [providers.canopywave.models."moonshotai/kimi-k2.6"]
 display = "Kimi K2.6"

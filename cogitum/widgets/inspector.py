@@ -3,8 +3,8 @@
 Right-hand column. Sections, top to bottom:
   · MODEL    — model name, provider, context use
   · TOOLS    — available tools count + list
-  · SESSION  — messages count, turns
-  · USAGE    — token meter, elapsed time
+  · SESSION  — messages count, turns, elapsed (live)
+  · USAGE    — token meter (realtime streaming estimate)
 """
 from __future__ import annotations
 
@@ -46,8 +46,13 @@ class InspectorState:
     turns: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
     started_at: float = field(default_factory=time.time)
     last_error: str = ""
+    # Realtime streaming counters (approx, updated per-delta)
+    streaming_chars: int = 0
+    is_streaming: bool = False
 
 
 def _h(name: str) -> Text:
@@ -74,15 +79,41 @@ def _bar(pct: float, width: int = 18, full: str = GOLD, empty: str = MUTED) -> T
 
 
 class Inspector(Static):
+    # Refresh interval for elapsed timer (seconds)
+    _REFRESH_INTERVAL = 1.0
+
     def __init__(self, state: InspectorState | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.state = state or InspectorState()
+        self._timer = None
+
+    def on_mount(self) -> None:
+        """Start periodic refresh for elapsed time."""
+        self._timer = self.set_interval(self._REFRESH_INTERVAL, self._tick)
+
+    def _tick(self) -> None:
+        """Periodic refresh — updates elapsed time and streaming estimate."""
+        self.refresh()
 
     def update_state(self, **kwargs) -> None:
         """Update state fields and refresh."""
         for k, v in kwargs.items():
             if hasattr(self.state, k):
                 setattr(self.state, k, v)
+        self.refresh()
+
+    def stream_delta(self, chars: int) -> None:
+        """Called on every text delta — updates realtime token estimate."""
+        self.state.streaming_chars += chars
+        self.state.is_streaming = True
+        # Throttle: only refresh every 20 chars (~5 tokens) to avoid UI spam
+        if self.state.streaming_chars % 80 < chars:
+            self.refresh()
+
+    def stream_end(self) -> None:
+        """Called when streaming finishes — reset streaming state."""
+        self.state.is_streaming = False
+        self.state.streaming_chars = 0
         self.refresh()
 
     def render(self):
@@ -138,9 +169,24 @@ class Inspector(Static):
         rows.append(_h("USAGE"))
         rows.append(Text(""))
         rows.append(_kv("tokens in",  f"{st.tokens_in:,}",  TXT))
-        rows.append(_kv("tokens out", f"{st.tokens_out:,}", TXT))
-        total = st.tokens_in + st.tokens_out
+
+        # Show realtime streaming estimate or final count
+        if st.is_streaming:
+            approx_out = st.tokens_out + (st.streaming_chars // 4)
+            rows.append(_kv("tokens out", f"~{approx_out:,}", OLIVE))
+        else:
+            rows.append(_kv("tokens out", f"{st.tokens_out:,}", TXT))
+
+        total = st.tokens_in + st.tokens_out + (st.streaming_chars // 4 if st.is_streaming else 0)
         rows.append(_kv("total",      f"{total:,}",         f"bold {GOLD_HI}"))
+
+        # Cache stats (if any)
+        if st.cache_read or st.cache_write:
+            cache_total = st.cache_read + st.cache_write
+            saved_pct = int(st.cache_read / max(st.tokens_in, 1) * 100)
+            rows.append(_kv("cached",    f"{st.cache_read:,} read", OK))
+            if saved_pct > 0:
+                rows.append(_kv("savings",   f"~{saved_pct}%", OK))
 
         # ── ERROR ──────────────────────────────────────────────────────
         if st.last_error:
