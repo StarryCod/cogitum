@@ -409,6 +409,18 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
             ref = f"vault:{env_var}"
 
         elif backend == "env":
+            # Persist the secret value to ~/.config/cogitum/secrets.env so it
+            # survives across sessions and is picked up at next CLI start.
+            from cogitum.core.llm.secrets_env import save_secret
+            if secret:
+                try:
+                    save_secret(env_var, secret)
+                except Exception as e:  # noqa: BLE001
+                    self.app.push_screen(MessageModal(
+                        "Save failed",
+                        f"Could not write secrets.env: {e}",
+                        error=True))
+                    return
             ref = f"env:{env_var}"
 
         else:  # plain

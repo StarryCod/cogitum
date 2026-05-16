@@ -952,6 +952,13 @@ async def run_bot(config: TelegramConfig | None = None) -> None:
 
 def main() -> None:
     """CLI entry point."""
+    # Load persisted secrets so providers can resolve env: refs
+    try:
+        from cogitum.core.llm.secrets_env import load_secrets_into_environ
+        load_secrets_into_environ(override=False)
+    except Exception:
+        pass
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",

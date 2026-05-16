@@ -433,6 +433,58 @@ def _providers_command(args: argparse.Namespace) -> int:
 # Telegram gateway
 # ---------------------------------------------------------------------------
 
+def _secret_command(args: argparse.Namespace) -> int:
+    """Manage persistent secrets in ~/.config/cogitum/secrets.env."""
+    from cogitum.core.llm.secrets_env import (
+        SECRETS_PATH,
+        list_secrets,
+        remove_secret,
+        save_secret,
+    )
+
+    action = args.secret_action
+
+    if action == "path":
+        print(SECRETS_PATH)
+        return 0
+
+    if action == "list":
+        items = list_secrets()
+        if not items:
+            print("(no secrets stored)")
+            return 0
+        width = max(len(k) for k in items)
+        for name, masked in items.items():
+            print(f"  {name:<{width}}  {masked}")
+        return 0
+
+    if action == "set":
+        value = args.value
+        if value is None:
+            # Read from stdin if piped, else prompt
+            if not sys.stdin.isatty():
+                value = sys.stdin.read().strip()
+            else:
+                import getpass
+                value = getpass.getpass(f"{args.name}=")
+        if not value:
+            print("error: empty value", file=sys.stderr)
+            return 1
+        save_secret(args.name, value)
+        print(f"✓ saved {args.name} to {SECRETS_PATH}")
+        return 0
+
+    if action == "unset":
+        ok = remove_secret(args.name)
+        if ok:
+            print(f"✓ removed {args.name}")
+            return 0
+        print(f"(not present: {args.name})")
+        return 1
+
+    return 1
+
+
 def _tg_command(args: argparse.Namespace) -> int:
     from .gateway.tg_config import load_tg_config, save_tg_config, TelegramConfig, TG_CONFIG_PATH
     from .gateway.daemon import (
@@ -639,10 +691,32 @@ def build_parser() -> argparse.ArgumentParser:
     tg_sub.add_parser("run", help="run in foreground (for debugging)")
     tg.set_defaults(func=_tg_command)
 
+    # secret store (~/.config/cogitum/secrets.env)
+    sec = sub.add_parser("secret", help="manage persistent API key store (secrets.env)")
+    sec_sub = sec.add_subparsers(dest="secret_action", required=True)
+    s_set = sec_sub.add_parser("set", help="store a secret (prompts for value)")
+    s_set.add_argument("name", help="env var name, e.g. CEREBRAS_API_KEY")
+    s_set.add_argument("value", nargs="?", default=None,
+                       help="value (omit to read from stdin / prompt)")
+    s_unset = sec_sub.add_parser("unset", help="remove a secret")
+    s_unset.add_argument("name")
+    sec_sub.add_parser("list", help="list stored secret names (values masked)")
+    sec_sub.add_parser("path", help="print the secrets.env file path")
+    sec.set_defaults(func=_secret_command)
+
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Load persisted secrets from ~/.config/cogitum/secrets.env BEFORE
+    # any provider/credential resolution. Real-environment variables win
+    # by default (override=False), so user's .bashrc keys still take priority.
+    try:
+        from cogitum.core.llm.secrets_env import load_secrets_into_environ
+        load_secrets_into_environ(override=False)
+    except Exception:
+        pass
+
     # Configure logging to file (not stderr) to avoid breaking TUI rendering
     log_dir = Path(
         os.environ.get("COGITUM_CONFIG_DIR")
