@@ -657,6 +657,19 @@ class CogitumApp(App):
             size = f"{len(result)} chars"
             return FetchCard(url=url, status=status, size=size)
 
+        elif tool_name == "web_search":
+            query = arguments.get("query", "")
+            hits = [l for l in result.splitlines() if l.strip() and not l.startswith("Search results")][:8]
+            total = len([l for l in result.splitlines() if l.strip() and l[0:1].isdigit()])
+            return SearchCard(pattern=query, hits=hits, total=total)
+
+        elif tool_name == "browser":
+            url = arguments.get("url", "") or "(active page)"
+            action = arguments.get("action", "")
+            status = 200 if not error else 500
+            size = f"{action}: {len(result)} chars"
+            return FetchCard(url=url, status=status, size=size)
+
         return None  # generic ToolCallCard stays
 
     # ------------------------------------------------------------------
