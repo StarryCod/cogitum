@@ -275,7 +275,8 @@ class CogitumBot:
             self.config.allowed_user_id,
             "🔄 *Cogitum Gateway restarted*\n\n"
             f"Model: `{escape_md(current_model)}`\n"
-            "Session reset to new\\. Use /resume to continue a previous session\\.",
+            f"⚠️ {escape_md('Previous session was reset. Use /resume to continue a saved session.')}\n\n"
+            f"{escape_md('Tools:')} `{escape_md(str(len(REGISTRY.names())))}`"
         )
 
         try:

@@ -34,3 +34,5 @@ htmlcov/
 *.png
 hermes-agent/
 angry_birds_clone.html
+*.pyc
+__pycache__/

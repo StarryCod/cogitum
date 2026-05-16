@@ -15,8 +15,21 @@ _ESCAPE_CHARS = r"_*[]()~`>#+-=|{}.!"
 
 
 def escape_md(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2."""
+    """Escape special characters for Telegram MarkdownV2.
+
+    Every character in _ESCAPE_CHARS gets a preceding backslash.
+    This is safe for any plain text — but NOT for text that already
+    contains TG formatting (bold, italic, code spans, etc.).
+    """
     return re.sub(r"([" + re.escape(_ESCAPE_CHARS) + r"])", r"\\\1", text)
+
+
+def safe_md(text: str) -> str:
+    """Wrap text for safe MarkdownV2 — escape everything, no formatting.
+
+    Use this when you don't need any formatting and just want safe plain text.
+    """
+    return escape_md(text)
 
 
 def markdown_to_tg(text: str) -> str:
