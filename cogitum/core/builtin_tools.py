@@ -989,13 +989,21 @@ async def web_search(query: str, max_results: int = 8) -> str:
 async def browser(action: str, url: str = "", selector: str = "", text: str = "", screenshot: bool = False) -> str:
     """Control a headless browser for web interaction.
 
-    action: 'open', 'click', 'type', 'text', 'screenshot', 'scroll', 'close'.
-    url: URL to navigate to (for 'open' action).
-    selector: CSS selector for click/type actions.
-    text: Text to type (for 'type' action).
-    screenshot: Take a screenshot after action (returns path).
+    Actions:
+      open       url=…             — navigate to URL (waits for DOM)
+      click      selector=…        — click element by CSS selector
+      type       selector=…, text= — fill input/textarea
+      text                          — extract visible body text (capped 8KB)
+      extract    selector=…        — inner_text of one element (capped 8KB)
+      links                         — list every <a> on the page (href + label)
+      act        text=<JS>         — run arbitrary page.evaluate(JS); JSON result
+      screenshot                    — save .png; returns absolute path
+      scroll     text=down|up|N    — scroll one viewport or N px
+      back / forward / reload       — history navigation
+      title / url                   — current title / current url
+      close                         — shut the browser, free resources
 
-    Usage flow: open a URL first, then interact with elements.
+    All actions reuse a single page so cookies/login persist between calls.
     """
     import json as _json
 
@@ -1014,7 +1022,33 @@ async def browser(action: str, url: str = "", selector: str = "", text: str = ""
                 return "ERROR: playwright not installed. Run: pip install playwright && playwright install chromium"
             pw = await async_playwright().start()
             state["_pw"] = pw
-            state["browser"] = await pw.chromium.launch(headless=True)
+            try:
+                state["browser"] = await pw.chromium.launch(headless=True)
+            except Exception as e:
+                # Fallback: try the full chromium bundle directly if the
+                # default headless-shell couldn't be located (common right
+                # after `pip install playwright` without the small shell).
+                import os as _os
+                cache = _os.path.expanduser("~/.cache/ms-playwright")
+                exe = None
+                if _os.path.isdir(cache):
+                    for entry in sorted(_os.listdir(cache), reverse=True):
+                        if entry.startswith("chromium-"):
+                            cand = _os.path.join(cache, entry, "chrome-linux64", "chrome")
+                            if _os.path.exists(cand):
+                                exe = cand
+                                break
+                if exe:
+                    state["browser"] = await pw.chromium.launch(
+                        headless=True, executable_path=exe,
+                    )
+                else:
+                    await pw.stop()
+                    state["_pw"] = None
+                    return (
+                        f"ERROR: chromium launch failed ({e}). "
+                        f"Run: .venv/bin/playwright install chromium"
+                    )
         if state["page"] is None:
             state["page"] = await state["browser"].new_page()
         return None
@@ -1066,6 +1100,60 @@ async def browser(action: str, url: str = "", selector: str = "", text: str = ""
             if len(content) > 8000:
                 content = content[:8000] + "\n… (truncated)"
             result = content
+
+        elif action == "extract":
+            if not selector:
+                return "ERROR: selector required for 'extract' action"
+            content = await page.locator(selector).first.inner_text(timeout=10000)
+            if len(content) > 8000:
+                content = content[:8000] + "\n… (truncated)"
+            result = content
+
+        elif action == "links":
+            links = await page.evaluate(
+                "() => Array.from(document.querySelectorAll('a[href]'))"
+                ".slice(0, 200)"
+                ".map(a => ({href: a.href, label: (a.innerText||'').trim().slice(0,80)}))"
+            )
+            if not links:
+                return "(no links on page)"
+            lines = [f"Links on {await page.url}:" if False else f"Links ({len(links)}):"]
+            for i, l in enumerate(links, 1):
+                lines.append(f"  {i:3}. {l['label'] or '(no text)'}")
+                lines.append(f"        {l['href']}")
+            result = "\n".join(lines[:1 + 200])
+
+        elif action == "act":
+            if not text:
+                return "ERROR: text=<JS expression> required for 'act' action"
+            try:
+                value = await page.evaluate(text)
+                # Best-effort serialization
+                try:
+                    payload = _json.dumps(value, default=str)[:6000]
+                except Exception:
+                    payload = str(value)[:6000]
+                result = f"OK: act → {payload}"
+            except Exception as e:
+                return f"ERROR: act JS threw: {e}"
+
+        elif action == "back":
+            await page.go_back(wait_until="domcontentloaded", timeout=10000)
+            result = f"OK: back → {await page.title()}"
+
+        elif action == "forward":
+            await page.go_forward(wait_until="domcontentloaded", timeout=10000)
+            result = f"OK: forward → {await page.title()}"
+
+        elif action == "reload":
+            await page.reload(wait_until="domcontentloaded", timeout=15000)
+            result = f"OK: reloaded → {await page.title()}"
+
+        elif action == "title":
+            result = await page.title()
+
+        elif action == "url":
+            result = page.url
 
         elif action == "screenshot":
             import tempfile
