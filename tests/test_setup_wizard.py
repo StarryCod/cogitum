@@ -576,6 +576,108 @@ async def test_custom_provider_modal_returns_preset_with_valid_input():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_manage_models_modal_lists_and_removes():
+    """ManageModelsModal lists existing models and removes the selected one."""
+    from textual.app import App
+    from cogitum.core.llm.config_writer import ConfigWriter
+    from cogitum.setup_flow import ManageModelsModal
+
+    w = ConfigWriter()
+    w.add_provider("mmtest", name="MMTest", format="openai_compat",
+                   base_url="https://x", auth="bearer", enabled=True)
+    w.set_key("mmtest", "primary", "env:K")
+    w.add_model("mmtest", "wrong-llama-80b", display="Wrong",
+                capabilities=["text"], context_window=8192,
+                max_output_tokens=2048)
+    w.add_model("mmtest", "qwen-3-235b", display="Qwen 3 235B",
+                capabilities=["text", "tools"], context_window=128000,
+                max_output_tokens=8192)
+    w.save()
+
+    class _Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(ManageModelsModal("mmtest", "MMTest"))
+
+    async with _Host().run_test(headless=True, size=(140, 50)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        modal = next(s for s in pilot.app.screen_stack
+                     if isinstance(s, ManageModelsModal))
+        assert "wrong-llama-80b" in modal._model_ids
+        assert "qwen-3-235b" in modal._model_ids
+
+        # Stub confirm to auto-yes
+        async def fake_confirm(_screen):
+            return True
+        modal.app.push_screen_wait = fake_confirm  # type: ignore[method-assign]
+
+        from textual.widgets import ListView
+        lv = modal.query_one("#mm-list", ListView)
+        lv.index = modal._model_ids.index("wrong-llama-80b")
+        await pilot.pause()
+        await modal._do_remove_selected()
+        await pilot.pause()
+
+    w2 = ConfigWriter()
+    models = w2.provider("mmtest").get("models") or {}
+    assert "wrong-llama-80b" not in models
+    assert "qwen-3-235b" in models
+
+
+@pytest.mark.asyncio
+async def test_manage_models_modal_adds_manually():
+    """ManageModelsModal Add button persists a new model."""
+    from textual.app import App
+    from textual.widgets import Input
+    from cogitum.core.llm.config_writer import ConfigWriter
+    from cogitum.setup_flow import ManageModelsModal
+
+    w = ConfigWriter()
+    w.add_provider("mmadd", name="MMAdd", format="openai_compat",
+                   base_url="https://x", auth="bearer", enabled=True)
+    w.set_key("mmadd", "primary", "env:K")
+    w.save()
+
+    class _Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(ManageModelsModal("mmadd", "MMAdd"))
+
+    async with _Host().run_test(headless=True, size=(140, 50)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        modal = next(s for s in pilot.app.screen_stack
+                     if isinstance(s, ManageModelsModal))
+        modal.query_one("#mm-add-input", Input).value = "llama-3.1-8b"
+        await pilot.pause()
+        await modal._btn_add()
+        await pilot.pause()
+
+    w2 = ConfigWriter()
+    models = w2.provider("mmadd").get("models") or {}
+    assert "llama-3.1-8b" in models
+
+
+# ---------------------------------------------------------------------------
+# CSS heights — full coverage
+# ---------------------------------------------------------------------------
+
+def test_manage_models_modal_foot_height_is_3():
+    from cogitum.setup_flow import ManageModelsModal
+    css = ManageModelsModal.DEFAULT_CSS
+    m = re.search(r"#mm-foot\s*\{[^}]*height:\s*(\S+)\s*;", css)
+    assert m
+    assert m.group(1).rstrip(";") == "3"
+
+
+def test_key_entry_modal_test_button_added():
+    """KeyEntryModal compose must include the Test button."""
+    import inspect
+    from cogitum.setup_flow import KeyEntryModal
+    src = inspect.getsource(KeyEntryModal.compose)
+    assert '"key-test"' in src or "'key-test'" in src
+
+
+@pytest.mark.asyncio
 async def test_add_provider_flow_seeds_provider_disabled():
     """_add_provider_flow writes a provider entry, enabled=False until key added."""
     from textual.app import App

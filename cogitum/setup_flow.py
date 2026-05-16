@@ -27,6 +27,7 @@ errors, parchment text.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import webbrowser
 from dataclasses import dataclass
@@ -184,7 +185,7 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
     .be-option.selected { color: #F5C24A; background: #1A1610; }
     #key-hint { color: #7A5A1A; height: auto; margin: 1 0; }
     #key-foot { height: 3; align: right middle; margin-top: 1; }
-    #key-foot Button { margin-left: 1; }
+    #key-foot Button { margin-left: 1; min-width: 10; }
     """
 
     BINDINGS = [
@@ -809,6 +810,194 @@ class KeyManagerModal(ModalScreen[str]):
 
 
 # ---------------------------------------------------------------------------
+# Model manager — list / delete / add models per provider
+# ---------------------------------------------------------------------------
+
+class ManageModelsModal(ModalScreen[bool]):
+    """Show all models for a provider, allow removing or adding manually."""
+
+    DEFAULT_CSS = """
+    ManageModelsModal { align: center middle; background: rgba(0,0,0,0.55); }
+    #mm-shell {
+        width: 96; height: 36; padding: 1 2;
+        background: #161618; border: round #7A5A1A;
+    }
+    #mm-title { color: #F5C24A; text-style: bold; height: 1; }
+    #mm-sub   { color: #9C957D; height: 1; padding-bottom: 1; }
+    #mm-list  {
+        height: 1fr; background: #0E0E11; border: round #2A2620;
+        padding: 0 1;
+    }
+    #mm-list > ListItem.--highlight,
+    #mm-list > ListItem:hover { background: #261E10; }
+    #mm-add-row { height: 3; margin-top: 1; }
+    #mm-add-row Input {
+        background: #1C1C1F; border: round #2A2620; color: #E6E1CF;
+        height: 3; width: 1fr;
+    }
+    #mm-add-row Input:focus { border: round #A8732D; }
+    #mm-add-row Button { margin-left: 1; min-width: 10; height: 3; }
+    #mm-foot { height: 3; align: right middle; margin-top: 1; }
+    #mm-foot Button { margin-left: 1; min-width: 10; height: 3; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "close"),
+        Binding("delete", "remove_selected", "remove"),
+        Binding("d", "remove_selected", "remove"),
+    ]
+
+    def __init__(self, pid: str, provider_name: str) -> None:
+        super().__init__()
+        self._pid = pid
+        self._name = provider_name
+        self._writer = ConfigWriter()
+        self._model_ids: list[str] = []
+        self._any_changed = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="mm-shell"):
+            yield _Static(Text(f"Manage models — {self._name}",
+                              style=f"bold {GOLD_HI}"), id="mm-title")
+            yield _Static(Text("Delete/d to remove · Esc to close · "
+                             "type below to add a model manually",
+                             style=TXT_DIM), id="mm-sub")
+            yield ListView(id="mm-list")
+            with Horizontal(id="mm-add-row"):
+                yield Input(placeholder="model_id (e.g. llama-3.1-8b)",
+                            id="mm-add-input")
+                yield Button("Add", id="mm-add", variant="primary")
+            with Horizontal(id="mm-foot"):
+                yield Button("Remove", id="mm-remove", variant="warning")
+                yield Button("Close", id="mm-close", variant="primary")
+
+    def on_mount(self) -> None:
+        asyncio.ensure_future(self._refresh_async())
+
+    async def _refresh_async(self) -> None:
+        lv = self.query_one("#mm-list", ListView)
+        await lv.clear()
+        self._model_ids = []
+        raw = self._writer.provider(self._pid)
+        if not raw:
+            await lv.append(ListItem(_Static(Text("  provider not found",
+                                                style=RUST))))
+            return
+        models = raw.get("models") or {}
+        if not models:
+            await lv.append(ListItem(_Static(Text(
+                "  no models — type one below or use Refresh models",
+                style=COPPER))))
+            return
+        for mid, mdata in models.items():
+            self._model_ids.append(mid)
+            row = self._render_model_row(mid, mdata)
+            await lv.append(ListItem(_Static(row), id=f"mm-row-{_safe_id(mid)}"))
+        lv.focus()
+
+    def _render_model_row(self, mid: str, mdata) -> Text:
+        out = Text()
+        out.append(f"  {mid}", style=GOLD)
+        display = mdata.get("display", "")
+        if display and display != mid:
+            out.append(f"  · {display}", style=TXT_DIM)
+        ctx = mdata.get("context_window")
+        if ctx:
+            out.append(f"   ctx={ctx//1000}k", style=BRONZE)
+        caps = mdata.get("capabilities", [])
+        if caps:
+            out.append(f"   {','.join(caps[:3])}", style=GOLD_DIM)
+        return out
+
+    @on(Button.Pressed, "#mm-remove")
+    async def _btn_remove(self) -> None:
+        await self._do_remove_selected()
+
+    @on(Button.Pressed, "#mm-add")
+    async def _btn_add(self) -> None:
+        inp = self.query_one("#mm-add-input", Input)
+        mid = (inp.value or "").strip()
+        if not mid:
+            self.app.notify("Enter a model_id first", severity="warning")
+            return
+        raw = self._writer.provider(self._pid)
+        if raw and mid in (raw.get("models") or {}):
+            self.app.notify(f"Model '{mid}' already exists", severity="warning")
+            return
+        # Add with sensible defaults
+        self._writer.add_model(
+            self._pid, mid,
+            display=_humanize(mid),
+            capabilities=_infer_caps(mid),
+            context_window=128000,
+            max_output_tokens=8192,
+        )
+        self._writer.save()
+        self._any_changed = True
+        inp.value = ""
+        await self._refresh_async()
+        self.app.notify(f"Added {mid}", severity="information")
+
+    @on(Button.Pressed, "#mm-close")
+    def _btn_close(self) -> None:
+        self.dismiss(self._any_changed)
+
+    def action_close(self) -> None:
+        self.dismiss(self._any_changed)
+
+    async def action_remove_selected(self) -> None:
+        await self._do_remove_selected()
+
+    async def _do_remove_selected(self) -> None:
+        if not self._model_ids:
+            self.app.notify("No models to remove", severity="warning")
+            return
+        lv = self.query_one("#mm-list", ListView)
+        idx = lv.index
+        if idx is None or idx >= len(self._model_ids):
+            idx = 0
+        mid = self._model_ids[idx]
+        ok = await self.app.push_screen_wait(
+            ConfirmModal("Remove model", f"Delete model '{mid}' from {self._name}?")
+        )
+        if not ok:
+            return
+        # Remove via raw doc edit
+        raw = self._writer.provider(self._pid)
+        if raw:
+            models = raw.get("models")
+            if isinstance(models, dict) and mid in models:
+                del models[mid]
+            elif models is not None and mid in models:
+                del models[mid]
+        self._writer.save()
+        self._any_changed = True
+        await self._refresh_async()
+        self.app.notify(f"Removed {mid}", severity="information")
+
+
+def _safe_id(s: str) -> str:
+    """Make a string safe for Textual widget ids (no slashes/colons/dots)."""
+    return re.sub(r"[^A-Za-z0-9_-]", "-", s)
+
+
+def _humanize(mid: str) -> str:
+    name = mid.rsplit("/", 1)[-1].split(":")[0]
+    name = re.sub(r"[-_]+", " ", name)
+    return name.title()
+
+
+def _infer_caps(mid: str) -> list[str]:
+    caps = ["text", "tools"]
+    lower = mid.lower()
+    if any(t in lower for t in ("vision", "vl", "vlm")):
+        caps.append("vision")
+    if any(t in lower for t in ("thinking", "reasoning", "r1", "o1", "o3")):
+        caps.append("reasoning")
+    return caps
+
+
+# ---------------------------------------------------------------------------
 # OAuth login modal — drives anthropic / openai-codex
 # ---------------------------------------------------------------------------
 
@@ -1216,7 +1405,8 @@ class SetupScreen(Screen):
         actions.mount(Button("+ Add key", id=f"prov-key-{pid}"))
         if keys:
             actions.mount(Button(f"Manage keys ({len(keys)})", id=f"prov-keys-{pid}"))
-            actions.mount(Button("Refresh models", id=f"prov-refresh-{pid}"))
+            actions.mount(Button(f"Models ({len(models)})", id=f"prov-models-{pid}"))
+            actions.mount(Button("Refresh", id=f"prov-refresh-{pid}"))
         if bool(raw.get("enabled", True)):
             actions.mount(Button("Disable", id=f"prov-disable-{pid}"))
         else:
@@ -1554,6 +1744,14 @@ class SetupScreen(Screen):
                 self._writer.save()
                 self.app.notify(f"Removed {pid}", severity="information")
                 self._render_section()
+            return
+
+        if bid.startswith("prov-models-"):
+            pid = bid.removeprefix("prov-models-")
+            raw = self._writer.provider(pid)
+            name = raw.get("name", pid) if raw else pid
+            await self.app.push_screen_wait(ManageModelsModal(pid, name))
+            self._render_section()
             return
 
         if bid.startswith("prov-refresh-"):
