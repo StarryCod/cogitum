@@ -39,10 +39,7 @@ COMMANDS: list[CommandDef] = [
     CommandDef("models", "Open model picker", aliases=["m"], shortcut="Ctrl+M"),
     CommandDef("model", "Switch model: /model <id>", aliases=["mod"]),
     CommandDef("new", "Clear history, start fresh", aliases=["n", "reset"]),
-    CommandDef("resume", "Resume a past session", aliases=["r"]),
-    CommandDef("title", "Set session title: /title <name>", aliases=["t"]),
-    CommandDef("tools", "List available tools"),
-    CommandDef("godmode", "Jailbreak: on/off/classic/plinian/subtle", aliases=["gm"]),
+    CommandDef("tools", "List available tools", aliases=["t"]),
     CommandDef("clear", "Clear feed display", aliases=["cls", "c"]),
     CommandDef("help", "Show all commands", aliases=["h", "?"]),
     CommandDef("quit", "Exit Cogitum", aliases=["q", "exit"], shortcut="Ctrl+Q"),
@@ -162,37 +159,6 @@ class ComposerArea(TextArea):
     class HistoryRequest(Message):
         direction: int  # -1 = older, +1 = newer
 
-    @dataclass
-    class PasteReceived(Message):
-        """Bubbles up to Composer with paste text before TextArea processes it."""
-        text: str
-
-    def _on_paste(self, event: events.Paste) -> None:
-        """Intercept terminal paste event BEFORE TextArea inserts it."""
-        text = event.text or ""
-        if not text:
-            return
-        if len(text) > _PASTE_THRESHOLD:
-            # Large paste — block TextArea from inserting, let Composer handle
-            event.prevent_default()
-            event.stop()
-            self.post_message(self.PasteReceived(text=text))
-        else:
-            # Small paste — let TextArea handle normally
-            super()._on_paste(event)
-
-    def action_paste(self) -> None:
-        """Override Ctrl+V action — intercept large clipboard content."""
-        clipboard = self.app.clipboard
-        if not clipboard:
-            return
-        if len(clipboard) > _PASTE_THRESHOLD:
-            # Large clipboard — don't insert, send to Composer
-            self.post_message(self.PasteReceived(text=clipboard))
-        else:
-            # Small — normal paste
-            super().action_paste()
-
     async def _on_key(self, event: events.Key) -> None:
         """Intercept Enter BEFORE TextArea processes it."""
         if event.key == "enter":
@@ -207,41 +173,7 @@ class ComposerArea(TextArea):
             event.stop()
             self.insert("\n")
             return
-        elif event.key in ("backspace", "delete"):
-            # If cursor is inside or adjacent to placeholder — delete entire placeholder
-            composer = self.parent
-            if hasattr(composer, '_pasted_content') and composer._pasted_content:
-                placeholder = composer._paste_placeholder()
-                text = self.text
-                ph_start = text.find(placeholder)
-                if ph_start != -1:
-                    ph_end = ph_start + len(placeholder)
-                    # Get cursor position as offset in text
-                    row, col = self.cursor_location
-                    lines = text.split("\n")
-                    cursor_offset = sum(len(lines[i]) + 1 for i in range(row)) + col
-                    # If cursor is inside or at edges of placeholder — delete whole thing
-                    if ph_start <= cursor_offset <= ph_end:
-                        event.prevent_default()
-                        event.stop()
-                        new_text = text[:ph_start] + text[ph_end:]
-                        self.load_text(new_text)
-                        # Position cursor where placeholder was
-                        offset = ph_start
-                        r, c = 0, 0
-                        for i, line in enumerate(new_text.split("\n")):
-                            if offset <= len(line):
-                                r, c = i, offset
-                                break
-                            offset -= len(line) + 1
-                        self.move_cursor((r, c))
-                        composer._pasted_content = None
-                        return
         elif event.key == "up":
-            # If menu is active — let parent handle navigation
-            composer = self.parent
-            if hasattr(composer, '_menu_active') and composer._menu_active:
-                return
             # If on first line and text is empty or cursor at start → history
             if self.cursor_location[0] == 0:
                 event.prevent_default()
@@ -249,10 +181,6 @@ class ComposerArea(TextArea):
                 self.post_message(self.HistoryRequest(direction=-1))
                 return
         elif event.key == "down":
-            # If menu is active — let parent handle navigation
-            composer = self.parent
-            if hasattr(composer, '_menu_active') and composer._menu_active:
-                return
             # If on last line → history forward
             lines = self.text.split("\n")
             if self.cursor_location[0] >= len(lines) - 1:
@@ -260,44 +188,6 @@ class ComposerArea(TextArea):
                 event.stop()
                 self.post_message(self.HistoryRequest(direction=1))
                 return
-        elif event.key in ("left", "right"):
-            # Skip over placeholder as if it's one character
-            composer = self.parent
-            if hasattr(composer, '_pasted_content') and composer._pasted_content:
-                placeholder = composer._paste_placeholder()
-                text = self.text
-                ph_start = text.find(placeholder)
-                if ph_start != -1:
-                    ph_end = ph_start + len(placeholder)
-                    row, col = self.cursor_location
-                    lines = text.split("\n")
-                    cursor_offset = sum(len(lines[i]) + 1 for i in range(row)) + col
-                    if event.key == "right" and ph_start <= cursor_offset < ph_end:
-                        # Jump to end of placeholder
-                        event.prevent_default()
-                        event.stop()
-                        offset = ph_end
-                        r, c = 0, 0
-                        for i, line in enumerate(lines):
-                            if offset <= len(line):
-                                r, c = i, offset
-                                break
-                            offset -= len(line) + 1
-                        self.move_cursor((r, c))
-                        return
-                    elif event.key == "left" and ph_start < cursor_offset <= ph_end:
-                        # Jump to start of placeholder
-                        event.prevent_default()
-                        event.stop()
-                        offset = ph_start
-                        r, c = 0, 0
-                        for i, line in enumerate(lines):
-                            if offset <= len(line):
-                                r, c = i, offset
-                                break
-                            offset -= len(line) + 1
-                        self.move_cursor((r, c))
-                        return
         # Everything else — let TextArea handle normally
         await super()._on_key(event)
 
@@ -320,17 +210,25 @@ class Composer(Widget):
         max-height: 7;
         background: #1A1816;
         color: #E6E1CF;
-        border: none;
-        border-top: solid #A8732D;
+        border: tall #A8732D;
         padding: 0 1;
     }
     ComposerArea:focus {
         background: #1A1816;
-        border: none;
-        border-top: solid #F5C24A;
+        border: tall #F5C24A;
     }
     ComposerArea > .text-area--cursor-line {
         background: #1A1816;
+    }
+    #paste-indicator {
+        display: none;
+        height: 1;
+        padding: 0 1;
+        color: #A8732D;
+        background: #1A1610;
+    }
+    #paste-indicator.visible {
+        display: block;
     }
     """
 
@@ -343,7 +241,6 @@ class Composer(Widget):
         self._history_idx: int = -1  # -1 = not browsing history
         self._draft: str = ""  # saved draft when browsing history
         self._pasted_content: str | None = None  # full pasted text when collapsed
-        self._paste_inserting: bool = False  # guard: ignore Changed during insert
 
     # ── Messages ──────────────────────────────────────────────────────────────
 
@@ -359,6 +256,7 @@ class Composer(Widget):
 
     def compose(self) -> ComposeResult:
         yield CommandMenu(id="cmd-menu")
+        yield Static("", id="paste-indicator")
         yield ComposerArea(id="composer-area", language=None, show_line_numbers=False, theme="css")
 
     # ── Input handling ────────────────────────────────────────────────────────
@@ -369,12 +267,10 @@ class Composer(Widget):
         text = area.text
         menu = self.query_one("#cmd-menu", CommandMenu)
 
-        # If paste is active and placeholder was removed from text — cancel paste
-        # Skip check during our own insert operation
-        if self._pasted_content and not self._paste_inserting:
-            placeholder = self._paste_placeholder()
-            if placeholder not in text:
-                self._pasted_content = None
+        # If user types after paste collapse, clear the collapse
+        if self._pasted_content and text != self._paste_display():
+            self._pasted_content = None
+            self._hide_paste_indicator()
 
         first_line = text.split("\n")[0] if text else ""
         if first_line.startswith("/") and " " not in first_line and "\n" not in text:
@@ -406,15 +302,9 @@ class Composer(Widget):
 
         # Get the actual text to send
         if self._pasted_content:
-            # Replace placeholder with real content
-            placeholder = self._paste_placeholder()
-            raw = area.text
-            if placeholder in raw:
-                text = raw.replace(placeholder, self._pasted_content, 1).strip()
-            else:
-                # Placeholder was removed but _pasted_content still set — just use area text
-                text = raw.strip()
+            text = self._pasted_content.strip()
             self._pasted_content = None
+            self._hide_paste_indicator()
         else:
             text = area.text.strip()
 
@@ -442,16 +332,6 @@ class Composer(Widget):
 
     @on(ComposerArea.HistoryRequest)
     def _on_history_request(self, event: ComposerArea.HistoryRequest) -> None:
-        # If app has queued messages and agent is running, let app handle this
-        # (pop from queue back to composer for editing)
-        app = self.app
-        if (event.direction == -1
-            and hasattr(app, '_pending_messages') and app._pending_messages
-            and hasattr(app, '_agent_task') and app._agent_task
-            and not app._agent_task.done()):
-            # Don't handle — let it bubble to app's _on_history_for_queue
-            return
-
         if not self._history:
             return
 
@@ -501,24 +381,45 @@ class Composer(Widget):
             event.prevent_default()
             event.stop()
 
-    @on(ComposerArea.PasteReceived)
-    def _on_paste_received(self, event: ComposerArea.PasteReceived) -> None:
-        """Handle large paste — store content, show placeholder."""
-        self._pasted_content = event.text
-        placeholder = self._paste_placeholder()
-        area = self.query_one("#composer-area", ComposerArea)
-        self._paste_inserting = True
-        area.insert(placeholder)
-        self._paste_inserting = False
+    def on_paste(self, event: events.Paste) -> None:
+        """Handle paste — collapse large content into indicator."""
+        text = event.text or ""
+        if not text:
+            return
 
-    def _paste_placeholder(self) -> str:
-        """Generate placeholder text for pasted content."""
+        event.prevent_default()
+        event.stop()
+        area = self.query_one("#composer-area", ComposerArea)
+
+        if len(text) > _PASTE_THRESHOLD:
+            # Store full content, show collapsed in area
+            self._pasted_content = text
+            lines = text.count("\n") + 1
+            area.load_text(self._paste_display())
+            self._show_paste_indicator(lines, len(text))
+        else:
+            # Short paste — insert normally
+            area.insert(text)
+
+    def _paste_display(self) -> str:
+        """Collapsed display text for pasted content."""
         if not self._pasted_content:
             return ""
-        chars = len(self._pasted_content)
-        lines = -(-chars // 80)  # ceiling division: visual lines at 80 cols
-        word = "line" if lines == 1 else "lines"
-        return f"[Pasted content: {lines} {word}]"
+        lines = self._pasted_content.count("\n") + 1
+        return f"[Pasted content: {lines} lines]"
+
+    def _show_paste_indicator(self, lines: int, chars: int) -> None:
+        indicator = self.query_one("#paste-indicator", Static)
+        t = Text()
+        t.append("⎘ ", style=GOLD)
+        t.append(f"Pasted {lines} lines ({chars} chars)", style=BRONZE)
+        t.append(" — full content will be sent on Enter", style=TXT_DIM)
+        indicator.update(t)
+        indicator.add_class("visible")
+
+    def _hide_paste_indicator(self) -> None:
+        indicator = self.query_one("#paste-indicator", Static)
+        indicator.remove_class("visible")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
