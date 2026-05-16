@@ -670,6 +670,7 @@ class CogitumBot:
         thinking_buf = ""
         text_buf = ""
         tool_results_shown = 0
+        _thinking_sent = False
 
         try:
             # Drain events until done
@@ -681,11 +682,18 @@ class CogitumBot:
 
                 if isinstance(event, AgentThinking):
                     thinking_buf += event.delta
+                    # Send thinking as spoiler inline (once, when first tool call comes or at end)
 
                 elif isinstance(event, AgentText):
                     text_buf += event.delta
 
                 elif isinstance(event, AgentToolCall):
+                    # Send accumulated thinking before first tool call
+                    if not _thinking_sent and thinking_buf.strip() and self.config.show_thinking:
+                        thinking_msg = format_thinking(thinking_buf)
+                        await self.api.send_message(chat_id, thinking_msg)
+                        _thinking_sent = True
+                        thinking_buf = ""
                     if not event.preliminary and self.config.show_tool_calls:
                         line = format_tool_call(event.tool_name, event.arguments)
                         await send_status(line)
@@ -714,8 +722,8 @@ class CogitumBot:
                     )
                     break
 
-            # Send thinking (if enabled and present)
-            if thinking_buf.strip() and self.config.show_thinking:
+            # Send remaining thinking BEFORE main response (if not sent yet)
+            if not _thinking_sent and thinking_buf.strip() and self.config.show_thinking:
                 thinking_msg = format_thinking(thinking_buf)
                 await self.api.send_message(chat_id, thinking_msg)
 
