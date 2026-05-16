@@ -442,8 +442,8 @@ class AddProviderModal(ModalScreen[ProviderPreset | None]):
     }
     #ap-list > ListItem.--highlight,
     #ap-list > ListItem:hover { background: #261E10; }
-    #ap-foot { height: auto; align: right middle; padding-top: 1; }
-    #ap-foot Button { margin-left: 1; }
+    #ap-foot { height: 3; align: right middle; margin-top: 1; }
+    #ap-foot Button { margin-left: 1; min-width: 12; }
     """
 
     BINDINGS = [
@@ -535,7 +535,7 @@ class CustomProviderModal(ModalScreen[ProviderPreset | None]):
     }
     .cprow Input:focus { border: round #A8732D; }
     #cp-foot { height: 3; align: right middle; margin-top: 1; }
-    #cp-foot Button { margin-left: 1; }
+    #cp-foot Button { margin-left: 1; min-width: 12; }
     """
 
     BINDINGS = [Binding("escape", "cancel", "cancel")]
@@ -586,6 +586,133 @@ class CustomProviderModal(ModalScreen[ProviderPreset | None]):
             id=pid, name=name, format=fmt, base_url=url, auth=auth,
             env_var=env_var, models=(),
         ))
+
+
+# ---------------------------------------------------------------------------
+# Key manager — list / delete keys per provider
+# ---------------------------------------------------------------------------
+
+class KeyManagerModal(ModalScreen[bool]):
+    """Show all keys for a provider, allow removing them.
+
+    Returns True if at least one key was changed (so caller can re-render).
+    """
+
+    DEFAULT_CSS = """
+    KeyManagerModal { align: center middle; background: rgba(0,0,0,0.55); }
+    #km-shell {
+        width: 88; height: 32; padding: 1 2;
+        background: #161618; border: round #7A5A1A;
+    }
+    #km-title { color: #F5C24A; text-style: bold; height: 1; }
+    #km-sub   { color: #9C957D; height: 1; padding-bottom: 1; }
+    #km-list  {
+        height: 1fr; background: #0E0E11; border: round #2A2620;
+        padding: 0 1;
+    }
+    #km-list > ListItem.--highlight,
+    #km-list > ListItem:hover { background: #261E10; }
+    #km-foot { height: 3; align: right middle; margin-top: 1; }
+    #km-foot Button { margin-left: 1; min-width: 12; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "close"),
+        Binding("delete", "remove_selected", "remove"),
+        Binding("d", "remove_selected", "remove"),
+    ]
+
+    def __init__(self, pid: str, provider_name: str) -> None:
+        super().__init__()
+        self._pid = pid
+        self._name = provider_name
+        self._writer = ConfigWriter()
+        self._key_ids: list[str] = []
+        self._changed = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="km-shell"):
+            yield _Static(Text(f"Manage keys — {self._name}",
+                              style=f"bold {GOLD_HI}"), id="km-title")
+            yield _Static(Text("Select a key, press Delete or 'd' to remove. Esc to close.",
+                              style=TXT_DIM), id="km-sub")
+            yield ListView(id="km-list")
+            with Horizontal(id="km-foot"):
+                yield Button("Remove", id="km-remove", variant="warning")
+                yield Button("Add new", id="km-add")
+                yield Button("Close", id="km-close", variant="primary")
+
+    def on_mount(self) -> None:
+        self._refresh_list()
+
+    def _refresh_list(self) -> None:
+        lv = self.query_one("#km-list", ListView)
+        lv.clear()
+        self._key_ids = []
+        keys = self._writer.list_keys(self._pid)
+        if not keys:
+            lv.append(ListItem(_Static(Text("  no keys — close and add one",
+                                          style=COPPER))))
+            return
+        for kid, kdata in keys.items():
+            self._key_ids.append(kid)
+            row = self._render_key_row(kid, kdata)
+            lv.append(ListItem(_Static(row), id=f"km-row-{kid}"))
+        lv.focus()
+
+    def _render_key_row(self, kid: str, kdata) -> Text:
+        out = Text()
+        out.append(f"  {kid:<14}", style=GOLD)
+        ref = kdata.get("secret_ref", "")
+        # Mask secret references for safety in display
+        if ref.startswith("env:"):
+            out.append(ref, style=BRONZE)
+        elif ref.startswith("vault:"):
+            out.append(ref, style=BRONZE)
+        elif ref.startswith("keyring:"):
+            out.append(ref, style=BRONZE)
+        elif ref.startswith("oauth:"):
+            out.append(ref, style=GOLD_DIM)
+        else:
+            # plain — show truncated
+            shown = ref[:6] + "…" + ref[-4:] if len(ref) > 12 else ref
+            out.append(f"plain:{shown}", style=COPPER)
+        notes = kdata.get("notes")
+        if notes:
+            out.append(f"   {notes}", style=TXT_DIM)
+        return out
+
+    @on(Button.Pressed, "#km-remove")
+    def _btn_remove(self) -> None:
+        self.action_remove_selected()
+
+    @on(Button.Pressed, "#km-add")
+    def _btn_add(self) -> None:
+        # Close with changed=True so caller can chain into add-key flow
+        self._changed = True
+        self.dismiss(self._changed)
+
+    @on(Button.Pressed, "#km-close")
+    def _btn_close(self) -> None:
+        self.dismiss(self._changed)
+
+    def action_close(self) -> None:
+        self.dismiss(self._changed)
+
+    async def action_remove_selected(self) -> None:
+        idx = self.query_one("#km-list", ListView).index
+        if idx is None or idx >= len(self._key_ids):
+            return
+        kid = self._key_ids[idx]
+        ok = await self.app.push_screen_wait(
+            ConfirmModal("Remove key", f"Delete key '{kid}' from {self._name}?")
+        )
+        if not ok:
+            return
+        self._writer.remove_key(self._pid, kid)
+        self._writer.save()
+        self._changed = True
+        self._refresh_list()
 
 
 # ---------------------------------------------------------------------------
@@ -768,8 +895,8 @@ class SetupScreen(Screen):
     .card-title {
         color: #F5C24A; text-style: bold; padding-bottom: 1;
     }
-    .card-actions { height: auto; align: left middle; padding-top: 1; }
-    .card-actions Button { margin-right: 1; }
+    .card-actions { height: 3; align: left middle; margin-top: 1; }
+    .card-actions Button { margin-right: 1; min-width: 10; }
     """
 
     BINDINGS = [
@@ -871,6 +998,9 @@ class SetupScreen(Screen):
     # --- section dispatch ---------------------------------------------
 
     def _render_section(self) -> None:
+        # Always re-read config from disk so models/keys/providers reflect
+        # the latest state after Save (auto-discovery, manual edits, etc.).
+        self._writer = ConfigWriter()
         content = self.query_one("#setup-content", VerticalScroll)
         content.remove_children()
         # Force DOM cleanup before re-mounting
@@ -955,10 +1085,15 @@ class SetupScreen(Screen):
         actions = Horizontal(classes="card-actions")
         card.mount(actions)
         actions.mount(Button("+ Add key", id=f"prov-key-{pid}"))
+        if keys:
+            actions.mount(Button(f"Manage keys ({len(keys)})", id=f"prov-keys-{pid}"))
         if bool(raw.get("enabled", True)):
             actions.mount(Button("Disable", id=f"prov-disable-{pid}"))
         else:
             actions.mount(Button("Enable", id=f"prov-enable-{pid}", variant="primary"))
+        # Allow removing custom providers entirely (not preset OAuth ones)
+        if pid not in OAUTH_REGISTRY:
+            actions.mount(Button("Remove", id=f"prov-remove-{pid}", variant="warning"))
 
     # ---- subscriptions ----
 
@@ -1260,6 +1395,30 @@ class SetupScreen(Screen):
             await self._add_key_flow(pid)
             return
 
+        if bid.startswith("prov-keys-"):
+            pid = bid.removeprefix("prov-keys-")
+            raw = self._writer.provider(pid)
+            name = raw.get("name", pid) if raw else pid
+            changed = await self.app.push_screen_wait(KeyManagerModal(pid, name))
+            # Re-render to reflect any deletions
+            self._render_section()
+            return
+
+        if bid.startswith("prov-remove-"):
+            pid = bid.removeprefix("prov-remove-")
+            ok = await self.app.push_screen_wait(ConfirmModal(
+                "Remove provider",
+                f"Delete provider '{pid}' and all its keys? This does NOT "
+                f"remove the secrets themselves (env vars, vault, keyring) — "
+                f"only the config entry.",
+            ))
+            if ok:
+                self._writer.remove_provider(pid)
+                self._writer.save()
+                self.app.notify(f"Removed {pid}", severity="information")
+                self._render_section()
+            return
+
         if bid.startswith("prov-disable-"):
             pid = bid.removeprefix("prov-disable-")
             self._writer.set_enabled(pid, False)
@@ -1481,6 +1640,7 @@ __all__ = [
     "AddProviderModal",
     "CustomProviderModal",
     "KeyEntryModal",
+    "KeyManagerModal",
     "OAuthLoginModal",
     "MessageModal",
     "ConfirmModal",

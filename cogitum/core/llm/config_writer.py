@@ -83,6 +83,18 @@ class ConfigWriter:
         if isinstance(keys, Table) and key_id in keys:
             del keys[key_id]
 
+    def remove_provider(self, pid: str) -> None:
+        providers = self.doc.get("providers")
+        if isinstance(providers, Table) and pid in providers:
+            del providers[pid]
+
+    def list_keys(self, pid: str) -> dict[str, Any]:
+        p = self.provider(pid)
+        if not p:
+            return {}
+        keys = p.get("keys")
+        return dict(keys) if isinstance(keys, Table) else {}
+
     def add_provider(
         self,
         pid: str,
