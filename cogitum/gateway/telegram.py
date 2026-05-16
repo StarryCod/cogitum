@@ -1,0 +1,694 @@
+"""
+cogitum.gateway.telegram
+~~~~~~~~~~~~~~~~~~~~~~~~~
+Telegram bot gateway — runs as a daemon, connects Cogitum agent to Telegram.
+
+Architecture:
+  - Long-polling via httpx (no aiogram dependency)
+  - One session per chat (persisted via SessionStore)
+  - Full tool support, thinking display, media sending
+  - Commands: /new, /resume, /title, /tools, /model, /models, /stop, /help
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import signal
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+from cogitum.core.agent import (
+    Agent,
+    AgentConfig,
+    AgentDone,
+    AgentError,
+    AgentRetry,
+    AgentText,
+    AgentThinking,
+    AgentToolCall,
+    AgentToolResult,
+)
+from cogitum.core.builtin_tools import *  # noqa: F401,F403 — registers tools
+from cogitum.core.events import Message, TextPart
+from cogitum.core.llm.loader import load_mesh, load_settings
+from cogitum.core.sessions import get_store
+from cogitum.core.tools import REGISTRY
+
+from .tg_config import TelegramConfig, load_tg_config
+from .tg_formatter import (
+    escape_md,
+    format_session_divider,
+    format_thinking,
+    format_tool_call,
+    format_tool_result,
+    markdown_to_tg,
+    split_message,
+)
+
+log = logging.getLogger("cogitum.gateway.telegram")
+
+# ── Telegram API helpers ─────────────────────────────────────────────────────
+
+class TelegramAPI:
+    """Minimal Telegram Bot API client via httpx."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+        self.base = f"https://api.telegram.org/bot{token}"
+        self._client: httpx.AsyncClient | None = None
+
+    async def _ensure_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=60.0)
+        return self._client
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+
+    async def call(self, method: str, **kwargs) -> dict[str, Any]:
+        client = await self._ensure_client()
+        resp = await client.post(f"{self.base}/{method}", json=kwargs)
+        data = resp.json()
+        if not data.get("ok"):
+            log.warning("TG API error: %s → %s", method, data.get("description"))
+        return data
+
+    async def get_updates(self, offset: int = 0, timeout: int = 30) -> list[dict]:
+        data = await self.call("getUpdates", offset=offset, timeout=timeout)
+        return data.get("result", [])
+
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        parse_mode: str = "MarkdownV2",
+        reply_to: int | None = None,
+        reply_markup: dict | None = None,
+    ) -> dict:
+        kwargs: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+        }
+        if parse_mode:
+            kwargs["parse_mode"] = parse_mode
+        if reply_to:
+            kwargs["reply_to_message_id"] = reply_to
+        if reply_markup:
+            kwargs["reply_markup"] = reply_markup
+        data = await self.call("sendMessage", **kwargs)
+        if not data.get("ok"):
+            # Fallback: try without parse_mode (formatting error)
+            if parse_mode:
+                log.warning("Markdown send failed, retrying plain: %s", data.get("description"))
+                kwargs.pop("parse_mode", None)
+                kwargs["text"] = text.replace("\\", "")  # strip escapes
+                data = await self.call("sendMessage", **kwargs)
+        return data
+
+    async def edit_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        parse_mode: str = "MarkdownV2",
+    ) -> dict:
+        kwargs: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+        }
+        if parse_mode:
+            kwargs["parse_mode"] = parse_mode
+        data = await self.call("editMessageText", **kwargs)
+        if not data.get("ok") and parse_mode:
+            kwargs.pop("parse_mode", None)
+            kwargs["text"] = text.replace("\\", "")
+            data = await self.call("editMessageText", **kwargs)
+        return data
+
+    async def send_document(self, chat_id: int, path: str, caption: str = "") -> dict:
+        client = await self._ensure_client()
+        with open(path, "rb") as f:
+            files = {"document": (Path(path).name, f)}
+            data_fields: dict[str, Any] = {"chat_id": str(chat_id)}
+            if caption:
+                data_fields["caption"] = caption
+            resp = await client.post(
+                f"{self.base}/sendDocument", data=data_fields, files=files
+            )
+        return resp.json()
+
+    async def send_photo(self, chat_id: int, path: str, caption: str = "") -> dict:
+        client = await self._ensure_client()
+        with open(path, "rb") as f:
+            files = {"photo": (Path(path).name, f)}
+            data_fields: dict[str, Any] = {"chat_id": str(chat_id)}
+            if caption:
+                data_fields["caption"] = caption
+            resp = await client.post(
+                f"{self.base}/sendPhoto", data=data_fields, files=files
+            )
+        return resp.json()
+
+    async def get_file(self, file_id: str) -> str | None:
+        """Get file path from Telegram, download to /tmp, return local path."""
+        data = await self.call("getFile", file_id=file_id)
+        if not data.get("ok"):
+            return None
+        file_path = data["result"]["file_path"]
+        url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+        client = await self._ensure_client()
+        resp = await client.get(url)
+        if resp.status_code != 200:
+            return None
+        ext = Path(file_path).suffix or ".bin"
+        local = tempfile.mktemp(suffix=ext, prefix="cogitum_tg_")
+        Path(local).write_bytes(resp.content)
+        return local
+
+    async def answer_callback(self, callback_id: str, text: str = "") -> None:
+        await self.call("answerCallbackQuery", callback_query_id=callback_id, text=text)
+
+
+# ── Session state ────────────────────────────────────────────────────────────
+
+class ChatSession:
+    """Per-chat state."""
+
+    def __init__(self, chat_id: int) -> None:
+        self.chat_id = chat_id
+        self.session_id: str | None = None
+        self.history: list[Message] = []
+        self.agent_task: asyncio.Task | None = None
+        self._cancel_flag = False
+
+    @property
+    def is_busy(self) -> bool:
+        return self.agent_task is not None and not self.agent_task.done()
+
+    def cancel(self) -> None:
+        self._cancel_flag = True
+        if self.agent_task and not self.agent_task.done():
+            self.agent_task.cancel()
+
+
+# ── Main bot ─────────────────────────────────────────────────────────────────
+
+class CogitumBot:
+    """Telegram gateway bot."""
+
+    def __init__(self, config: TelegramConfig) -> None:
+        self.config = config
+        self.api = TelegramAPI(config.bot_token)
+        self.sessions: dict[int, ChatSession] = {}
+        self.mesh = None
+        self.agent: Agent | None = None
+        self._running = False
+        self._offset = 0
+
+    async def start(self) -> None:
+        """Initialize mesh and start polling."""
+        log.info("Starting Cogitum Telegram gateway...")
+
+        # Load mesh
+        self.mesh = load_mesh()
+        if not self.mesh.providers:
+            log.error("No providers configured. Run `cog setup` first.")
+            return
+
+        settings = load_settings()
+        model = self.config.default_model or settings.get("default_model", "")
+
+        # Resolve model
+        if model and self.mesh.resolve(model):
+            current_model = model
+        else:
+            pairs = self.mesh.list_resolved()
+            current_model = pairs[0].qualified_id if pairs else None
+
+        if not current_model:
+            log.error("No models available.")
+            return
+
+        self.agent = Agent(
+            mesh=self.mesh,
+            registry=REGISTRY,
+            config=AgentConfig(model=current_model),
+        )
+
+        self._running = True
+        log.info("Gateway ready. Model: %s. Polling...", current_model)
+
+        try:
+            await self._poll_loop()
+        finally:
+            await self.api.close()
+            if self.mesh:
+                await self.mesh.aclose()
+
+    async def stop(self) -> None:
+        self._running = False
+        for session in self.sessions.values():
+            session.cancel()
+
+    # ── Polling ──────────────────────────────────────────────────────────────
+
+    async def _poll_loop(self) -> None:
+        while self._running:
+            try:
+                updates = await self.api.get_updates(
+                    offset=self._offset, timeout=30
+                )
+                for update in updates:
+                    self._offset = update["update_id"] + 1
+                    asyncio.create_task(self._handle_update(update))
+            except httpx.TimeoutException:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.exception("Poll error: %s", e)
+                await asyncio.sleep(5)
+
+    # ── Update dispatch ──────────────────────────────────────────────────────
+
+    async def _handle_update(self, update: dict) -> None:
+        # Handle callback queries (inline keyboard)
+        if "callback_query" in update:
+            await self._handle_callback(update["callback_query"])
+            return
+
+        msg = update.get("message")
+        if not msg:
+            return
+
+        chat_id = msg["chat"]["id"]
+        user_id = msg.get("from", {}).get("id", 0)
+
+        # Auth check
+        if user_id != self.config.allowed_user_id:
+            await self.api.send_message(
+                chat_id, escape_md("⛔ Access denied."), parse_mode="MarkdownV2"
+            )
+            return
+
+        # Get or create session
+        session = self.sessions.setdefault(chat_id, ChatSession(chat_id))
+
+        # Handle text
+        text = msg.get("text", "").strip()
+        if text.startswith("/"):
+            await self._handle_command(text, session, msg)
+            return
+
+        # Handle media (photo/document)
+        context_extra = ""
+        if "photo" in msg:
+            # Get highest resolution photo
+            photo = msg["photo"][-1]
+            local_path = await self.api.get_file(photo["file_id"])
+            if local_path:
+                context_extra = f"\n[User sent image: {local_path}]"
+        elif "document" in msg:
+            doc = msg["document"]
+            local_path = await self.api.get_file(doc["file_id"])
+            if local_path:
+                context_extra = f"\n[User sent file: {local_path} ({doc.get('file_name', 'unknown')})]"
+
+        if not text and not context_extra:
+            return
+
+        # Handle reply context
+        reply_context = ""
+        if "reply_to_message" in msg:
+            reply_msg = msg["reply_to_message"]
+            reply_text = reply_msg.get("text", "")[:200]
+            if reply_text:
+                reply_context = f"\n[Replying to: {reply_text}]"
+
+        full_message = text + context_extra + reply_context
+
+        # Run agent
+        await self._run_agent(session, full_message, msg.get("message_id"))
+
+    # ── Commands ─────────────────────────────────────────────────────────────
+
+    async def _handle_command(self, text: str, session: ChatSession, msg: dict) -> None:
+        chat_id = session.chat_id
+        parts = text[1:].split(maxsplit=1)
+        cmd = (parts[0] if parts else "").lower()
+        rest = parts[1] if len(parts) > 1 else ""
+
+        if cmd == "start":
+            welcome = (
+                "✦ *COGITUM* — sovereign agentic CLI\n\n"
+                "Send me a message and I'll use my tools to help\\.\n\n"
+                "Commands:\n"
+                "/new — new session\n"
+                "/resume — resume past session\n"
+                "/title — rename session\n"
+                "/tools — list tools\n"
+                "/models — pick model\n"
+                "/stop — cancel generation\n"
+                "/help — all commands"
+            )
+            await self.api.send_message(chat_id, welcome)
+
+        elif cmd == "new":
+            session.history = []
+            session.session_id = None
+            divider = format_session_divider("NEW SESSION")
+            await self.api.send_message(chat_id, divider)
+
+        elif cmd == "resume":
+            store = get_store()
+            sessions = store.list_sessions(limit=8)
+            if not sessions:
+                await self.api.send_message(
+                    chat_id, escape_md("No saved sessions."), parse_mode="MarkdownV2"
+                )
+                return
+            # Build inline keyboard
+            buttons = []
+            for s in sessions:
+                title = s.title or s.id[:12]
+                buttons.append([{
+                    "text": f"📋 {title}",
+                    "callback_data": f"resume:{s.id}",
+                }])
+            markup = {"inline_keyboard": buttons}
+            await self.api.send_message(
+                chat_id,
+                escape_md("Pick a session to resume:"),
+                reply_markup=markup,
+            )
+
+        elif cmd == "title":
+            if not rest:
+                await self.api.send_message(
+                    chat_id, escape_md("Usage: /title <name>"), parse_mode="MarkdownV2"
+                )
+                return
+            if session.session_id:
+                get_store().set_title(session.session_id, rest)
+                await self.api.send_message(
+                    chat_id, f"✅ Session title: *{escape_md(rest)}*"
+                )
+            else:
+                await self.api.send_message(
+                    chat_id, escape_md("No active session — send a message first.")
+                )
+
+        elif cmd == "tools":
+            names = REGISTRY.names()
+            tool_list = "\n".join(f"• `{n}`" for n in names)
+            await self.api.send_message(
+                chat_id,
+                f"🔧 *{len(names)} tools:*\n{tool_list}",
+            )
+
+        elif cmd == "models":
+            if not self.mesh:
+                await self.api.send_message(chat_id, escape_md("Mesh not loaded."))
+                return
+            pairs = self.mesh.list_resolved()
+            buttons = []
+            for r in pairs[:12]:
+                display = r.model.display or r.model.id
+                buttons.append([{
+                    "text": f"🤖 {display}",
+                    "callback_data": f"model:{r.qualified_id}",
+                }])
+            markup = {"inline_keyboard": buttons}
+            current = self.agent.cfg.model if self.agent else "—"
+            await self.api.send_message(
+                chat_id,
+                f"Current: `{escape_md(current or '—')}`\nPick a model:",
+                reply_markup=markup,
+            )
+
+        elif cmd == "model":
+            if not rest:
+                current = self.agent.cfg.model if self.agent else "—"
+                await self.api.send_message(
+                    chat_id, f"Current model: `{escape_md(current or '—')}`"
+                )
+                return
+            if self.mesh:
+                candidates = self.mesh.resolve(rest)
+                if candidates:
+                    self.agent.cfg.model = candidates[0].qualified_id
+                    await self.api.send_message(
+                        chat_id,
+                        f"✅ Model: `{escape_md(candidates[0].qualified_id)}`",
+                    )
+                else:
+                    await self.api.send_message(
+                        chat_id, escape_md(f"❌ No model matches: {rest}")
+                    )
+
+        elif cmd == "stop":
+            if session.is_busy:
+                session.cancel()
+                await self.api.send_message(chat_id, escape_md("⏹ Stopped."))
+            else:
+                await self.api.send_message(chat_id, escape_md("Nothing running."))
+
+        elif cmd in ("help", "h"):
+            help_text = (
+                "✦ *Commands:*\n\n"
+                "/new — start fresh session\n"
+                "/resume — resume past session\n"
+                "/title `<name>` — rename session\n"
+                "/tools — list available tools\n"
+                "/models — pick model \\(keyboard\\)\n"
+                "/model `<id>` — switch model directly\n"
+                "/stop — cancel current generation\n"
+                "/help — this message"
+            )
+            await self.api.send_message(chat_id, help_text)
+
+        else:
+            await self.api.send_message(
+                chat_id, escape_md(f"Unknown command: /{cmd}. Try /help")
+            )
+
+    # ── Callback queries (inline keyboards) ──────────────────────────────────
+
+    async def _handle_callback(self, callback: dict) -> None:
+        cb_id = callback["id"]
+        data = callback.get("data", "")
+        chat_id = callback["message"]["chat"]["id"]
+        user_id = callback.get("from", {}).get("id", 0)
+
+        if user_id != self.config.allowed_user_id:
+            await self.api.answer_callback(cb_id, "⛔ Access denied")
+            return
+
+        session = self.sessions.setdefault(chat_id, ChatSession(chat_id))
+
+        if data.startswith("resume:"):
+            session_id = data[7:]
+            store = get_store()
+            messages = store.load_session(session_id)
+            meta = store.get_meta(session_id)
+            session.history = messages
+            session.session_id = session_id
+            title = meta.title if meta else session_id[:12]
+            divider = format_session_divider(f"RESUMED: {title}")
+            await self.api.send_message(chat_id, divider)
+            # Show brief summary
+            msg_count = len(messages)
+            await self.api.send_message(
+                chat_id,
+                escape_md(f"📋 Loaded {msg_count} messages. Continue the conversation."),
+            )
+            await self.api.answer_callback(cb_id, f"Resumed: {title}")
+
+        elif data.startswith("model:"):
+            model_id = data[6:]
+            if self.agent:
+                self.agent.cfg.model = model_id
+            await self.api.answer_callback(cb_id, f"Model: {model_id}")
+            await self.api.send_message(
+                chat_id, f"✅ Model: `{escape_md(model_id)}`"
+            )
+
+        else:
+            await self.api.answer_callback(cb_id)
+
+    # ── Agent execution ──────────────────────────────────────────────────────
+
+    async def _run_agent(
+        self, session: ChatSession, user_message: str, reply_to: int | None = None
+    ) -> None:
+        if not self.agent:
+            await self.api.send_message(
+                session.chat_id, escape_md("❌ Agent not initialized.")
+            )
+            return
+
+        if session.is_busy:
+            await self.api.send_message(
+                session.chat_id, escape_md("⏳ Still working... /stop to cancel.")
+            )
+            return
+
+        chat_id = session.chat_id
+        queue: asyncio.Queue = asyncio.Queue()
+
+        # Ensure session exists in store
+        if not session.session_id:
+            from cogitum.core.events import _id
+            store = get_store()
+            meta = store.create_session(
+                session_id=_id(), model=self.agent.cfg.model or ""
+            )
+            session.session_id = meta.id
+
+        # Status message (will be edited with tool calls)
+        status_msg_id: int | None = None
+        status_lines: list[str] = []
+
+        async def send_status(line: str) -> None:
+            nonlocal status_msg_id, status_lines
+            status_lines.append(line)
+            text = "\n".join(status_lines[-8:])  # show last 8 lines
+            if status_msg_id is None:
+                resp = await self.api.send_message(chat_id, text, parse_mode="MarkdownV2")
+                if resp.get("ok"):
+                    status_msg_id = resp["result"]["message_id"]
+            else:
+                await self.api.edit_message(chat_id, status_msg_id, text, parse_mode="MarkdownV2")
+
+        # Run agent
+        session._cancel_flag = False
+
+        async def agent_task():
+            return await self.agent.run(
+                user_message=user_message,
+                history=session.history,
+                queue=queue,
+            )
+
+        task = asyncio.create_task(agent_task())
+        session.agent_task = task
+
+        # Collect results
+        thinking_buf = ""
+        text_buf = ""
+        tool_results_shown = 0
+
+        try:
+            # Drain events until done
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=180)
+                except asyncio.TimeoutError:
+                    break
+
+                if isinstance(event, AgentThinking):
+                    thinking_buf += event.delta
+
+                elif isinstance(event, AgentText):
+                    text_buf += event.delta
+
+                elif isinstance(event, AgentToolCall):
+                    if not event.preliminary and self.config.show_tool_calls:
+                        line = format_tool_call(event.tool_name, event.arguments)
+                        await send_status(line)
+
+                elif isinstance(event, AgentToolResult):
+                    if self.config.show_tool_calls:
+                        line = format_tool_result(event.tool_name, event.result, event.error)
+                        await send_status(line)
+                    tool_results_shown += 1
+                    # Check if result contains a file path (screenshot, etc.)
+                    if "screenshot saved to" in event.result.lower():
+                        import re
+                        path_match = re.search(r"(/\S+\.png)", event.result)
+                        if path_match and Path(path_match.group(1)).exists():
+                            await self.api.send_photo(chat_id, path_match.group(1))
+
+                elif isinstance(event, AgentRetry):
+                    pass  # silent retry
+
+                elif isinstance(event, AgentDone):
+                    break
+
+                elif isinstance(event, AgentError):
+                    await self.api.send_message(
+                        chat_id, f"❌ *Error:* {escape_md(event.message)}"
+                    )
+                    break
+
+            # Send thinking (if enabled and present)
+            if thinking_buf.strip() and self.config.show_thinking:
+                thinking_msg = format_thinking(thinking_buf)
+                await self.api.send_message(chat_id, thinking_msg)
+
+            # Send main response
+            if text_buf.strip():
+                formatted = markdown_to_tg(text_buf.strip())
+                chunks = split_message(formatted)
+                for chunk in chunks:
+                    await self.api.send_message(chat_id, chunk)
+
+            # Update history
+            if task.done() and not task.cancelled() and not task.exception():
+                session.history = task.result()
+                # Persist to disk
+                store = get_store()
+                store.append_messages(session.session_id, session.history)
+
+        except asyncio.CancelledError:
+            await self.api.send_message(chat_id, escape_md("⏹ Cancelled."))
+        except Exception as e:
+            log.exception("Agent run error")
+            await self.api.send_message(
+                chat_id, f"❌ {escape_md(str(e))}"
+            )
+        finally:
+            session.agent_task = None
+
+
+# ── Entry point ──────────────────────────────────────────────────────────────
+
+async def run_bot(config: TelegramConfig | None = None) -> None:
+    """Main entry point for the Telegram gateway."""
+    cfg = config or load_tg_config()
+    if not cfg.is_valid():
+        log.error(
+            "Telegram gateway not configured. Run `cog tg setup` to set bot token and user ID."
+        )
+        return
+
+    bot = CogitumBot(cfg)
+
+    # Handle signals for graceful shutdown
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.stop()))
+
+    await bot.start()
+
+
+def main() -> None:
+    """CLI entry point."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    asyncio.run(run_bot())
+
+
+if __name__ == "__main__":
+    main()

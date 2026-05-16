@@ -430,6 +430,155 @@ def _providers_command(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Telegram gateway
+# ---------------------------------------------------------------------------
+
+def _tg_command(args: argparse.Namespace) -> int:
+    from .gateway.tg_config import load_tg_config, save_tg_config, TelegramConfig, TG_CONFIG_PATH
+    from .gateway.daemon import (
+        start_service, stop_service, restart_service,
+        status_service, enable_service, disable_service,
+    )
+
+    action = args.tg_action
+
+    if action == "setup":
+        print()
+        _hr()
+        print("  COGITUM — Telegram Gateway Setup")
+        _hr()
+        print()
+        cfg = load_tg_config()
+        print(f"  Config: {TG_CONFIG_PATH}")
+        if cfg.bot_token:
+            print(f"  Current token: {cfg.bot_token[:8]}...{cfg.bot_token[-4:]}")
+        if cfg.allowed_user_id:
+            print(f"  Current user ID: {cfg.allowed_user_id}")
+        print()
+
+        token = input("  Bot token (from @BotFather): ").strip()
+        if not token:
+            if cfg.bot_token:
+                print("  (keeping existing token)")
+                token = cfg.bot_token
+            else:
+                print("  ✗ Token required.")
+                return 1
+
+        user_id_str = input("  Your Telegram user ID: ").strip()
+        if not user_id_str:
+            if cfg.allowed_user_id:
+                print(f"  (keeping existing: {cfg.allowed_user_id})")
+                user_id = cfg.allowed_user_id
+            else:
+                print("  ✗ User ID required. Send /start to @userinfobot to get it.")
+                return 1
+        else:
+            try:
+                user_id = int(user_id_str)
+            except ValueError:
+                print("  ✗ User ID must be a number.")
+                return 1
+
+        # Test connection
+        print()
+        print("  Testing connection...")
+        import httpx
+        try:
+            resp = httpx.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10)
+            data = resp.json()
+            if data.get("ok"):
+                bot_name = data["result"].get("username", "?")
+                print(f"  ✓ Connected to @{bot_name}")
+            else:
+                print(f"  ✗ API error: {data.get('description')}")
+                return 1
+        except Exception as e:
+            print(f"  ✗ Connection failed: {e}")
+            return 1
+
+        # Save config
+        cfg = TelegramConfig(
+            bot_token=token,
+            allowed_user_id=user_id,
+            enabled=True,
+            show_thinking=True,
+            show_tool_calls=True,
+            default_model=cfg.default_model,
+        )
+        save_tg_config(cfg)
+        print()
+        print(f"  ✓ Config saved to {TG_CONFIG_PATH}")
+        print()
+
+        # Offer to start
+        start = input("  Start the daemon now? [Y/n] ").strip().lower()
+        if start in ("", "y", "yes"):
+            result = enable_service()
+            print(f"  {result}")
+            result = start_service()
+            print(f"  {result}")
+        print()
+        print("  Done! Send a message to your bot.")
+        return 0
+
+    elif action == "start":
+        cfg = load_tg_config()
+        if not cfg.is_valid():
+            print("  Not configured. Run `cog tg setup` first.")
+            return 1
+        print(f"  {start_service()}")
+        return 0
+
+    elif action == "stop":
+        print(f"  {stop_service()}")
+        return 0
+
+    elif action == "restart":
+        cfg = load_tg_config()
+        if not cfg.is_valid():
+            print("  Not configured. Run `cog tg setup` first.")
+            return 1
+        print(f"  {restart_service()}")
+        return 0
+
+    elif action == "status":
+        status = status_service()
+        print(f"  Active:  {status['active']}")
+        print(f"  Enabled: {status['enabled']}")
+        print(f"  Service: {status['service_path']}")
+        cfg = load_tg_config()
+        if cfg.is_valid():
+            print(f"  Token:   {cfg.bot_token[:8]}...{cfg.bot_token[-4:]}")
+            print(f"  User ID: {cfg.allowed_user_id}")
+        else:
+            print("  Config:  NOT CONFIGURED")
+        return 0
+
+    elif action == "enable":
+        print(f"  {enable_service()}")
+        return 0
+
+    elif action == "disable":
+        print(f"  {disable_service()}")
+        return 0
+
+    elif action == "run":
+        # Run in foreground (for debugging)
+        cfg = load_tg_config()
+        if not cfg.is_valid():
+            print("  Not configured. Run `cog tg setup` first.")
+            return 1
+        print("  Running in foreground (Ctrl+C to stop)...")
+        from .gateway.telegram import run_bot
+        asyncio.run(run_bot(cfg))
+        return 0
+
+    print(f"  Unknown action: {action}")
+    return 1
+
+
+# ---------------------------------------------------------------------------
 # TUI launcher (default)
 # ---------------------------------------------------------------------------
 
@@ -476,6 +625,19 @@ def build_parser() -> argparse.ArgumentParser:
     pp_sub.add_parser("path")
     pp_sub.add_parser("edit")
     pp.set_defaults(func=_providers_command)
+
+    # Telegram gateway
+    tg = sub.add_parser("tg", help="Telegram gateway daemon")
+    tg_sub = tg.add_subparsers(dest="tg_action", required=True)
+    tg_sub.add_parser("start", help="start the gateway daemon")
+    tg_sub.add_parser("stop", help="stop the gateway daemon")
+    tg_sub.add_parser("restart", help="restart the gateway daemon")
+    tg_sub.add_parser("status", help="show daemon status")
+    tg_sub.add_parser("setup", help="configure bot token and user ID")
+    tg_sub.add_parser("enable", help="enable auto-start on login")
+    tg_sub.add_parser("disable", help="disable auto-start")
+    tg_sub.add_parser("run", help="run in foreground (for debugging)")
+    tg.set_defaults(func=_tg_command)
 
     return p
 

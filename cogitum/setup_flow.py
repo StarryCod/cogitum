@@ -708,6 +708,7 @@ class SetupScreen(Screen):
         ("providers", "Providers"),
         ("subs", "Subscriptions"),
         ("default", "Default model"),
+        ("telegram", "Telegram"),
         ("vault", "Vault"),
         ("diag", "Diagnostics"),
     )
@@ -805,6 +806,8 @@ class SetupScreen(Screen):
             self._render_subs(content)
         elif self._active == "default":
             self._render_default(content)
+        elif self._active == "telegram":
+            self._render_telegram(content)
         elif self._active == "vault":
             self._render_vault(content)
         elif self._active == "diag":
@@ -968,6 +971,158 @@ class SetupScreen(Screen):
             "COGITUM_VAULT_PASSWORD.\n\nUse `cog vault init / set / get / unset / list`"
             " from the shell — full TUI vault editing comes next.",
             style=TXT_DIM)))
+
+    # ---- telegram gateway ----
+
+    def _render_telegram(self, content: VerticalScroll) -> None:
+        from .gateway.tg_config import load_tg_config, save_tg_config, TelegramConfig, TG_CONFIG_PATH
+        from .gateway.daemon import status_service
+
+        cfg = load_tg_config()
+        status = status_service()
+
+        # Header card
+        card = Vertical(classes="card")
+        content.mount(card)
+        card.mount(_Static(Text("Telegram Gateway", style=f"bold {GOLD_HI}"),
+                          classes="card-title"))
+        card.mount(_Static(Text(
+            "Connect Cogitum to Telegram — agent responds to your messages in a bot chat.",
+            style=TXT_DIM)))
+
+        # Status
+        status_card = Vertical(classes="card")
+        content.mount(status_card)
+        status_card.mount(_Static(Text("Status", style=f"bold {GOLD}"), classes="card-title"))
+
+        active_text = status.get("active", "unknown")
+        is_running = "running" in active_text.lower() or "active" in active_text.lower()
+        status_style = OK if is_running else MUTED
+        status_card.mount(_Static(Text(f"  Daemon: {active_text}", style=status_style)))
+        status_card.mount(_Static(Text(f"  Enabled: {status.get('enabled', '?')}", style=TXT_DIM)))
+
+        if cfg.is_valid():
+            token_display = f"{cfg.bot_token[:8]}...{cfg.bot_token[-4:]}"
+            status_card.mount(_Static(Text(f"  Token: {token_display}", style=TXT_DIM)))
+            status_card.mount(_Static(Text(f"  User ID: {cfg.allowed_user_id}", style=TXT_DIM)))
+        else:
+            status_card.mount(_Static(Text("  ⚠ Not configured", style=RUST)))
+
+        # Config card
+        config_card = Vertical(classes="card")
+        content.mount(config_card)
+        config_card.mount(_Static(Text("Configuration", style=f"bold {GOLD}"), classes="card-title"))
+        config_card.mount(_Static(Text(f"  File: {TG_CONFIG_PATH}", style=TXT_DIM)))
+
+        # Token input
+        config_card.mount(_Static(Text("  Bot Token (from @BotFather):", style=TXT)))
+        token_input = Input(
+            value=cfg.bot_token or "",
+            placeholder="paste bot token here",
+            password=True,
+            id="tg-token-input",
+        )
+        config_card.mount(token_input)
+
+        # User ID input
+        config_card.mount(_Static(Text("  Your Telegram User ID:", style=TXT)))
+        uid_input = Input(
+            value=str(cfg.allowed_user_id) if cfg.allowed_user_id else "",
+            placeholder="numeric user ID (get from @userinfobot)",
+            id="tg-uid-input",
+        )
+        config_card.mount(uid_input)
+
+        # Action buttons
+        actions = Horizontal(classes="card-actions")
+        config_card.mount(actions)
+        actions.mount(Button("Save", id="tg-save", variant="primary"))
+        actions.mount(Button("Test", id="tg-test", variant="default"))
+
+        # Daemon control buttons
+        daemon_card = Vertical(classes="card")
+        content.mount(daemon_card)
+        daemon_card.mount(_Static(Text("Daemon Control", style=f"bold {GOLD}"), classes="card-title"))
+
+        daemon_actions = Horizontal(classes="card-actions")
+        daemon_card.mount(daemon_actions)
+        if is_running:
+            daemon_actions.mount(Button("Stop", id="tg-stop", variant="warning"))
+            daemon_actions.mount(Button("Restart", id="tg-restart", variant="default"))
+        else:
+            daemon_actions.mount(Button("Start", id="tg-start", variant="success"))
+        daemon_actions.mount(Button("Enable auto-start", id="tg-enable", variant="default"))
+
+    @on(Button.Pressed, "#tg-save")
+    def _tg_save(self, event: Button.Pressed) -> None:
+        from .gateway.tg_config import save_tg_config, TelegramConfig
+        try:
+            token = self.query_one("#tg-token-input", Input).value.strip()
+            uid_str = self.query_one("#tg-uid-input", Input).value.strip()
+            if not token:
+                self.app.notify("Token required", severity="error")
+                return
+            if not uid_str or not uid_str.isdigit():
+                self.app.notify("Valid user ID required", severity="error")
+                return
+            cfg = TelegramConfig(
+                bot_token=token,
+                allowed_user_id=int(uid_str),
+                enabled=True,
+                show_thinking=True,
+                show_tool_calls=True,
+            )
+            save_tg_config(cfg)
+            self.app.notify("✓ Telegram config saved", severity="information")
+            self._render_section()
+        except Exception as e:
+            self.app.notify(f"Save failed: {e}", severity="error")
+
+    @on(Button.Pressed, "#tg-test")
+    def _tg_test(self, event: Button.Pressed) -> None:
+        import httpx
+        try:
+            token = self.query_one("#tg-token-input", Input).value.strip()
+            if not token:
+                self.app.notify("Enter token first", severity="warning")
+                return
+            resp = httpx.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10)
+            data = resp.json()
+            if data.get("ok"):
+                name = data["result"].get("username", "?")
+                self.app.notify(f"✓ Connected to @{name}", severity="information")
+            else:
+                self.app.notify(f"✗ {data.get('description')}", severity="error")
+        except Exception as e:
+            self.app.notify(f"✗ Connection failed: {e}", severity="error")
+
+    @on(Button.Pressed, "#tg-start")
+    def _tg_start(self, event: Button.Pressed) -> None:
+        from .gateway.daemon import start_service
+        result = start_service()
+        self.app.notify(result, severity="information")
+        self._render_section()
+
+    @on(Button.Pressed, "#tg-stop")
+    def _tg_stop(self, event: Button.Pressed) -> None:
+        from .gateway.daemon import stop_service
+        result = stop_service()
+        self.app.notify(result, severity="information")
+        self._render_section()
+
+    @on(Button.Pressed, "#tg-restart")
+    def _tg_restart(self, event: Button.Pressed) -> None:
+        from .gateway.daemon import restart_service
+        result = restart_service()
+        self.app.notify(result, severity="information")
+        self._render_section()
+
+    @on(Button.Pressed, "#tg-enable")
+    def _tg_enable(self, event: Button.Pressed) -> None:
+        from .gateway.daemon import enable_service
+        result = enable_service()
+        self.app.notify(result, severity="information")
+        self._render_section()
 
     # ---- diagnostics ----
 
