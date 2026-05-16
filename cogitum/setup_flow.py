@@ -257,6 +257,7 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
 
             with Horizontal(id="key-foot"):
                 yield Button("Cancel", id="key-cancel")
+                yield Button("Test", id="key-test")
                 yield Button("Save",   id="key-save", variant="primary")
 
     def _render_backend(self, idx: int, bid: str, name: str, desc: str) -> Text:
@@ -336,6 +337,64 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
     @on(Button.Pressed, "#key-cancel")
     def _cancel_btn(self) -> None:
         self.dismiss(None)
+
+    @on(Button.Pressed, "#key-test")
+    async def _test_btn(self) -> None:
+        """Probe the API endpoint with the entered key — before saving."""
+        secret = (self.query_one("#key-secret", Input).value or "").strip()
+        if not secret:
+            self.app.push_screen(MessageModal(
+                "Empty key", "Paste the API key first, then click Test.",
+                error=True))
+            return
+        # Find provider's base_url from config
+        from cogitum.core.llm.config_writer import ConfigWriter
+        from cogitum.core.llm.discovery import discover_models
+        writer = ConfigWriter()
+        raw = writer.provider(self._pid)
+        if not raw:
+            self.app.push_screen(MessageModal(
+                "Provider missing",
+                f"{self._pid} not in providers.toml. Add it first.",
+                error=True))
+            return
+        base_url = raw.get("base_url", "")
+        if not base_url:
+            self.app.push_screen(MessageModal(
+                "No base_url", f"{self._pid} has no base_url set.",
+                error=True))
+            return
+        if raw.get("format") == "anthropic_native":
+            self.app.push_screen(MessageModal(
+                "Test skipped",
+                "Anthropic API doesn't expose /v1/models. Save the key — "
+                "the agent will validate it on first use.",
+            ))
+            return
+        self.app.notify(f"Testing {base_url}…", timeout=2)
+        try:
+            models = await discover_models(base_url, secret, timeout=8.0)
+        except Exception as e:  # noqa: BLE001
+            self.app.push_screen(MessageModal(
+                "Test failed",
+                f"Could not reach {base_url}/models:\n\n{e}\n\n"
+                "Check the key and base_url, then try again.",
+                error=True))
+            return
+        if not models:
+            self.app.push_screen(MessageModal(
+                "Test inconclusive",
+                f"{base_url}/models returned 0 models. The key may still "
+                "be valid — save and try a request.",
+            ))
+            return
+        sample = ", ".join(m["model_id"] for m in models[:3])
+        more = f" +{len(models)-3} more" if len(models) > 3 else ""
+        self.app.push_screen(MessageModal(
+            "✓ Connection OK",
+            f"Found {len(models)} models:\n  {sample}{more}\n\n"
+            "Click Save to persist this key.",
+        ))
 
     @on(Button.Pressed, "#key-save")
     def _save_btn(self) -> None:
@@ -1081,36 +1140,72 @@ class SetupScreen(Screen):
         for pid, raw in providers.items():
             self._render_provider_card(content, pid, raw)
 
+    def _provider_status(self, pid: str, raw) -> tuple[str, str]:
+        """Compute (icon, message) for the provider status line."""
+        from cogitum.core.llm.discovery import resolve_secret_ref
+
+        keys = raw.get("keys") or {}
+        models = raw.get("models") or {}
+        enabled = bool(raw.get("enabled", True))
+
+        if not keys:
+            return ("⚠", "no key — click '+ Add key' to enable")
+        if not enabled:
+            return ("○", "disabled — click 'Enable' to use")
+
+        # Check first key resolves
+        first_key = next(iter(keys.values()))
+        ref = first_key.get("secret_ref", "")
+        if ref.startswith("oauth:"):
+            from cogitum.core.auth import storage as auth_storage
+            pid_oauth = ref.removeprefix("oauth:")
+            creds = auth_storage.get(pid_oauth)
+            if not creds:
+                return ("⚠", "OAuth not connected — click 'Connect' in Subscriptions")
+        elif ref.startswith("env:") or ref.startswith("vault:") or ref.startswith("plain:"):
+            try:
+                value = resolve_secret_ref(ref)
+                if not value:
+                    return ("⚠", f"key not resolvable ({ref}) — re-enter via 'Manage keys'")
+            except Exception as e:  # noqa: BLE001
+                return ("⚠", f"key error: {e}")
+
+        if not models:
+            return ("⚠", "no models — click 'Refresh models' to discover")
+
+        return ("✓", f"ready · {len(models)} models")
+
     def _render_provider_card(self, content, pid: str, raw) -> None:
         card = Vertical(classes="card")
         content.mount(card)
+
+        # Status line at top — at-a-glance health
+        icon, status_msg = self._provider_status(pid, raw)
+        status_style = OK if icon == "✓" else (COPPER if icon == "⚠" else TXT_DIM)
+
         title = Text()
+        title.append(f"{icon} ", style=status_style)
         title.append(f"{pid}", style=f"bold {GOLD_HI}")
         title.append(f"   {raw.get('name', '')}", style=TXT_DIM)
         title.append(f"   {raw.get('format', 'openai_compat')}", style=BRONZE)
         if not bool(raw.get("enabled", True)):
             title.append("   [disabled]", style=COPPER)
         card.mount(_Static(title, classes="card-title"))
-        card.mount(_Static(Text(raw.get("base_url", ""), style=TXT_DIM)))
 
-        # keys
+        status = Text()
+        status.append("  ", style=status_style)
+        status.append(status_msg, style=status_style)
+        card.mount(_Static(status))
+
+        card.mount(_Static(Text(f"  {raw.get('base_url', '')}", style=TXT_DIM)))
+
+        # keys (compact: show count only, full details in Manage Keys)
         keys = raw.get("keys") or {}
-        if keys:
-            for kid, kdata in keys.items():
-                line = Text()
-                line.append(f"  · {kid:<14}", style=GOLD)
-                line.append(kdata.get("secret_ref", ""), style=BRONZE)
-                if kdata.get("notes"):
-                    line.append(f"   {kdata['notes']}", style=TXT_DIM)
-                card.mount(_Static(line))
-        else:
-            card.mount(_Static(Text("  no keys yet — add one to enable", style=COPPER)))
-
-        # models
+        # models summary
         models = raw.get("models") or {}
         if models:
             mtitle = Text()
-            mtitle.append(f"  {len(models)} models  ", style=GOLD_DIM)
+            mtitle.append(f"  {len(models)} models · ", style=GOLD_DIM)
             mtitle.append(", ".join(list(models.keys())[:4]), style=TXT_DIM)
             if len(models) > 4:
                 mtitle.append(f"  +{len(models)-4} more", style=TXT_DIM)
@@ -1121,6 +1216,7 @@ class SetupScreen(Screen):
         actions.mount(Button("+ Add key", id=f"prov-key-{pid}"))
         if keys:
             actions.mount(Button(f"Manage keys ({len(keys)})", id=f"prov-keys-{pid}"))
+            actions.mount(Button("Refresh models", id=f"prov-refresh-{pid}"))
         if bool(raw.get("enabled", True)):
             actions.mount(Button("Disable", id=f"prov-disable-{pid}"))
         else:
@@ -1458,6 +1554,84 @@ class SetupScreen(Screen):
                 self._writer.save()
                 self.app.notify(f"Removed {pid}", severity="information")
                 self._render_section()
+            return
+
+        if bid.startswith("prov-refresh-"):
+            pid = bid.removeprefix("prov-refresh-")
+            self.app.notify(f"Discovering models for {pid}…", timeout=2)
+            from cogitum.core.llm.discovery import discover_models, resolve_secret_ref
+            raw = self._writer.provider(pid)
+            if not raw:
+                self.app.notify(f"Provider {pid} not found", severity="error")
+                return
+            keys = raw.get("keys") or {}
+            if not keys:
+                await self.app.push_screen_wait(MessageModal(
+                    "No key", f"{pid} has no API key. Click '+ Add key' first.",
+                    error=True,
+                ))
+                return
+            secret_ref = next(iter(keys.values())).get("secret_ref", "")
+            if secret_ref.startswith("oauth:") or raw.get("format") == "anthropic_native":
+                await self.app.push_screen_wait(MessageModal(
+                    "Cannot discover",
+                    f"{pid} uses {('OAuth' if secret_ref.startswith('oauth:') else 'Anthropic')} which doesn't expose /v1/models.\n"
+                    "Models are pre-seeded for this provider.",
+                ))
+                return
+            try:
+                api_key = resolve_secret_ref(secret_ref)
+            except Exception as e:  # noqa: BLE001
+                await self.app.push_screen_wait(MessageModal(
+                    "Key error", f"Could not resolve {secret_ref}: {e}", error=True,
+                ))
+                return
+            if not api_key:
+                await self.app.push_screen_wait(MessageModal(
+                    "Key empty",
+                    f"{secret_ref} resolves to empty. Re-enter the key via 'Manage keys'.",
+                    error=True,
+                ))
+                return
+            base_url = raw.get("base_url", "")
+            try:
+                models = await discover_models(base_url, api_key, timeout=10.0)
+            except Exception as e:  # noqa: BLE001
+                await self.app.push_screen_wait(MessageModal(
+                    "Discovery failed",
+                    f"Endpoint: {base_url}\nError: {e}\n\n"
+                    "Possible causes: invalid key, wrong base_url, network down.",
+                    error=True,
+                ))
+                return
+            if not models:
+                await self.app.push_screen_wait(MessageModal(
+                    "No models",
+                    f"Endpoint {base_url}/models returned 0 models.",
+                ))
+                return
+            existing = self._writer.provider(pid).get("models") or {}
+            added = 0
+            for m in models:
+                mid = m.get("model_id")
+                if not mid or mid in existing:
+                    continue
+                self._writer.add_model(
+                    pid, mid,
+                    display=m.get("display", mid),
+                    capabilities=m.get("capabilities", ["text", "tools"]),
+                    context_window=m.get("context_window", 128000),
+                    max_output_tokens=m.get("max_output_tokens", 16000),
+                )
+                added += 1
+            self._writer.save()
+            total = len(existing) + added
+            await self.app.push_screen_wait(MessageModal(
+                "Refresh complete",
+                f"{pid}: discovered {len(models)} models from /v1/models.\n"
+                f"Added {added} new (total: {total}).",
+            ))
+            self._render_section()
             return
 
         if bid.startswith("prov-disable-"):
