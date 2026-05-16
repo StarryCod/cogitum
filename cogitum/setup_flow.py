@@ -1762,8 +1762,39 @@ class SetupScreen(Screen):
             if not raw:
                 self.app.notify(f"Provider {pid} not found", severity="error")
                 return
+
+            # Backfill from preset first — adds curated models the user
+            # might have lost or never had (e.g. cerebras llama3.1-8b)
+            preset_added = 0
+            preset = preset_by_id(pid)
+            if preset and preset.models:
+                existing = raw.get("models") or {}
+                for m in preset.models:
+                    if m.id in existing:
+                        continue
+                    self._writer.add_model(
+                        pid, m.id,
+                        display=m.display,
+                        aliases=list(m.aliases),
+                        capabilities=list(m.capabilities),
+                        context_window=m.context_window,
+                        max_output_tokens=m.max_output_tokens,
+                    )
+                    preset_added += 1
+                if preset_added:
+                    self._writer.save()
+                    raw = self._writer.provider(pid)  # refresh local copy
+
             keys = raw.get("keys") or {}
             if not keys:
+                if preset_added:
+                    await self.app.push_screen_wait(MessageModal(
+                        "Backfilled",
+                        f"Added {preset_added} known {pid} models from preset.\n"
+                        f"Add a key to enable live /v1/models discovery.",
+                    ))
+                    self._render_section()
+                    return
                 await self.app.push_screen_wait(MessageModal(
                     "No key", f"{pid} has no API key. Click '+ Add key' first.",
                     error=True,
@@ -1771,11 +1802,13 @@ class SetupScreen(Screen):
                 return
             secret_ref = next(iter(keys.values())).get("secret_ref", "")
             if secret_ref.startswith("oauth:") or raw.get("format") == "anthropic_native":
-                await self.app.push_screen_wait(MessageModal(
-                    "Cannot discover",
-                    f"{pid} uses {('OAuth' if secret_ref.startswith('oauth:') else 'Anthropic')} which doesn't expose /v1/models.\n"
-                    "Models are pre-seeded for this provider.",
-                ))
+                msg = f"{pid} uses {('OAuth' if secret_ref.startswith('oauth:') else 'Anthropic')} which doesn't expose /v1/models.\n"
+                if preset_added:
+                    msg += f"Backfilled {preset_added} known models from preset."
+                else:
+                    msg += "Models are pre-seeded for this provider."
+                await self.app.push_screen_wait(MessageModal("Cannot discover", msg))
+                self._render_section()
                 return
             try:
                 api_key = resolve_secret_ref(secret_ref)
@@ -1785,28 +1818,27 @@ class SetupScreen(Screen):
                 ))
                 return
             if not api_key:
+                msg = f"{secret_ref} resolves to empty. Re-enter the key via 'Manage keys'."
+                if preset_added:
+                    msg = f"Backfilled {preset_added} known {pid} models from preset.\n\n" + msg
                 await self.app.push_screen_wait(MessageModal(
-                    "Key empty",
-                    f"{secret_ref} resolves to empty. Re-enter the key via 'Manage keys'.",
-                    error=True,
+                    "Key empty" if not preset_added else "Backfilled (key empty)",
+                    msg,
                 ))
+                self._render_section()
                 return
             base_url = raw.get("base_url", "")
             try:
                 models = await discover_models(base_url, api_key, timeout=10.0)
             except Exception as e:  # noqa: BLE001
+                msg = f"Endpoint: {base_url}\nError: {e}\n\nPossible causes: invalid key, wrong base_url, network down."
+                if preset_added:
+                    msg = f"Backfilled {preset_added} known models from preset.\n\nLive discovery still failed:\n{msg}"
                 await self.app.push_screen_wait(MessageModal(
-                    "Discovery failed",
-                    f"Endpoint: {base_url}\nError: {e}\n\n"
-                    "Possible causes: invalid key, wrong base_url, network down.",
-                    error=True,
+                    "Discovery failed" if not preset_added else "Backfilled (discovery failed)",
+                    msg, error=not preset_added,
                 ))
-                return
-            if not models:
-                await self.app.push_screen_wait(MessageModal(
-                    "No models",
-                    f"Endpoint {base_url}/models returned 0 models.",
-                ))
+                self._render_section()
                 return
             existing = self._writer.provider(pid).get("models") or {}
             added = 0
@@ -1823,11 +1855,17 @@ class SetupScreen(Screen):
                 )
                 added += 1
             self._writer.save()
-            total = len(existing) + added
+            total = len(self._writer.provider(pid).get("models") or {})
+            body_lines = []
+            if preset_added:
+                body_lines.append(f"Backfilled {preset_added} from preset.")
+            body_lines.append(
+                f"Live discovery: {len(models)} returned, {added} new added."
+            )
+            body_lines.append(f"Total models: {total}.")
             await self.app.push_screen_wait(MessageModal(
                 "Refresh complete",
-                f"{pid}: discovered {len(models)} models from /v1/models.\n"
-                f"Added {added} new (total: {total}).",
+                "\n".join(body_lines),
             ))
             self._render_section()
             return
