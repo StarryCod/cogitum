@@ -86,11 +86,21 @@ class _Entry:
         ).lower()
 
 
-def _render_row(entry: _Entry, *, active_keys: int) -> Text:
+def _render_row(entry: _Entry, *, active_keys: int, query: str = "") -> Text:
     m = entry.resolved.model
     line = Text()
-    line.append(entry.resolved.provider.id + "/", style=GOLD_DIM)
-    line.append(m.id, style=GOLD)
+
+    # Provider prefix + model id, with optional query highlight
+    prov = entry.resolved.provider.id + "/"
+    line.append(prov, style=GOLD_DIM)
+    if query and query in m.id.lower():
+        # Highlight first match
+        idx = m.id.lower().find(query)
+        line.append(m.id[:idx], style=GOLD)
+        line.append(m.id[idx:idx+len(query)], style=f"bold {GOLD_HI}")
+        line.append(m.id[idx+len(query):], style=GOLD)
+    else:
+        line.append(m.id, style=GOLD)
 
     line.append("   ", style="")
     line.append(m.display or "—", style=TXT_DIM)
@@ -282,17 +292,49 @@ class ModelPicker(ModalScreen[ResolvedModel | None]):
     def _rebuild_list(self, query: str = "") -> None:
         items = [e for e in self._all if self._passes_filters(e)]
 
-        if query.strip():
+        q = query.lower().strip()
+        if q:
+            # 1) Substring matches first (anywhere in haystack) — these are
+            #    the user's "I know what I want" hits and must always show.
+            substring_hits = [e for e in items if q in e.search_haystack]
+            substring_ids = {e.display_id for e in substring_hits}
+
+            # 2) Try fuzzy on the rest, more permissive threshold
+            fuzzy_hits: list[_Entry] = []
             try:
                 from rapidfuzz import fuzz
-                q = query.lower().strip()
                 for e in items:
-                    e.score = fuzz.partial_ratio(q, e.search_haystack)
-                items = [e for e in items if e.score >= 50]
-                items.sort(key=lambda e: e.score, reverse=True)
+                    if e.display_id in substring_ids:
+                        continue
+                    # token_set_ratio handles word-order and partial tokens
+                    score = max(
+                        fuzz.partial_ratio(q, e.search_haystack),
+                        fuzz.token_set_ratio(q, e.search_haystack),
+                    )
+                    e.score = score
+                    if score >= 65:
+                        fuzzy_hits.append(e)
+                fuzzy_hits.sort(key=lambda e: e.score, reverse=True)
             except ImportError:
-                q = query.lower().strip()
-                items = [e for e in items if q in e.search_haystack]
+                pass
+
+            # 3) Boost: id starts with query > display starts with query > rest
+            def _rank(e: _Entry) -> tuple[int, int, str]:
+                m = e.resolved.model
+                qid = e.display_id.lower()
+                disp = (m.display or "").lower()
+                if qid.startswith(q):
+                    pri = 0
+                elif m.id.lower().startswith(q):
+                    pri = 1
+                elif disp.startswith(q):
+                    pri = 2
+                else:
+                    pri = 3
+                return (pri, -len(qid), qid)
+
+            substring_hits.sort(key=_rank)
+            items = substring_hits + fuzzy_hits
         else:
             items.sort(key=lambda e: (e.resolved.provider.id, e.resolved.model.id))
 
@@ -305,7 +347,7 @@ class ModelPicker(ModalScreen[ResolvedModel | None]):
         seq = self._rebuild_seq
         for i, e in enumerate(items):
             active_keys = e.resolved.provider.pool.active_count
-            row = _render_row(e, active_keys=active_keys)
+            row = _render_row(e, active_keys=active_keys, query=q)
             list_view.mount(ListItem(Static(row), id=f"item-{seq}-{i}"))
         if items:
             list_view.index = 0
