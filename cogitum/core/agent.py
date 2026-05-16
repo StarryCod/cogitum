@@ -206,7 +206,11 @@ class AgentConfig:
         "• web_search(query='...') — DuckDuckGo search, no API key needed.\n"
         "• browser(action='open', url='...') — Playwright headless browser for interaction.\n"
         "  Actions: open, click, type, text, screenshot, scroll, close.\n"
-        "• fetch_url(url='...') — quick fetch + HTML strip for simple pages.\n"
+        "• fetch_url(url='...') — quick fetch + HTML strip for simple pages.\n\n"
+        "MEDIA — send files to user (Telegram gateway only):\n"
+        "• send_media(path='/path/to/file.png') — send photo, document, or any file.\n"
+        "• Supports auto-detection: .png/.jpg/.webp → photo, everything else → document.\n"
+        "• Use after generating images, screenshots, or files the user needs.\n"
     )
     tools_enabled: bool = True
     tool_tags: list[str] | None = None   # None = all tools

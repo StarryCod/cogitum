@@ -773,3 +773,70 @@ async def browser(action: str, url: str = "", selector: str = "", text: str = ""
 
     except Exception as e:
         return f"ERROR: browser action '{action}' failed: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Telegram media (available only when running via TG gateway)
+# ---------------------------------------------------------------------------
+
+# Global reference set by TG gateway before agent runs
+_tg_api = None
+_tg_chat_id: int | None = None
+
+
+def _set_tg_context(api, chat_id: int) -> None:
+    """Called by TG gateway to inject API reference for send_media tool."""
+    global _tg_api, _tg_chat_id
+    _tg_api = api
+    _tg_chat_id = chat_id
+
+
+def _clear_tg_context() -> None:
+    """Called by TG gateway after agent finishes."""
+    global _tg_api, _tg_chat_id
+    _tg_api = None
+    _tg_chat_id = None
+
+
+@tool(tags=["media", "telegram"])
+async def send_media(path: str, caption: str = "", media_type: str = "auto") -> str:
+    """Send a file (photo, document, audio) to the user in Telegram chat.
+
+    Use this when you want to share an image, screenshot, generated file,
+    or any document with the user.
+
+    path: Absolute path to the file to send.
+    caption: Optional caption text for the media.
+    media_type: 'photo', 'document', or 'auto' (detect from extension).
+    """
+    global _tg_api, _tg_chat_id
+
+    if _tg_api is None or _tg_chat_id is None:
+        return "ERROR: send_media is only available when running via Telegram gateway."
+
+    from pathlib import Path as P
+    file_path = P(path).expanduser().resolve()
+
+    if not file_path.exists():
+        return f"ERROR: file not found: {path}"
+
+    # Determine media type
+    ext = file_path.suffix.lower()
+    if media_type == "auto":
+        if ext in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+            media_type = "photo"
+        else:
+            media_type = "document"
+
+    try:
+        if media_type == "photo":
+            resp = await _tg_api.send_photo(_tg_chat_id, str(file_path), caption=caption)
+        else:
+            resp = await _tg_api.send_document(_tg_chat_id, str(file_path), caption=caption)
+
+        if resp.get("ok"):
+            return f"Sent {media_type}: {file_path.name}" + (f" with caption: {caption}" if caption else "")
+        else:
+            return f"ERROR: Telegram API: {resp.get('description', 'unknown error')}"
+    except Exception as e:
+        return f"ERROR: send_media failed: {e}"

@@ -651,6 +651,10 @@ class CogitumBot:
         # Run agent
         session._cancel_flag = False
 
+        # Inject TG context for send_media tool
+        from cogitum.core.builtin_tools import _set_tg_context, _clear_tg_context
+        _set_tg_context(self.api, chat_id)
+
         async def agent_task():
             return await self.agent.run(
                 user_message=user_message,
@@ -738,6 +742,7 @@ class CogitumBot:
             )
         finally:
             typing_task.cancel()
+            _clear_tg_context()
             session.agent_task = None
 
 
