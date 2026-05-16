@@ -929,14 +929,43 @@ class Agent:
             )
             return str(result)
         except asyncio.TimeoutError:
-            return f"ERROR: tool '{tc.name}' timed out after 300s"
+            return f"ERROR: tool '{tc.name}' timed out after 300s. Try mode='background' for long-running commands."
         except asyncio.CancelledError:
             return "ERROR: tool execution cancelled by user"
         except KeyError:
-            return f"ERROR: unknown tool '{tc.name}'"
+            # Suggest similar tool names
+            available = list(self.registry._tools.keys()) if hasattr(self.registry, '_tools') else []
+            from difflib import get_close_matches
+            suggestions = get_close_matches(tc.name, available, n=3, cutoff=0.4)
+            hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
+            return (
+                f"ERROR: unknown tool '{tc.name}'.{hint} "
+                f"Available tools: {', '.join(sorted(available)[:20])}. "
+                f"DO NOT call this tool again. Pick a real one from the list above."
+            )
+        except TypeError as exc:
+            # Most common: wrong argument names
+            msg = str(exc)
+            hint = ""
+            if "unexpected keyword argument" in msg:
+                # Extract bad arg name
+                import re
+                m = re.search(r"unexpected keyword argument '([^']+)'", msg)
+                if m:
+                    bad = m.group(1)
+                    hint = f"\nFIX: Tool '{tc.name}' has no parameter '{bad}'. Check the tool signature in your system prompt."
+            elif "missing" in msg and "required" in msg:
+                hint = f"\nFIX: You forgot a required argument for '{tc.name}'."
+            log.warning("Tool %s TypeError: %s | args=%s", tc.name, exc, tc.arguments)
+            return f"ERROR: TypeError in '{tc.name}': {exc}{hint}\nDO NOT repeat the same call. Read the error and fix the arguments."
         except Exception as exc:
-            log.warning("Tool %s raised: %s", tc.name, exc)
-            return f"ERROR: {type(exc).__name__}: {exc}"
+            log.warning("Tool %s raised: %s | args=%s", tc.name, exc, tc.arguments)
+            return (
+                f"ERROR: {type(exc).__name__} in '{tc.name}': {exc}\n"
+                f"Args you passed: {tc.arguments}\n"
+                f"DO NOT repeat the same call with the same args. "
+                f"Either fix the arguments or try a different approach."
+            )
 
     # ------------------------------------------------------------------
     # Delegate task execution
