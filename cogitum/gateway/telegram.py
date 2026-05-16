@@ -176,6 +176,18 @@ class TelegramAPI:
     async def answer_callback(self, callback_id: str, text: str = "") -> None:
         await self.call("answerCallbackQuery", callback_query_id=callback_id, text=text)
 
+    async def send_typing(self, chat_id: int) -> None:
+        """Send 'typing...' chat action."""
+        await self.call("sendChatAction", chat_id=chat_id, action="typing")
+
+    async def set_my_commands(self, commands: list[dict[str, str]]) -> None:
+        """Register bot commands for the menu."""
+        await self.call("setMyCommands", commands=commands)
+
+    async def delete_message(self, chat_id: int, message_id: int) -> None:
+        """Delete a message."""
+        await self.call("deleteMessage", chat_id=chat_id, message_id=message_id)
+
 
 # ── Session state ────────────────────────────────────────────────────────────
 
@@ -245,6 +257,18 @@ class CogitumBot:
 
         self._running = True
         log.info("Gateway ready. Model: %s. Polling...", current_model)
+
+        # Register bot commands menu
+        await self.api.set_my_commands([
+            {"command": "new", "description": "✦ New session"},
+            {"command": "resume", "description": "📋 Resume session (or /resume <name>)"},
+            {"command": "title", "description": "✏️ Rename current session"},
+            {"command": "tools", "description": "🔧 List available tools"},
+            {"command": "models", "description": "🤖 Pick model"},
+            {"command": "model", "description": "🔄 Switch model directly"},
+            {"command": "stop", "description": "⏹ Cancel generation"},
+            {"command": "help", "description": "❓ All commands"},
+        ])
 
         try:
             await self._poll_loop()
@@ -369,15 +393,52 @@ class CogitumBot:
 
         elif cmd == "resume":
             store = get_store()
-            sessions = store.list_sessions(limit=8)
+            sessions = store.list_sessions(limit=20)
             if not sessions:
                 await self.api.send_message(
                     chat_id, escape_md("No saved sessions."), parse_mode="MarkdownV2"
                 )
                 return
+
+            # If user provided a name/pattern, filter by it
+            if rest:
+                import fnmatch
+                pattern = rest.strip()
+                # Support glob patterns (e.g. "Привет*", "*test*")
+                if "*" in pattern or "?" in pattern:
+                    matched = [s for s in sessions if fnmatch.fnmatch(
+                        (s.title or "").lower(), pattern.lower()
+                    )]
+                else:
+                    # Substring match
+                    matched = [s for s in sessions if pattern.lower() in (s.title or "").lower()]
+
+                if not matched:
+                    await self.api.send_message(
+                        chat_id, escape_md(f"No sessions matching: {pattern}"),
+                    )
+                    return
+                elif len(matched) == 1:
+                    # Direct resume
+                    s = matched[0]
+                    messages = store.load_session(s.id)
+                    session.history = messages
+                    session.session_id = s.id
+                    title = s.title or s.id[:12]
+                    divider = format_session_divider(f"RESUMED: {title}")
+                    await self.api.send_message(chat_id, divider)
+                    msg_count = len(messages)
+                    await self.api.send_message(
+                        chat_id,
+                        escape_md(f"📋 Loaded {msg_count} messages. Continue the conversation."),
+                    )
+                    return
+                else:
+                    sessions = matched[:8]
+
             # Build inline keyboard
             buttons = []
-            for s in sessions:
+            for s in sessions[:8]:
                 title = s.title or s.id[:12]
                 buttons.append([{
                     "text": f"📋 {title}",
@@ -544,6 +605,9 @@ class CogitumBot:
         chat_id = session.chat_id
         queue: asyncio.Queue = asyncio.Queue()
 
+        # Send typing indicator immediately
+        await self.api.send_typing(chat_id)
+
         # Ensure session exists in store
         if not session.session_id:
             from cogitum.core.events import _id
@@ -556,9 +620,10 @@ class CogitumBot:
         # Status message (will be edited with tool calls)
         status_msg_id: int | None = None
         status_lines: list[str] = []
+        _last_typing = time.time()
 
         async def send_status(line: str) -> None:
-            nonlocal status_msg_id, status_lines
+            nonlocal status_msg_id, status_lines, _last_typing
             status_lines.append(line)
             text = "\n".join(status_lines[-8:])  # show last 8 lines
             if status_msg_id is None:
@@ -567,6 +632,21 @@ class CogitumBot:
                     status_msg_id = resp["result"]["message_id"]
             else:
                 await self.api.edit_message(chat_id, status_msg_id, text, parse_mode="MarkdownV2")
+            # Refresh typing indicator
+            now = time.time()
+            if now - _last_typing > 4:
+                await self.api.send_typing(chat_id)
+                _last_typing = now
+
+        async def keep_typing() -> None:
+            """Background task to keep 'typing...' indicator alive."""
+            nonlocal _last_typing
+            while True:
+                await asyncio.sleep(4)
+                now = time.time()
+                if now - _last_typing > 4:
+                    await self.api.send_typing(chat_id)
+                    _last_typing = now
 
         # Run agent
         session._cancel_flag = False
@@ -579,6 +659,7 @@ class CogitumBot:
             )
 
         task = asyncio.create_task(agent_task())
+        typing_task = asyncio.create_task(keep_typing())
         session.agent_task = task
 
         # Collect results
@@ -656,6 +737,7 @@ class CogitumBot:
                 chat_id, f"❌ {escape_md(str(e))}"
             )
         finally:
+            typing_task.cancel()
             session.agent_task = None
 
 
