@@ -12,6 +12,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -227,7 +228,63 @@ class CogitumBot:
         self.mesh = None
         self.agent: Agent | None = None
         self._running = False
-        self._offset = 0
+        self._offset = self._load_offset()
+        # Dedup ring for callback_query IDs. Telegram retries unanswered
+        # callbacks for ~15s, so a stale handler crash can otherwise cause
+        # the same approval click to fire 2-3 times. We remember the last
+        # 256 callback IDs we've seen and drop duplicates.
+        self._seen_callbacks: collections.OrderedDict[str, float] = collections.OrderedDict()
+        self._seen_callbacks_max = 256
+        # Bound concurrency on parallel update handlers — without this, a
+        # spammer (or our own retry loop) can spawn unbounded tasks.
+        self._update_sem = asyncio.Semaphore(8)
+        self._update_tasks: set[asyncio.Task] = set()
+        # Backoff state for the poll loop.
+        self._poll_backoff = 1.0
+
+    # ── Offset persistence ──────────────────────────────────────────────
+    #
+    # Without this, restarting the bot resets _offset to 0 and Telegram
+    # re-delivers every update from the last 24 hours — which means the
+    # user sees duplicate replies after every restart. We persist the
+    # offset to disk after each successful batch.
+
+    @staticmethod
+    def _offset_path() -> Path:
+        return Path("~/.config/cogitum/tg_offset").expanduser()
+
+    def _load_offset(self) -> int:
+        try:
+            return int(self._offset_path().read_text().strip())
+        except (OSError, ValueError):
+            return 0
+
+    def _save_offset(self) -> None:
+        try:
+            p = self._offset_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(str(self._offset))
+        except OSError:
+            log.warning("Failed to persist tg_offset to %s", self._offset_path())
+
+    # ── Callback dedup ──────────────────────────────────────────────────
+
+    def _is_duplicate_callback(self, cb_id: str) -> bool:
+        """True if we've already seen this callback_query.id recently."""
+        now = time.monotonic()
+        # Drop entries older than 60s (Telegram retries window).
+        for old_id, ts in list(self._seen_callbacks.items()):
+            if now - ts > 60:
+                self._seen_callbacks.pop(old_id, None)
+            else:
+                break
+        if cb_id in self._seen_callbacks:
+            return True
+        self._seen_callbacks[cb_id] = now
+        # Bounded ring.
+        while len(self._seen_callbacks) > self._seen_callbacks_max:
+            self._seen_callbacks.popitem(last=False)
+        return False
 
     async def start(self) -> None:
         """Initialize mesh and start polling."""
@@ -397,16 +454,36 @@ class CogitumBot:
                 updates = await self.api.get_updates(
                     offset=self._offset, timeout=30
                 )
+                # Reset backoff after any successful round-trip.
+                self._poll_backoff = 1.0
                 for update in updates:
                     self._offset = update["update_id"] + 1
-                    asyncio.create_task(self._handle_update(update))
+                    # Bounded fan-out: spawn handler tasks but cap parallelism
+                    # via a semaphore. Keep hard refs to prevent GC of the
+                    # task before it completes (RUF006 fix).
+                    task = asyncio.create_task(self._spawn_handler(update))
+                    self._update_tasks.add(task)
+                    task.add_done_callback(self._update_tasks.discard)
+                # Persist offset after each batch so a restart won't replay.
+                if updates:
+                    self._save_offset()
             except httpx.TimeoutException:
                 continue
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log.exception("Poll error: %s", e)
-                await asyncio.sleep(5)
+                # Exponential backoff capped at 30s. Resets on next success.
+                await asyncio.sleep(self._poll_backoff)
+                self._poll_backoff = min(self._poll_backoff * 2, 30.0)
+
+    async def _spawn_handler(self, update: dict) -> None:
+        """Run _handle_update under the concurrency semaphore."""
+        async with self._update_sem:
+            try:
+                await self._handle_update(update)
+            except Exception:
+                log.exception("Update handler crashed")
 
     # ── Update dispatch ──────────────────────────────────────────────────────
 
@@ -677,6 +754,17 @@ class CogitumBot:
 
     async def _handle_callback(self, callback: dict) -> None:
         cb_id = callback["id"]
+        # Dedup: Telegram retries unanswered callbacks for ~15s. Without this
+        # check, a slow handler (or one that crashes mid-flight) causes the
+        # same approval click to be processed multiple times — a real
+        # rate-limit / replay-attack vector.
+        if self._is_duplicate_callback(cb_id):
+            log.debug("Dropping duplicate callback_query %s", cb_id)
+            try:
+                await self.api.answer_callback(cb_id)
+            except Exception:
+                pass
+            return
         data = callback.get("data", "")
         chat_id = callback["message"]["chat"]["id"]
         user_id = callback.get("from", {}).get("id", 0)

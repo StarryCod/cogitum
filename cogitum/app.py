@@ -529,6 +529,15 @@ class CogitumApp(App):
                         thinking_block.finish()
                     if agent_block is not None:
                         agent_block.finish_streaming()
+                    # Final-sweep: any tool card still pending at AgentDone
+                    # means the agent finished without ever sending a result
+                    # for that call — rare, but if it happens the card would
+                    # otherwise stay on "running…" forever.
+                    for cid, card in tool_cards.items():
+                        card.mark_interrupted("(agent finished without sending result)")
+                    if waiting is not None:
+                        waiting.stop()
+                        waiting = None
                     usage = event.usage
                     # Approximate token count from streamed text if no usage reported
                     approx_out = len(self._streamed_text) // 4 if not usage else 0
@@ -565,6 +574,12 @@ class CogitumApp(App):
                     if waiting is not None:
                         waiting.stop()
                         waiting = None
+                    # Final-sweep: an error tore the run mid-flight; any
+                    # tool card still in pending/preparing/running state will
+                    # never get its real result, so show the user it was
+                    # interrupted instead of a frozen spinner.
+                    for cid, card in tool_cards.items():
+                        card.mark_interrupted(f"(interrupted: {event.message[:60]})")
                     feed.append_error(event.message, meta="agent")
                     try:
                         inspector = self.query_one("#inspector-widget", Inspector)
@@ -610,8 +625,7 @@ class CogitumApp(App):
                     w.stop()
                 # Mark any tool cards still in "running" state as timed out
                 for cid, card in tool_cards.items():
-                    if card._result is None:
-                        card.set_result("(timed out — no result received)", error=True)
+                    card.mark_interrupted("(timed out — no result received)")
                 # drain didn't finish — show error directly
                 if agent_fut.done() and agent_fut.exception():
                     feed.append_error(str(agent_fut.exception()), meta="agent")

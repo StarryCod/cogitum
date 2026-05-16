@@ -545,6 +545,20 @@ class ToolCallCard(Static):
         self._preparing = False
         self.update(self._build())
 
+    def is_pending(self) -> bool:
+        """True if this card has not yet received a result."""
+        return self._result is None
+
+    def mark_interrupted(self, reason: str = "(interrupted — no result received)") -> None:
+        """Force-finalize a pending card with an error state.
+
+        Idempotent: cards that already have a result are left alone, so this
+        is safe to call from a final-sweep at end of drain even if a result
+        arrived just before.
+        """
+        if self._result is None:
+            self.set_result(reason, error=True)
+
 
 # ── Error bubble ────────────────────────────────────────────────────────────
 
