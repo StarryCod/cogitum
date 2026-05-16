@@ -119,14 +119,32 @@ def classify_danger(tool_name: str, arguments: dict) -> str:
     return "low"
 
 
-def _auto_cogit_save(label: str) -> str | None:
-    """Auto-save a cogit checkpoint before dangerous operations. Returns None on success, error string on failure."""
+def _auto_cogit_save(label: str, scope_path: str | None = None) -> str | None:
+    """Auto-save a cogit checkpoint before dangerous operations.
+    
+    scope_path: if provided, checkpoint only that file/dir (much faster than whole project).
+                If file is outside project_dir, skip checkpoint entirely (not our concern).
+    Returns None on success, error string on failure.
+    """
     try:
         from cogitum.core.cogit import CogitStore
         session_id = os.environ.get("COGITUM_SESSION_ID", "default")
         project_dir = os.environ.get("COGITUM_PROJECT_DIR", os.getcwd())
+        # Determine scope
+        scope = None
+        if scope_path:
+            try:
+                from pathlib import Path as _P
+                p = _P(scope_path).expanduser().resolve()
+                pd = _P(project_dir).resolve()
+                # If file is outside project_dir, skip checkpoint entirely
+                rel = p.relative_to(pd)
+                scope = str(rel)
+            except (ValueError, OSError):
+                # File outside project — don't checkpoint random files
+                return None
         store = CogitStore(session_id=session_id, project_dir=project_dir)
-        cp = store.save(label=f"auto: {label}")
+        cp = store.save(label=f"auto: {label}", scope=scope)
         return None
     except Exception:
         return None  # don't block the operation on checkpoint failure
@@ -217,7 +235,7 @@ def write_file(path: str, content: str) -> str:
         return f"ERROR: {reason}"
     # Auto-save checkpoint if file already exists (overwrite = destructive)
     if p.exists():
-        _auto_cogit_save(f"before write_file {path}")
+        _auto_cogit_save(f"before write_file {path}", scope_path=str(p))
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
     return f"OK: wrote {len(content)} bytes to {path}"
@@ -255,7 +273,7 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
     if not p.exists():
         return f"ERROR: file not found: {path}"
     # Auto-save checkpoint before editing
-    _auto_cogit_save(f"before edit_file {path}")
+    _auto_cogit_save(f"before edit_file {path}", scope_path=str(p))
     content = p.read_text(errors="replace")
     count = content.count(old_string)
     if count == 0:
