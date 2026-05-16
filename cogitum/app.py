@@ -13,6 +13,7 @@ from .core.agent import Agent, AgentApprovalRequest, AgentConfig, AgentDone, Age
 from .core.builtin_tools import *  # noqa: F401,F403 — registers tools into REGISTRY
 from .widgets.approval import ApprovalWidget
 from .core.llm.loader import load_mesh, load_settings, write_settings
+from .core.llm.refresh import refresh_all_providers
 from .core.llm.mesh import Mesh, ResolvedModel
 from .core.sessions import get_store, SessionStore
 from .core.events import _id
@@ -94,12 +95,39 @@ class CogitumApp(App):
         feed = self.query_one("#feed-pane", Feed)
         _seed(feed)
         self._load_mesh_async()
+        # Kick off model auto-discovery in the background — doesn't block UI
+        asyncio.ensure_future(self._auto_refresh_models())
 
     async def on_unmount(self) -> None:
         """Clean up resources on exit."""
         mesh = getattr(self, "mesh", None)
         if mesh is not None:
             await mesh.aclose()
+
+    async def _auto_refresh_models(self) -> None:
+        """Run model discovery against all configured providers in background.
+
+        Reloads mesh + agent if anything new was added so the model picker
+        immediately reflects fresh data. Silent on failure (logs only).
+        """
+        try:
+            await asyncio.sleep(0.3)  # let UI settle first
+            results = await refresh_all_providers(timeout=6.0, only_empty=False)
+        except Exception as e:  # noqa: BLE001
+            return
+
+        added_total = sum(r["count"] for r in results.values()
+                          if r.get("status") == "ok")
+        if added_total > 0:
+            self._load_mesh_async()
+            try:
+                feed = self.query_one("#feed-pane", Feed)
+                feed.append_system(
+                    f"discovered {added_total} new model(s) across providers",
+                    "auto-refresh",
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     def _load_mesh_async(self) -> None:
         feed = self.query_one("#feed-pane", Feed)

@@ -38,6 +38,7 @@ from cogitum.core.agent import (
 from cogitum.core.builtin_tools import *  # noqa: F401,F403 — registers tools
 from cogitum.core.events import Message, TextPart
 from cogitum.core.llm.loader import load_mesh, load_settings
+from cogitum.core.llm.refresh import refresh_all_providers
 from cogitum.core.sessions import get_store
 from cogitum.core.tools import REGISTRY
 
@@ -232,6 +233,16 @@ class CogitumBot:
         """Initialize mesh and start polling."""
         log.info("Starting Cogitum Telegram gateway...")
 
+        # Auto-discover models for every configured provider before
+        # building the mesh, so /models picker has fresh data.
+        log.info("Refreshing models from all providers...")
+        try:
+            refresh = await refresh_all_providers(timeout=6.0, only_empty=False)
+            for pid, r in refresh.items():
+                log.info("  %-20s %s — %s", pid, r["status"], r["message"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("model refresh failed (non-fatal): %s", e)
+
         # Load mesh
         self.mesh = load_mesh()
         if not self.mesh.providers:
@@ -300,12 +311,23 @@ class CogitumBot:
     async def _reload_mesh(self, *, silent: bool = False, chat_id: int | None = None) -> None:
         """Re-read providers.toml and rebuild the mesh in place.
 
+        Also re-runs auto-discovery for all providers so newly-added
+        models appear without restart.
+
         Preserves the current model if still available; falls back to first
         resolved model otherwise. Updates self.agent.mesh and cfg.model so the
         next request uses the fresh mesh.
         """
         old_model = self.agent.cfg.model if self.agent else None
         old_mesh = self.mesh
+
+        # Auto-discover models for every provider first
+        try:
+            refresh = await refresh_all_providers(timeout=6.0, only_empty=False)
+            log.info("reload refresh: %s", {k: v["message"] for k, v in refresh.items()})
+        except Exception as e:  # noqa: BLE001
+            log.warning("reload refresh failed: %s", e)
+
         try:
             new_mesh = load_mesh()
         except Exception as e:  # noqa: BLE001
