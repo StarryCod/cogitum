@@ -25,6 +25,7 @@ import httpx
 
 from cogitum.core.agent import (
     Agent,
+    AgentApprovalRequest,
     AgentConfig,
     AgentDone,
     AgentError,
@@ -200,6 +201,8 @@ class ChatSession:
         self.history: list[Message] = []
         self.agent_task: asyncio.Task | None = None
         self._cancel_flag = False
+        self._last_platform: str = "telegram"
+        self._approval_queue: asyncio.Queue | None = None
 
     @property
     def is_busy(self) -> bool:
@@ -252,7 +255,7 @@ class CogitumBot:
         self.agent = Agent(
             mesh=self.mesh,
             registry=REGISTRY,
-            config=AgentConfig(model=current_model),
+            config=AgentConfig(model=current_model, platform="telegram"),
         )
 
         self._running = True
@@ -367,6 +370,13 @@ class CogitumBot:
                 reply_context = f"\n[Replying to: {reply_text}]"
 
         full_message = text + context_extra + reply_context
+
+        # Inject platform context if this is the first message or platform changed
+        if not session.history:
+            full_message = f"[User is writing from Telegram]\n{full_message}"
+        elif session._last_platform != "telegram":
+            full_message = f"[User switched to Telegram]\n{full_message}"
+        session._last_platform = "telegram"
 
         # Run agent
         await self._run_agent(session, full_message, msg.get("message_id"))
@@ -591,6 +601,22 @@ class CogitumBot:
                 chat_id, f"✅ Model: `{escape_md(model_id)}`"
             )
 
+        elif data.startswith("approve:") or data.startswith("reject:"):
+            # Tool approval response
+            action = "approve" if data.startswith("approve:") else "reject"
+            call_id = data.split(":", 1)[1]
+            session = self.sessions.get(chat_id)
+            if session and hasattr(session, '_approval_queue') and session._approval_queue:
+                await session._approval_queue.put((call_id, action))
+                icon = "✅" if action == "approve" else "❌"
+                await self.api.answer_callback(cb_id, f"{icon} {'Allowed' if action == 'approve' else 'Denied'}")
+                # Edit the approval message to show decision
+                msg_id = callback["message"]["message_id"]
+                decision_text = f"{'✅ Allowed' if action == 'approve' else '❌ Denied'}"
+                await self.api.edit_message(chat_id, msg_id, escape_md(decision_text))
+            else:
+                await self.api.answer_callback(cb_id, "⚠️ No pending approval")
+
         else:
             await self.api.answer_callback(cb_id)
 
@@ -613,6 +639,8 @@ class CogitumBot:
 
         chat_id = session.chat_id
         queue: asyncio.Queue = asyncio.Queue()
+        approval_q: asyncio.Queue = asyncio.Queue()
+        session._approval_queue = approval_q
 
         # Send typing indicator immediately
         await self.api.send_typing(chat_id)
@@ -650,6 +678,7 @@ class CogitumBot:
                 user_message=user_message,
                 history=session.history,
                 queue=queue,
+                approval_queue=approval_q,
             )
 
         task = asyncio.create_task(agent_task())
@@ -733,6 +762,24 @@ class CogitumBot:
                         if path_match and Path(path_match.group(1)).exists():
                             await self.api.send_photo(chat_id, path_match.group(1))
 
+                elif isinstance(event, AgentApprovalRequest):
+                    # Show approval buttons to user
+                    danger_icon = "🔴" if event.danger_level == "danger" else "🟡"
+                    from cogitum.gateway.tg_formatter import escape_md
+                    from cogitum.core.builtin_tools import _tool_subtitle_for_approval
+
+                    desc = _tool_subtitle_for_approval(event.tool_name, event.arguments)
+                    approval_text = (
+                        f"{danger_icon} *Approval required* \({escape_md(event.danger_level)}\)\n\n"
+                        f"`{escape_md(event.tool_name)}`\n"
+                        f"{escape_md(desc)}"
+                    )
+                    markup = {"inline_keyboard": [[
+                        {"text": "✅ Allow", "callback_data": f"approve:{event.call_id}"},
+                        {"text": "❌ Deny", "callback_data": f"reject:{event.call_id}"},
+                    ]]}
+                    await self.api.send_message(chat_id, approval_text, reply_markup=markup)
+
                 elif isinstance(event, AgentRetry):
                     pass  # silent retry
 
@@ -774,6 +821,7 @@ class CogitumBot:
             typing_task.cancel()
             _clear_tg_context()
             session.agent_task = None
+            session._approval_queue = None
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────

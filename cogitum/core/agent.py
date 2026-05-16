@@ -137,6 +137,17 @@ class AgentToolCall:
     call_id: str
     turn: int = 0
     preliminary: bool = False
+    danger_level: str = "low"  # "low", "medium", "danger"
+
+
+@dataclass
+class AgentApprovalRequest:
+    """Emitted when a tool call needs user approval (medium/danger level)."""
+    tool_name: str
+    arguments: dict[str, Any]
+    call_id: str
+    danger_level: str  # "medium" or "danger"
+    turn: int = 0
 
 
 @dataclass
@@ -160,7 +171,7 @@ class AgentError:
     exc: BaseException | None = None
 
 
-AgentEvent = AgentText | AgentThinking | AgentRetry | AgentToolCall | AgentToolResult | AgentDone | AgentError
+AgentEvent = AgentText | AgentThinking | AgentRetry | AgentToolCall | AgentApprovalRequest | AgentToolResult | AgentDone | AgentError
 
 # ---------------------------------------------------------------------------
 # Agent config
@@ -232,6 +243,13 @@ class AgentConfig:
         "confirm with the user before executing.\n\n"
 
         "═══ TOOLS ═══\n"
+        "TERMINAL — 3 modes:\n"
+        "• terminal(command='...') — normal mode, waits for completion, no timeout.\n"
+        "• terminal(command='...', mode='timeout', timeout=30) — kills if exceeds limit.\n"
+        "• terminal(command='...', mode='background') — starts in background, returns PID.\n"
+        "  Management: terminal(command='list/read/kill/write', mode='background', pid=N)\n"
+        "  Use background for servers, long builds, watchers. Read output with 'read'.\n\n"
+
         "DELEGATE — for complex multi-part tasks:\n"
         "• delegate_task spawns parallel sub-agents with full tool access.\n"
         "• Use workers mode for independent subtasks, experts mode for review.\n"
@@ -242,20 +260,23 @@ class AgentConfig:
         "• Save manually: cogit(action='save', label='before refactor')\n"
         "• Restore: cogit(action='restore', index=N)\n"
         "• List: cogit(action='list') — see all checkpoints with diffs\n"
-        "• Use cogit like git stash — save state before risky changes, restore if broken.\n"
-        "• Label checkpoints descriptively so the user can understand the timeline.\n\n"
+        "• Use cogit like git stash — save state before risky changes, restore if broken.\n\n"
+
+        "SESSION SEARCH — cross-session memory:\n"
+        "• session_search(action='list') — browse recent sessions.\n"
+        "• session_search(action='search', query='...') — find sessions by title.\n"
+        "• session_search(action='read', session_id='...') — read messages from a session.\n"
+        "• Use when user references past work or you need context from before.\n\n"
 
         "WEB — search and browse:\n"
         "• web_search(query='...') — DuckDuckGo, no API key needed.\n"
         "• browser(action='open', url='...') — Playwright headless Chromium.\n"
         "  Actions: open, click, type, text, screenshot, scroll, close.\n"
-        "• fetch_url(url='...') — quick fetch + HTML strip for simple pages.\n"
-        "• For research tasks: prefer browser over fetch_url for complex pages.\n\n"
+        "• fetch_url(url='...') — quick fetch + HTML strip for simple pages.\n\n"
 
         "MEDIA — send files to user (Telegram gateway only):\n"
         "• send_media(path='/path/to/file.png') — send photo or document.\n"
-        "• Auto-detects type from extension (.png/.jpg/.webp → photo, else → document).\n"
-        "• Use after generating images, screenshots, or files the user needs.\n\n"
+        "• Auto-detects type from extension (.png/.jpg/.webp → photo, else → document).\n\n"
 
         "═══ WORKFLOW ═══\n"
         "1. Understand the request. Ask clarifying questions only if truly ambiguous.\n"
@@ -274,6 +295,7 @@ class AgentConfig:
     )
     tools_enabled: bool = True
     tool_tags: list[str] | None = None   # None = all tools
+    platform: str = "cli"  # "cli" or "telegram" — injected into context
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +329,7 @@ class Agent:
         history: list[Message] | None = None,
         queue: asyncio.Queue[AgentEvent] | None = None,
         inject_queue: asyncio.Queue[str] | None = None,
+        approval_queue: asyncio.Queue[tuple[str, str]] | None = None,
     ) -> list[Message]:
         """
         Run the agentic loop.
@@ -324,6 +347,11 @@ class Agent:
             conversation between tool-call iterations (not after the whole
             loop finishes). This lets the TUI feed queued messages to the
             agent mid-turn.
+        approval_queue : asyncio.Queue[tuple[str, str]] | None
+            If provided, medium/danger tool calls emit AgentApprovalRequest
+            and wait for (call_id, decision) where decision is:
+            "approve", "reject", or "modify:<new_args_json>".
+            If None, all tools execute without approval.
 
         Returns
         -------
@@ -331,6 +359,7 @@ class Agent:
             Updated history including the new messages from this run.
         """
         q = queue or asyncio.Queue()
+        self._approval_queue = approval_queue
         messages: list[Message] = list(history or [])
 
         # Append user message
@@ -439,11 +468,17 @@ class Agent:
                             arguments=args,
                         )
                         assistant_tool_calls.append(tc_part)
+
+                        # Classify danger level
+                        from cogitum.core.builtin_tools import classify_danger
+                        _danger = classify_danger(tc_info["name"], args)
+
                         await q.put(AgentToolCall(
                             tool_name=tc_info["name"],
                             arguments=args,
                             call_id=cid,
                             turn=iteration,
+                            danger_level=_danger,
                         ))
 
                     elif chunk.kind == ChunkKind.USAGE:
@@ -493,7 +528,7 @@ class Agent:
 
                 # ── execute tools in parallel (cancellable) ────────────────
                 tool_tasks = [
-                    asyncio.create_task(self._execute_tool_indexed(i, tc, iteration))
+                    asyncio.create_task(self._execute_tool_indexed(i, tc, iteration, queue=q))
                     for i, tc in enumerate(assistant_tool_calls)
                 ]
                 # Expose tasks so TUI can cancel them on Esc
@@ -572,6 +607,7 @@ class Agent:
         """Delegate to mesh.stream() with current message history."""
         from cogitum.core.llm.mesh import StreamRequest
         from cogitum.core.memory import get_memory_context
+        from datetime import datetime
 
         # Inject persistent memory into system prompt
         system = self.cfg.system
@@ -584,6 +620,11 @@ class Agent:
         skills_ctx = skill_summary()
         if skills_ctx:
             system = f"{system}\n\n{skills_ctx}"
+
+        # Inject current datetime + platform context
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        platform_label = "Telegram" if self.cfg.platform == "telegram" else "CLI TUI"
+        system = f"{system}\n\n═══ CONTEXT ═══\nCurrent time: {now}\nPlatform: {platform_label}"
 
         req = StreamRequest(
             messages=messages,
@@ -762,25 +803,62 @@ class Agent:
         index: int,
         tc: ToolCallPart,
         turn: int,
+        queue: asyncio.Queue | None = None,
     ) -> tuple[int, str]:
         """Execute a tool and return (index, result) for as_completed matching."""
-        result = await self._execute_tool(tc, turn)
+        result = await self._execute_tool(tc, turn, queue=queue)
         return (index, result)
 
     async def _execute_tool(
         self,
         tc: ToolCallPart,
         turn: int,
+        queue: asyncio.Queue | None = None,
     ) -> str:
-        """Execute a single tool call and return its string result."""
+        """Execute a single tool call and return its string result.
+        
+        If approval_queue is set and tool is medium/danger, waits for approval.
+        """
+        from cogitum.core.builtin_tools import classify_danger
+
+        # Check danger level and request approval if needed
+        danger = classify_danger(tc.name, tc.arguments)
+        if danger in ("medium", "danger") and self._approval_queue is not None:
+            # Emit approval request
+            if queue:
+                await queue.put(AgentApprovalRequest(
+                    tool_name=tc.name,
+                    arguments=tc.arguments,
+                    call_id=tc.id,
+                    danger_level=danger,
+                    turn=turn,
+                ))
+            # Wait for approval decision
+            try:
+                call_id, decision = await asyncio.wait_for(
+                    self._approval_queue.get(), timeout=300.0  # 5 min to decide
+                )
+                if decision == "reject":
+                    return f"REJECTED: user denied execution of {tc.name}"
+                elif decision.startswith("modify:"):
+                    # User modified the arguments
+                    import json as _json
+                    try:
+                        tc.arguments = _json.loads(decision[7:])
+                    except _json.JSONDecodeError:
+                        pass  # keep original args
+                # "approve" or modified — proceed with execution
+            except asyncio.TimeoutError:
+                return f"REJECTED: approval timed out for {tc.name}"
+
         try:
             result = await asyncio.wait_for(
                 self.registry.execute(tc.name, tc.arguments),
-                timeout=120.0,  # 2 min max per tool
+                timeout=300.0,  # 5 min max per tool (background can be long)
             )
             return str(result)
         except asyncio.TimeoutError:
-            return f"ERROR: tool '{tc.name}' timed out after 120s"
+            return f"ERROR: tool '{tc.name}' timed out after 300s"
         except asyncio.CancelledError:
             return "ERROR: tool execution cancelled by user"
         except KeyError:

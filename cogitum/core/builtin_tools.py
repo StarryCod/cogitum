@@ -47,6 +47,78 @@ def _is_dangerous_command(cmd: str) -> bool:
                for d in _DANGEROUS_COMMANDS)
 
 
+def _tool_subtitle_for_approval(tool_name: str, args: dict) -> str:
+    """Generate a human-readable description for approval prompt."""
+    if tool_name == "terminal":
+        cmd = args.get("command", "")
+        mode = args.get("mode", "normal")
+        if mode == "background":
+            return f"[background] {cmd[:100]}"
+        return cmd[:120]
+    elif tool_name == "write_file":
+        path = args.get("path", "")
+        content = args.get("content", "")
+        return f"Write {len(content)} chars → {path}"
+    elif tool_name == "edit_file":
+        return f"Edit {args.get('path', '')}"
+    elif tool_name == "cogit":
+        return f"{args.get('action', '')} {args.get('label', '')}"
+    elif tool_name == "delegate_task":
+        return f"mode={args.get('mode', '')}"
+    return str(args)[:100]
+
+
+# Medium-risk patterns (not destructive but worth noting)
+_MEDIUM_COMMANDS = (
+    "pip install", "pip uninstall", "npm install", "npm uninstall",
+    "apt install", "apt remove", "pacman -S", "pacman -R",
+    "systemctl", "chmod", "chown", "curl -X POST", "curl -X PUT",
+    "curl -X DELETE", "git push", "git merge", "git rebase",
+    "docker rm", "docker stop", "kill ", "pkill ",
+)
+
+
+def classify_danger(tool_name: str, arguments: dict) -> str:
+    """Classify tool call danger level: 'low', 'medium', or 'danger'.
+
+    Returns the level as a string.
+    """
+    # Terminal commands need deeper analysis
+    if tool_name == "terminal":
+        cmd = arguments.get("command", "")
+        if _is_dangerous_command(cmd):
+            return "danger"
+        lower = cmd.lower().strip()
+        if any(lower.startswith(m) or f" {m}" in lower for m in _MEDIUM_COMMANDS):
+            return "medium"
+        # Background mode is medium (long-running)
+        if arguments.get("mode") == "background" and cmd not in ("list", "read", "kill", "write"):
+            return "medium"
+        return "low"
+
+    # Write operations
+    if tool_name == "write_file":
+        path = arguments.get("path", "")
+        # Overwriting config files is medium
+        if any(x in path for x in (".env", "config", ".toml", ".yaml", ".yml")):
+            return "medium"
+        return "low"
+
+    if tool_name == "edit_file":
+        return "low"
+
+    # Cogit restore is medium (changes files)
+    if tool_name == "cogit" and arguments.get("action") == "restore":
+        return "medium"
+
+    # Browser actions are low
+    if tool_name == "browser":
+        return "low"
+
+    # Everything else is low
+    return "low"
+
+
 def _auto_cogit_save(label: str) -> str | None:
     """Auto-save a cogit checkpoint before dangerous operations. Returns None on success, error string on failure."""
     try:
@@ -257,36 +329,125 @@ def list_dir(path: str = ".") -> str:
 # ---------------------------------------------------------------------------
 
 @tool(tags=["shell"])
-async def terminal(command: str, workdir: Optional[str] = None, timeout: int = 60) -> str:
-    """Run a shell command and return combined stdout+stderr.
+async def terminal(
+    command: str,
+    workdir: Optional[str] = None,
+    mode: str = "normal",
+    timeout: int = 120,
+    pid: int = 0,
+    stdin_data: str = "",
+    last_n: int = 50,
+) -> str:
+    """Run shell commands in 3 modes.
 
-    command: Shell command to execute.
+    command: Shell command to execute (or action for background: 'list', 'read', 'kill', 'write').
     workdir: Working directory (defaults to cwd).
-    timeout: Max seconds to wait (default 60).
+    mode: 'normal' (default), 'timeout', or 'background'.
+    timeout: Max seconds for 'timeout' mode (default 120). Normal mode has no timeout.
+    pid: PID for background process actions (read/kill/write).
+    stdin_data: Data to send to background process stdin (for 'write' action).
+    last_n: Number of output lines to read from background process (default 50).
+
+    Modes:
+      normal   — run command, wait for completion, return output. No timeout.
+      timeout  — run command with a time limit. Killed if exceeds timeout.
+      background — start command in background, return PID immediately.
+                   Then use command='list'/'read'/'kill'/'write' with pid= to manage.
     """
+    from cogitum.core.process_manager import ProcessManager
+
     # Auto-save checkpoint before dangerous commands
-    if _is_dangerous_command(command):
+    if _is_dangerous_command(command) and command not in ("list", "read", "kill", "write"):
         _auto_cogit_save(f"before terminal: {command[:50]}")
+
     cwd = workdir or os.getcwd()
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=cwd,
-        )
+    pm = ProcessManager.get()
+
+    # ── Background mode: management actions ──
+    if mode == "background":
+        if command == "list":
+            procs = pm.list_processes()
+            if not procs:
+                return "No background processes running."
+            lines = ["Background processes:"]
+            for bp in procs:
+                cmd_short = bp.command[:60] + ("…" if len(bp.command) > 60 else "")
+                lines.append(f"  PID {bp.pid} | {bp.status} | {bp.uptime:.0f}s | {cmd_short}")
+            return "\n".join(lines)
+
+        elif command == "read":
+            if not pid:
+                return "ERROR: pid required for 'read' action"
+            return pm.read_output(pid, last_n=last_n)
+
+        elif command == "kill":
+            if not pid:
+                return "ERROR: pid required for 'kill' action"
+            return await pm.kill(pid)
+
+        elif command == "write":
+            if not pid:
+                return "ERROR: pid required for 'write' action"
+            if not stdin_data:
+                return "ERROR: stdin_data required for 'write' action"
+            return await pm.write_stdin(pid, stdin_data)
+
+        else:
+            # Start a new background process
+            bp = await pm.spawn(command, workdir=cwd)
+            await asyncio.sleep(0.3)  # brief wait to catch immediate failures
+            if bp.finished:
+                output = "\n".join(bp.output_lines[-20:])
+                return f"Process exited immediately (exit {bp.exit_code}):\n{output}"
+            return f"OK: started background process PID {bp.pid}\nUse terminal(command='read', mode='background', pid={bp.pid}) to check output."
+
+    # ── Normal mode: no timeout ──
+    if mode == "normal":
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return f"ERROR: command timed out after {timeout}s"
-        output = stdout.decode(errors="replace").strip()
-        rc = proc.returncode
-        if rc != 0:
-            return f"[exit {rc}]\n{output}"
-        return output or "(no output)"
-    except Exception as e:
-        return f"ERROR: {e}"
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=cwd,
+            )
+            stdout, _ = await proc.communicate()
+            output = stdout.decode(errors="replace").strip()
+            # Cap output at 50KB
+            if len(output) > 50000:
+                output = output[:50000] + "\n… (truncated, 50KB limit)"
+            rc = proc.returncode
+            if rc != 0:
+                return f"[exit {rc}]\n{output}"
+            return output or "(no output)"
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    # ── Timeout mode: kill if exceeds limit ──
+    if mode == "timeout":
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=cwd,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return f"TIMEOUT: command killed after {timeout}s. Use mode='background' for long-running commands."
+            output = stdout.decode(errors="replace").strip()
+            if len(output) > 50000:
+                output = output[:50000] + "\n… (truncated, 50KB limit)"
+            rc = proc.returncode
+            if rc != 0:
+                return f"[exit {rc}]\n{output}"
+            return output or "(no output)"
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    return f"ERROR: unknown mode '{mode}' (use 'normal', 'timeout', or 'background')"
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +584,93 @@ def skills(action: str, name: str = "", content: str = "", category: str = "") -
         return delete_skill(name)
     else:
         return f"ERROR: unknown action '{action}' (use list/read/write/delete)"
+
+
+# ---------------------------------------------------------------------------
+# Session Search (cross-session awareness)
+# ---------------------------------------------------------------------------
+
+@tool(tags=["sessions"])
+def session_search(action: str, query: str = "", session_id: str = "", limit: int = 10, offset: int = 0) -> str:
+    """Search and browse past conversation sessions.
+
+    action: 'list', 'read', or 'search'.
+    query: Search query for 'search' action (matches session titles).
+    session_id: Session ID for 'read' action.
+    limit: Max results for list/search, or max messages for read (default 10).
+    offset: Skip first N results/messages (for pagination).
+
+    Use this to recall past conversations, find context from previous sessions,
+    or check what was discussed before.
+    """
+    from cogitum.core.sessions import get_store
+    from datetime import datetime
+
+    store = get_store()
+
+    if action == "list":
+        sessions = store.list_sessions(limit=limit)
+        if not sessions:
+            return "No past sessions found."
+        lines = [f"Past sessions ({len(sessions)}):"]
+        for s in sessions:
+            ts = datetime.fromtimestamp(s.updated_at).strftime("%Y-%m-%d %H:%M")
+            title = s.title or "(untitled)"
+            lines.append(f"  • [{ts}] {title} ({s.count} msgs) — id:{s.id[:12]}")
+        return "\n".join(lines)
+
+    elif action == "search":
+        if not query:
+            return "ERROR: query required for search"
+        results = store.search(query, limit=limit)
+        if not results:
+            return f"No sessions matching: {query}"
+        lines = [f"Sessions matching '{query}':"]
+        for s in results:
+            ts = datetime.fromtimestamp(s.updated_at).strftime("%Y-%m-%d %H:%M")
+            lines.append(f"  • [{ts}] {s.title} ({s.count} msgs) — id:{s.id[:12]}")
+        return "\n".join(lines)
+
+    elif action == "read":
+        if not session_id:
+            return "ERROR: session_id required for read"
+        # Support partial ID match
+        full_id = session_id
+        if len(session_id) < 20:
+            all_sessions = store.list_sessions(limit=200)
+            matches = [s for s in all_sessions if s.id.startswith(session_id)]
+            if not matches:
+                return f"ERROR: no session found with id starting with '{session_id}'"
+            if len(matches) > 1:
+                return f"ERROR: ambiguous id '{session_id}' — matches {len(matches)} sessions"
+            full_id = matches[0].id
+
+        messages = store.load_session(full_id)
+        if not messages:
+            return f"Session {session_id} is empty."
+
+        # Apply offset and limit
+        subset = messages[offset:offset + limit]
+        lines = [f"Session messages ({len(messages)} total, showing {offset+1}–{offset+len(subset)}):"]
+        for msg in subset:
+            role = msg.role.upper()
+            # Extract text content
+            text_parts = []
+            for p in msg.parts:
+                if hasattr(p, "text") and p.text:
+                    text_parts.append(p.text[:200])
+                elif hasattr(p, "name"):
+                    text_parts.append(f"[tool_call: {p.name}]")
+                elif hasattr(p, "content") and hasattr(p, "tool_call_id"):
+                    preview = p.content[:100] if p.content else ""
+                    text_parts.append(f"[result: {preview}]")
+            content = " ".join(text_parts)[:300]
+            ts = datetime.fromtimestamp(msg.timestamp).strftime("%H:%M") if msg.timestamp else ""
+            lines.append(f"  [{ts}] {role}: {content}")
+        return "\n".join(lines)
+
+    else:
+        return f"ERROR: unknown action '{action}' (use list/read/search)"
 
 
 # ---------------------------------------------------------------------------

@@ -1,38 +1,3 @@
 __pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
-.venv/
-venv/
-env/
-*.egg-info/
-dist/
-build/
-.eggs/
-*.egg
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Secrets / config (never commit)
-.env
-*.env
-~/.config/cogitum/
-
-# Test artifacts
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Screenshots / temp
-/tmp/
-*.svg
-*.png
-hermes-agent/
-angry_birds_clone.html
 *.pyc
-__pycache__/
+.venv/

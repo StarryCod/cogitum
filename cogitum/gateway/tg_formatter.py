@@ -32,10 +32,44 @@ def safe_md(text: str) -> str:
     return escape_md(text)
 
 
+def _convert_table(lines: list[str]) -> str:
+    """Convert a markdown table to a readable format for Telegram.
+    
+    Input: list of lines forming a table (|col1|col2|...)
+    Output: formatted text with aligned columns using monospace.
+    """
+    rows: list[list[str]] = []
+    for line in lines:
+        # Skip separator lines (|---|---|)
+        stripped = line.strip()
+        if stripped and not all(c in "|-: " for c in stripped):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            rows.append(cells)
+    
+    if not rows:
+        return ""
+    
+    # Format as labeled rows (header: value pairs)
+    headers = rows[0] if rows else []
+    if len(rows) <= 1:
+        # Just headers, no data
+        return " ┃ ".join(headers)
+    
+    result_lines = []
+    for row in rows[1:]:
+        parts = []
+        for i, cell in enumerate(row):
+            header = headers[i] if i < len(headers) else f"col{i}"
+            parts.append(f"*{escape_md(header)}:* {escape_md(cell)}")
+        result_lines.append(" │ ".join(parts))
+    
+    return "\n".join(result_lines)
+
+
 def markdown_to_tg(text: str) -> str:
     """Convert standard markdown to Telegram MarkdownV2.
 
-    Handles: bold, italic, code, code blocks, links.
+    Handles: bold, italic, code, code blocks, links, tables.
     Leaves the rest escaped.
     """
     if not text.strip():
@@ -46,8 +80,18 @@ def markdown_to_tg(text: str) -> str:
     in_code_block = False
     code_block_lang = ""
     code_block_lines: list[str] = []
+    table_lines: list[str] = []
 
     for line in lines:
+        # Table detection (lines starting with |)
+        if not in_code_block and line.strip().startswith("|") and "|" in line.strip()[1:]:
+            table_lines.append(line)
+            continue
+        elif table_lines:
+            # End of table — convert and flush
+            result.append(_convert_table(table_lines))
+            table_lines = []
+
         # Code block start/end
         if line.strip().startswith("```"):
             if not in_code_block:
@@ -71,6 +115,10 @@ def markdown_to_tg(text: str) -> str:
         # Process inline formatting
         processed = _process_inline(line)
         result.append(processed)
+
+    # Handle unclosed table
+    if table_lines:
+        result.append(_convert_table(table_lines))
 
     # Handle unclosed code block
     if in_code_block:
