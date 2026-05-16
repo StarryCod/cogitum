@@ -9,10 +9,12 @@ from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.widgets import Static
 
-from .core.agent import Agent, AgentConfig, AgentDone, AgentError, AgentText, AgentThinking, AgentToolCall, AgentToolResult
+from .core.agent import Agent, AgentConfig, AgentDone, AgentError, AgentRetry, AgentText, AgentThinking, AgentToolCall, AgentToolResult
 from .core.builtin_tools import *  # noqa: F401,F403 — registers tools into REGISTRY
 from .core.llm.loader import load_mesh, load_settings, write_settings
 from .core.llm.mesh import Mesh, ResolvedModel
+from .core.sessions import get_store, SessionStore
+from .core.events import _id
 from .core.tools import REGISTRY
 from .setup_flow import SetupScreen
 from .widgets.banner import Banner, BannerTags
@@ -21,6 +23,8 @@ from .widgets.cards import EditCard, WriteCard, RunCard, SearchCard, ReadCard, F
 from .widgets.feed import AgentBlock, Feed, ThinkingBlock, ToolCallCard, WaitingIndicator
 from .widgets.inspector import Inspector, InspectorState
 from .widgets.model_picker import ModelPicker
+from .widgets.queue_bar import QueueBar
+from .widgets.session_picker import SessionPicker
 from .widgets.statusbar import StatusBar
 
 
@@ -44,6 +48,7 @@ class CogitumApp(App):
     SUB_TITLE = "forge mark vii"
 
     BINDINGS = [
+        Binding("ctrl+c", "copy_selection", "copy", priority=True),
         Binding("ctrl+q", "quit", "quit"),
         Binding("ctrl+p", "open_models", "models", priority=True),
         Binding("ctrl+s", "open_setup", "setup", priority=True),
@@ -59,6 +64,10 @@ class CogitumApp(App):
         self._agent_task: asyncio.Task | None = None
         self._history: list = []   # list[Message] — persists across turns
         self._pending_messages: list[str] = []  # queued while agent is running
+        self._inject_queue: asyncio.Queue[str] = asyncio.Queue()  # fed to agent between iterations
+        # Session persistence
+        self._session_id: str | None = None
+        self._session_msg_count: int = 0  # messages already saved to disk
 
     # ------------------------------------------------------------------
     # compose
@@ -73,6 +82,7 @@ class CogitumApp(App):
             with VerticalScroll(id="inspector-pane"):
                 yield Inspector(id="inspector-widget")
         yield StatusBar(id="statusbar")
+        yield QueueBar(id="queue-bar")
         yield Composer(id="composer")
 
     # ------------------------------------------------------------------
@@ -84,8 +94,18 @@ class CogitumApp(App):
         _seed(feed)
         self._load_mesh_async()
 
+    async def on_unmount(self) -> None:
+        """Clean up resources on exit."""
+        mesh = getattr(self, "mesh", None)
+        if mesh is not None:
+            await mesh.aclose()
+
     def _load_mesh_async(self) -> None:
         feed = self.query_one("#feed-pane", Feed)
+        # Close old mesh if reloading (prevents httpx client leaks)
+        old_mesh = getattr(self, "mesh", None)
+        if old_mesh is not None:
+            asyncio.ensure_future(old_mesh.aclose())
         try:
             self.mesh = load_mesh()
             self.settings = load_settings()
@@ -148,13 +168,23 @@ class CogitumApp(App):
     # actions
     # ------------------------------------------------------------------
 
+    def action_copy_selection(self) -> None:
+        """Copy selected text to clipboard, or cancel agent if nothing selected."""
+        selected = self.screen.get_selected_text()
+        if selected:
+            self.copy_to_clipboard(selected)
+            self.screen.clear_selection()
+            self.notify("Copied!", timeout=1.5)
+        else:
+            # No selection — act as cancel (Ctrl+C default behavior)
+            self.action_cancel_agent()
+
     def action_cancel_agent(self) -> None:
         # Only handle Esc if agent is actually running — otherwise let it
         # propagate to modals (ModelPicker, SetupScreen) for their own dismiss
         if not self._agent_task or self._agent_task.done():
             return
         self._agent_task.cancel()
-        self._pending_messages.clear()
         # Cancel any running tool tasks via agent
         if self._agent and self._agent._active_tool_tasks:
             for t in self._agent._active_tool_tasks:
@@ -167,6 +197,17 @@ class CogitumApp(App):
             w.stop()
         # Show stopped message
         feed.append_system("⏹ stopped by user", "esc")
+        # Rebuild inject_queue from remaining pending (some may have been consumed)
+        self._rebuild_inject_queue()
+        # Process next queued message if any
+        if self._pending_messages:
+            next_msg = self._pending_messages.pop(0)
+            self.query_one("#queue-bar", QueueBar).pop_first()
+            self._rebuild_inject_queue()
+            feed.append_user(next_msg)
+            self._agent_task = asyncio.create_task(
+                self._run_agent(next_msg, feed)
+            )
 
     def action_open_models(self) -> None:
         if self.mesh is None or not self.mesh.providers:
@@ -230,7 +271,9 @@ class CogitumApp(App):
         # If agent is running, queue the message for next turn
         if self._agent_task and not self._agent_task.done():
             self._pending_messages.append(text)
-            feed.append_queued(text)
+            self.query_one("#queue-bar", QueueBar).add(text)
+            # Also push to inject_queue so agent picks it up between tool iterations
+            self._inject_queue.put_nowait(text)
             return
 
         # Normal flow continues below
@@ -268,10 +311,23 @@ class CogitumApp(App):
             return  # don't override if user is typing something
         # Pop last queued message back into composer
         text = self._pending_messages.pop()
-        feed = self.query_one("#feed-pane", Feed)
-        feed.pop_queued()
+        self.query_one("#queue-bar", QueueBar).pop_last()
+        # Rebuild inject_queue without the popped message
+        self._rebuild_inject_queue()
         area.load_text(text)
         event.stop()
+
+    def _rebuild_inject_queue(self) -> None:
+        """Rebuild inject_queue from current _pending_messages state."""
+        # Drain old queue
+        while not self._inject_queue.empty():
+            try:
+                self._inject_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # Re-add current pending messages
+        for msg in self._pending_messages:
+            self._inject_queue.put_nowait(msg)
 
     # ------------------------------------------------------------------
     # agent worker
@@ -292,14 +348,20 @@ class CogitumApp(App):
         # Track streamed text for approximate token counting
         self._streamed_text = ""
 
+        # Update inspector: new message sent, streaming starts
+        try:
+            inspector = self.query_one("#inspector-widget", Inspector)
+            inspector.update_state(
+                messages=len(self._history) + 1,
+                is_streaming=True,
+            )
+        except Exception:
+            pass
+
         async def drain_queue() -> None:
             nonlocal agent_block, thinking_block, waiting
             while True:
-                try:
-                    event = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    await asyncio.sleep(0.02)
-                    continue
+                event = await queue.get()
 
                 if isinstance(event, AgentText):
                     # Stop waiting animation on first content
@@ -310,6 +372,11 @@ class CogitumApp(App):
                         agent_block = feed.append_agent()
                     agent_block.append_delta(event.delta)
                     self._streamed_text += event.delta
+                    # Realtime inspector update
+                    try:
+                        self.query_one("#inspector-widget", Inspector).stream_delta(len(event.delta))
+                    except Exception:
+                        pass
 
                 elif isinstance(event, AgentThinking):
                     # Stop waiting animation on first thinking
@@ -319,6 +386,20 @@ class CogitumApp(App):
                     if thinking_block is None:
                         thinking_block = feed.append_thinking()
                     thinking_block.append_delta(event.delta)
+                    # Realtime inspector update (thinking counts too)
+                    try:
+                        self.query_one("#inspector-widget", Inspector).stream_delta(len(event.delta))
+                    except Exception:
+                        pass
+
+                elif isinstance(event, AgentRetry):
+                    # Show/restore friendly waiting indicator during retry
+                    # Pick a rotating label based on attempt number
+                    labels = WaitingIndicator._RETRY_LABELS
+                    label = labels[event.attempt % len(labels)]
+                    if waiting is None:
+                        waiting = feed.append_waiting()
+                    waiting.set_status(label)
 
                 elif isinstance(event, AgentToolCall):
                     # Stop waiting on first tool call
@@ -370,6 +451,10 @@ class CogitumApp(App):
                         card.set_result(event.result, error=event.error)
                     # New agent block for next response
                     agent_block = None
+                    # Show waiting indicator while agent processes results
+                    if waiting is None:
+                        waiting = feed.append_waiting()
+                        waiting.set_status("thinking…")
 
                 elif isinstance(event, AgentDone):
                     if thinking_block is not None:
@@ -383,19 +468,24 @@ class CogitumApp(App):
 
                     in_tokens = usage.input_tokens if usage else approx_in
                     out_tokens = usage.output_tokens if usage else approx_out
+                    cache_read = usage.cache_read_tokens if usage else 0
+                    cache_write = usage.cache_write_tokens if usage else 0
 
                     feed.append_system(
                         f"done · {event.turns} turn(s) · "
                         f"in≈{in_tokens} out≈{out_tokens}",
                         "usage",
                     )
-                    # Update inspector
+                    # Update inspector with final counts + end streaming
                     try:
                         inspector = self.query_one("#inspector-widget", Inspector)
+                        inspector.stream_end()
                         inspector.update_state(
                             tokens_in=inspector.state.tokens_in + in_tokens,
                             tokens_out=inspector.state.tokens_out + out_tokens,
                             tokens_used=inspector.state.tokens_used + in_tokens + out_tokens,
+                            cache_read=inspector.state.cache_read + cache_read,
+                            cache_write=inspector.state.cache_write + cache_write,
                             turns=inspector.state.turns + event.turns,
                             messages=len(self._history),
                         )
@@ -410,6 +500,7 @@ class CogitumApp(App):
                     feed.append_error(event.message, meta="agent")
                     try:
                         inspector = self.query_one("#inspector-widget", Inspector)
+                        inspector.stream_end()
                         inspector.update_state(last_error=event.message)
                     except Exception:
                         pass
@@ -420,6 +511,7 @@ class CogitumApp(App):
             user_message=user_message,
             history=self._history,
             queue=queue,
+            inject_queue=self._inject_queue,
         )
 
         try:
@@ -433,31 +525,66 @@ class CogitumApp(App):
             if agent_fut.done() and agent_fut.exception():
                 exc = agent_fut.exception()
                 await queue.put(AgentError(message=str(exc), exc=exc))
+            elif agent_fut.done() and not agent_fut.cancelled():
+                # Agent finished normally but drain might still be waiting —
+                # ensure it gets a terminal event if one wasn't sent
+                # (safety net: put a sentinel AgentDone if queue is empty after agent)
+                pass
 
             # Now wait for drain to process remaining events (including the error we just pushed)
             try:
-                await asyncio.wait_for(drain_fut, timeout=5.0)
+                await asyncio.wait_for(drain_fut, timeout=10.0)
             except asyncio.TimeoutError:
                 drain_fut.cancel()
+                # Clean up any lingering waiting indicators
+                for w in feed.query("WaitingIndicator"):
+                    w.stop()
+                # Mark any tool cards still in "running" state as timed out
+                for cid, card in tool_cards.items():
+                    if card._result is None:
+                        card.set_result("(timed out — no result received)", error=True)
                 # drain didn't finish — show error directly
-                if agent_fut.exception():
+                if agent_fut.done() and agent_fut.exception():
                     feed.append_error(str(agent_fut.exception()), meta="agent")
 
             # Update history with new messages (only on success)
             if agent_fut.done() and not agent_fut.cancelled() and not agent_fut.exception():
                 self._history = agent_fut.result()
+                # Persist new messages to disk
+                self._save_session_delta()
 
         except asyncio.CancelledError:
             agent_fut.cancel()
             drain_fut.cancel()
-            return  # user cancelled — don't process queue
+            # DON'T clear pending_messages — user cancelled current turn,
+            # but queued messages should still be processed on next submit.
+            return
         except Exception as exc:  # noqa: BLE001
             feed.append_error(str(exc), meta="agent")
 
-        # ALWAYS process queued messages after current turn finishes (success or error)
+        # Sync: remove from _pending_messages any items that were already
+        # injected by the agent mid-turn (they were consumed from inject_queue).
+        # Whatever remains in _pending_messages but NOT in inject_queue was consumed.
+        remaining_in_inject = []
+        while not self._inject_queue.empty():
+            try:
+                remaining_in_inject.append(self._inject_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        # Only messages still in inject_queue were NOT consumed by agent
+        # (e.g. agent finished without tool calls after they were queued).
+        # Those are the ones we need to process as separate turns.
+        self._pending_messages = remaining_in_inject
+        # Update QueueBar to reflect actual remaining
+        queue_bar = self.query_one("#queue-bar", QueueBar)
+        queue_bar.clear()
+        for msg in self._pending_messages:
+            queue_bar.add(msg)
+
+        # Process remaining queued messages as next turn
         if self._pending_messages:
             next_msg = self._pending_messages.pop(0)
-            feed.pop_queued()
+            queue_bar.pop_first()
             feed.append_user(next_msg)
             self._agent_task = asyncio.create_task(
                 self._run_agent(next_msg, feed)
@@ -563,9 +690,25 @@ class CogitumApp(App):
             return
 
         if cmd == "new":
+            self._start_new_session()
             self._history = []
             feed.clear()
             feed.append_system("new session — history cleared", "new")
+            return
+
+        if cmd == "title":
+            if not rest:
+                feed.append_system("usage: /title <name>", "help")
+                return
+            if self._session_id:
+                get_store().set_title(self._session_id, rest)
+                feed.append_system(f"session title: {rest}", "title")
+            else:
+                feed.append_system("no active session yet — send a message first", "warn")
+            return
+
+        if cmd == "resume":
+            self._show_resume_modal()
             return
 
         if cmd == "tools":
@@ -586,11 +729,109 @@ class CogitumApp(App):
             feed.clear()
             return
 
+        if cmd == "godmode":
+            from .core.godmode import get_preset, list_presets, DEFAULT_PRESET
+            if not rest or rest == "on":
+                preset_name = DEFAULT_PRESET
+                preset = get_preset(preset_name)
+                self._agent.cfg.system = preset
+                feed.append_system(f"godmode: {preset_name} — enabled", "godmode")
+            elif rest == "off":
+                from .core.agent import AgentConfig
+                self._agent.cfg.system = AgentConfig.system
+                feed.append_system("godmode: disabled — normal mode", "godmode")
+            elif rest == "list":
+                names = ", ".join(list_presets())
+                feed.append_system(f"godmode presets: {names}", "godmode")
+            else:
+                preset = get_preset(rest)
+                if preset:
+                    self._agent.cfg.system = preset
+                    feed.append_system(f"godmode: {rest} — enabled", "godmode")
+                else:
+                    feed.append_error(f"unknown preset: {rest} (try /godmode list)")
+            return
+
         if cmd in ("quit", "exit", "q"):
             self.exit()
             return
 
         feed.append_error(f"unknown command: /{cmd}  (try /help)")
+
+    # ------------------------------------------------------------------
+    # Session persistence
+    # ------------------------------------------------------------------
+
+    def _ensure_session(self) -> str:
+        """Ensure a session exists, create one if needed. Returns session_id."""
+        if self._session_id:
+            return self._session_id
+        store = get_store()
+        meta = store.create_session(session_id=_id(), model=self.current_model or "")
+        self._session_id = meta.id
+        self._session_msg_count = 0
+        return self._session_id
+
+    def _save_session_delta(self) -> None:
+        """Save only NEW messages (since last save) to disk."""
+        if not self._history:
+            return
+        session_id = self._ensure_session()
+        store = get_store()
+        new_messages = self._history[self._session_msg_count:]
+        if new_messages:
+            store.append_messages(session_id, new_messages)
+            self._session_msg_count = len(self._history)
+            # Auto-title from first user message
+            if self._session_msg_count <= 3:
+                self._auto_title(session_id)
+            # Update model in meta
+            if self.current_model:
+                store.set_model(session_id, self.current_model)
+
+    def _auto_title(self, session_id: str) -> None:
+        """Set session title from first user message (truncated to 50 chars)."""
+        for msg in self._history:
+            if msg.role == "user" and msg.text:
+                title = msg.text.strip().replace("\n", " ")
+                if len(title) > 50:
+                    title = title[:47] + "..."
+                get_store().set_title(session_id, title)
+                return
+
+    def _start_new_session(self) -> None:
+        """Reset session state for /new command."""
+        self._session_id = None
+        self._session_msg_count = 0
+
+    def _resume_session(self, session_id: str) -> None:
+        """Load a session from disk."""
+        store = get_store()
+        messages = store.load_session(session_id)
+        meta = store.get_meta(session_id)
+        self._history = messages
+        self._session_id = session_id
+        self._session_msg_count = len(messages)
+        # Rebuild feed with loaded messages
+        feed = self.query_one("#feed-pane", Feed)
+        feed.clear()
+        for msg in messages:
+            if msg.role == "user":
+                feed.append_user(msg.text)
+            elif msg.role == "assistant":
+                if msg.text:
+                    feed.append_agent(msg.text, meta="restored")
+            elif msg.role == "tool":
+                pass  # skip tool results in restored view
+        title = meta.title if meta else session_id
+        feed.append_system(f"resumed: {title} ({len(messages)} messages)", "resume")
+
+    def _show_resume_modal(self) -> None:
+        """Open the session picker modal."""
+        def on_dismiss(session_id: str | None) -> None:
+            if session_id:
+                self._resume_session(session_id)
+        self.push_screen(SessionPicker(), callback=on_dismiss)
 
 
 def main() -> None:

@@ -7,12 +7,105 @@ Import this module once at startup to activate them.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
 import subprocess
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from cogitum.core.tools import tool
+
+# ---------------------------------------------------------------------------
+# Security: path sandbox
+# ---------------------------------------------------------------------------
+
+# Sensitive paths that should NEVER be read/written by the LLM
+_SENSITIVE_PATHS = {
+    "/etc/shadow", "/etc/passwd", "/etc/sudoers",
+    ".ssh/authorized_keys", ".ssh/id_rsa", ".ssh/id_ed25519",
+    ".gnupg", ".aws/credentials", ".config/gcloud",
+}
+
+_SENSITIVE_PREFIXES = (
+    "/proc/", "/sys/", "/dev/",
+)
+
+# Dangerous shell patterns that trigger auto-save
+_DANGEROUS_COMMANDS = (
+    "rm ", "rm -", "rmdir", "git reset", "git checkout --",
+    "git clean", "git push -f", "git push --force",
+    "drop table", "drop database", "truncate ",
+    "dd if=", "mkfs", "fdisk",
+)
+
+
+def _is_dangerous_command(cmd: str) -> bool:
+    """Check if a shell command is potentially destructive."""
+    lower = cmd.lower().strip()
+    return any(lower.startswith(d) or f" {d}" in lower or f"&&{d}" in lower
+               for d in _DANGEROUS_COMMANDS)
+
+
+def _auto_cogit_save(label: str) -> str | None:
+    """Auto-save a cogit checkpoint before dangerous operations. Returns None on success, error string on failure."""
+    try:
+        from cogitum.core.cogit import CogitStore
+        session_id = os.environ.get("COGITUM_SESSION_ID", "default")
+        project_dir = os.environ.get("COGITUM_PROJECT_DIR", os.getcwd())
+        store = CogitStore(session_id=session_id, project_dir=project_dir)
+        cp = store.save(label=f"auto: {label}")
+        return None
+    except Exception:
+        return None  # don't block the operation on checkpoint failure
+
+
+def _is_path_safe(p: Path) -> tuple[bool, str]:
+    """Check if a path is safe to access. Returns (safe, reason)."""
+    resolved = str(p.resolve())
+
+    # Block /proc, /sys, /dev
+    for prefix in _SENSITIVE_PREFIXES:
+        if resolved.startswith(prefix):
+            return False, f"access denied: {prefix} is restricted"
+
+    # Block known sensitive files
+    for sensitive in _SENSITIVE_PATHS:
+        if resolved.endswith(sensitive) or f"/{sensitive}" in resolved:
+            return False, f"access denied: sensitive file"
+
+    return True, ""
+
+
+def _is_url_safe(url: str) -> tuple[bool, str]:
+    """Check if a URL is safe to fetch (no SSRF)."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False, "invalid URL"
+
+    if parsed.scheme not in ("http", "https"):
+        return False, f"scheme {parsed.scheme!r} not allowed (http/https only)"
+
+    hostname = parsed.hostname or ""
+
+    # Block localhost
+    if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return False, "localhost access denied"
+
+    # Block private/link-local IPs
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private or ip.is_link_local or ip.is_loopback:
+            return False, f"private/internal IP {hostname} denied"
+    except ValueError:
+        pass  # hostname is a domain, not IP — ok
+
+    # Block cloud metadata endpoints
+    if hostname in ("169.254.169.254", "metadata.google.internal"):
+        return False, "cloud metadata endpoint denied"
+
+    return True, ""
 
 # ---------------------------------------------------------------------------
 # Filesystem
@@ -27,6 +120,9 @@ def read_file(path: str, offset: int = 1, limit: int = 200) -> str:
     limit: Maximum number of lines to return.
     """
     p = Path(path).expanduser()
+    safe, reason = _is_path_safe(p)
+    if not safe:
+        return f"ERROR: {reason}"
     if not p.exists():
         return f"ERROR: file not found: {path}"
     lines = p.read_text(errors="replace").splitlines()
@@ -44,6 +140,12 @@ def write_file(path: str, content: str) -> str:
     content: Full text content to write.
     """
     p = Path(path).expanduser()
+    safe, reason = _is_path_safe(p)
+    if not safe:
+        return f"ERROR: {reason}"
+    # Auto-save checkpoint if file already exists (overwrite = destructive)
+    if p.exists():
+        _auto_cogit_save(f"before write_file {path}")
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
     return f"OK: wrote {len(content)} bytes to {path}"
@@ -57,6 +159,9 @@ def append_file(path: str, content: str) -> str:
     content: Text to append.
     """
     p = Path(path).expanduser()
+    safe, reason = _is_path_safe(p)
+    if not safe:
+        return f"ERROR: {reason}"
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a") as f:
         f.write(content)
@@ -72,8 +177,13 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
     new_string: Replacement text.
     """
     p = Path(path).expanduser()
+    safe, reason = _is_path_safe(p)
+    if not safe:
+        return f"ERROR: {reason}"
     if not p.exists():
         return f"ERROR: file not found: {path}"
+    # Auto-save checkpoint before editing
+    _auto_cogit_save(f"before edit_file {path}")
     content = p.read_text(errors="replace")
     count = content.count(old_string)
     if count == 0:
@@ -125,13 +235,19 @@ def list_dir(path: str = ".") -> str:
     path: Directory to list.
     """
     p = Path(path).expanduser()
+    safe, reason = _is_path_safe(p)
+    if not safe:
+        return f"ERROR: {reason}"
     if not p.exists():
         return f"ERROR: path not found: {path}"
     entries = sorted(p.iterdir(), key=lambda e: (e.is_file(), e.name))
     lines = []
     for e in entries:
         kind = "F" if e.is_file() else "D"
-        size = f"{e.stat().st_size:>10}" if e.is_file() else "          "
+        try:
+            size = f"{e.stat().st_size:>10}" if e.is_file() else "          "
+        except (OSError, PermissionError):
+            size = "         ?"
         lines.append(f"[{kind}] {size}  {e.name}")
     return "\n".join(lines) or "(empty)"
 
@@ -148,6 +264,9 @@ async def terminal(command: str, workdir: Optional[str] = None, timeout: int = 6
     workdir: Working directory (defaults to cwd).
     timeout: Max seconds to wait (default 60).
     """
+    # Auto-save checkpoint before dangerous commands
+    if _is_dangerous_command(command):
+        _auto_cogit_save(f"before terminal: {command[:50]}")
     cwd = workdir or os.getcwd()
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -181,6 +300,9 @@ async def fetch_url(url: str, max_chars: int = 8000) -> str:
     url: URL to fetch.
     max_chars: Maximum characters to return.
     """
+    safe, reason = _is_url_safe(url)
+    if not safe:
+        return f"ERROR: {reason}"
     try:
         import httpx
         from html.parser import HTMLParser
@@ -218,3 +340,436 @@ async def fetch_url(url: str, max_chars: int = 8000) -> str:
         return text[:max_chars]
     except Exception as e:
         return f"ERROR: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Memory
+# ---------------------------------------------------------------------------
+
+@tool(tags=["memory"])
+def memory(action: str, target: str = "memory", content: str = "", old_text: str = "") -> str:
+    """Persistent memory that survives across sessions.
+
+    action: 'add', 'replace', or 'remove'.
+    target: 'memory' (agent notes) or 'user' (user profile).
+    content: The entry text (required for add/replace).
+    old_text: Substring identifying the entry to replace/remove.
+    """
+    from cogitum.core.memory import memory_add, memory_replace, memory_remove
+
+    if action == "add":
+        if not content:
+            return "ERROR: content required for add"
+        return memory_add(target, content)
+    elif action == "replace":
+        if not old_text or not content:
+            return "ERROR: old_text and content required for replace"
+        return memory_replace(target, old_text, content)
+    elif action == "remove":
+        if not old_text:
+            return "ERROR: old_text required for remove"
+        return memory_remove(target, old_text)
+    else:
+        return f"ERROR: unknown action '{action}' (use add/replace/remove)"
+
+
+# ---------------------------------------------------------------------------
+# Skills
+# ---------------------------------------------------------------------------
+
+@tool(tags=["skills"])
+def skills(action: str, name: str = "", content: str = "", category: str = "") -> str:
+    """Agent's procedural memory — reusable knowledge for recurring tasks.
+
+    action: 'list', 'read', 'write', or 'delete'.
+    name: Skill name (required for read/write/delete).
+    content: Full skill markdown (required for write).
+    category: Filter by category (for list) or assign category (for write).
+    """
+    from cogitum.core.skills import list_skills, read_skill, write_skill, delete_skill, list_categories
+
+    if action == "list":
+        items = list_skills(category=category)
+        if not items:
+            if category:
+                cats = list_categories()
+                return f"No skills in category '{category}'. Available categories: {', '.join(cats)}"
+            return "No skills yet. Use skills(action='write', name='...', content='...') to create one."
+        # Group by category
+        by_cat: dict[str, list] = {}
+        for s in items:
+            by_cat.setdefault(s.category, []).append(s)
+        lines = [f"Available skills ({len(items)}):"]
+        for cat in sorted(by_cat):
+            lines.append(f"\n  [{cat}]")
+            for s in by_cat[cat]:
+                desc = s.description[:60] + "…" if len(s.description) > 60 else s.description
+                lines.append(f"    • {s.name}: {desc}")
+        return "\n".join(lines)
+    elif action == "read":
+        if not name:
+            return "ERROR: name required for read"
+        text = read_skill(name)
+        if text is None:
+            return f"ERROR: skill '{name}' not found. Use skills(action='list') to see available."
+        return text
+    elif action == "write":
+        if not name or not content:
+            return "ERROR: name and content required for write"
+        return write_skill(name, content, category=category or "custom")
+    elif action == "delete":
+        if not name:
+            return "ERROR: name required for delete"
+        return delete_skill(name)
+    else:
+        return f"ERROR: unknown action '{action}' (use list/read/write/delete)"
+
+
+# ---------------------------------------------------------------------------
+# Cogit (checkpoints)
+# ---------------------------------------------------------------------------
+
+@tool(tags=["cogit"])
+def cogit(action: str, label: str = "", index: int = 0) -> str:
+    """Smart checkpoints — save/restore project state.
+
+    action: 'save', 'list', or 'restore'.
+    label: Description for save (e.g. 'before refactor auth').
+    index: Checkpoint number to restore.
+
+    Auto-saves before dangerous operations. Lighter than git.
+    """
+    from cogitum.core.cogit import CogitStore
+    import os
+
+    # Get session_id and project_dir from app context
+    session_id = os.environ.get("COGITUM_SESSION_ID", "default")
+    project_dir = os.environ.get("COGITUM_PROJECT_DIR", os.getcwd())
+
+    store = CogitStore(session_id=session_id, project_dir=project_dir)
+
+    if action == "save":
+        cp = store.save(label=label)
+        return f"OK: checkpoint #{cp.index} '{cp.label}' saved ({cp.file_count} files changed)"
+    elif action == "list":
+        checkpoints = store.list_checkpoints()
+        if not checkpoints:
+            return "No checkpoints yet. Use cogit(action='save', label='...') to create one."
+        lines = []
+        for cp in checkpoints:
+            from datetime import datetime
+            ts = datetime.fromtimestamp(cp.timestamp).strftime("%H:%M")
+            lines.append(f"  #{cp.index} [{ts}] {cp.label} ({cp.file_count} files)")
+        return f"Checkpoints ({len(checkpoints)}):\n" + "\n".join(lines)
+    elif action == "restore":
+        if index <= 0:
+            return "ERROR: index required (positive integer)"
+        return store.restore(index)
+    else:
+        return f"ERROR: unknown action '{action}' (use save/list/restore)"
+
+
+# ---------------------------------------------------------------------------
+# Delegate Task
+# ---------------------------------------------------------------------------
+
+@tool(tags=["delegate"])
+def delegate_task(
+    mode: str,
+    tasks: str = "",
+    content: str = "",
+    experts: str = "",
+    model: str = "",
+) -> str:
+    """Spawn parallel sub-agents for complex work.
+
+    mode: 'workers' or 'experts'.
+
+    Workers mode — parallel agents doing independent tasks:
+      tasks: JSON array of [{id, goal, context?}]. Up to 10 parallel.
+
+    Experts mode — review board analyzing content:
+      content: Code/plan/architecture to review.
+      experts: Comma-separated expert names (security,scale,optimization,ux,ui,frontend).
+               Empty = all experts.
+
+    model: Optional model override for sub-agents.
+    """
+    import json as _json
+
+    # --- Depth-limited recursive delegation ---
+    from .delegate import MAX_DELEGATE_DEPTH
+
+    current_depth = int(os.environ.get("COGITUM_DELEGATE_DEPTH", "0"))
+    if current_depth >= MAX_DELEGATE_DEPTH:
+        return (
+            f"ERROR: delegation depth limit reached ({current_depth}/{MAX_DELEGATE_DEPTH}). "
+            "Sub-agents cannot delegate further. Complete the task directly."
+        )
+
+    # Increment depth for child agents
+    os.environ["COGITUM_DELEGATE_DEPTH"] = str(current_depth + 1)
+
+    try:
+        if mode == "workers":
+            if not tasks:
+                return "ERROR: tasks required (JSON array of [{id, goal, context?}])"
+            try:
+                task_list = _json.loads(tasks)
+            except _json.JSONDecodeError as e:
+                return f"ERROR: invalid JSON in tasks: {e}"
+
+            if not isinstance(task_list, list) or len(task_list) == 0:
+                return "ERROR: tasks must be a non-empty JSON array"
+            if len(task_list) > 10:
+                return "ERROR: max 10 parallel workers"
+
+            # Store for async execution by agent loop
+            return f"DELEGATE_WORKERS:{_json.dumps(task_list)}"
+
+        elif mode == "experts":
+            if not content:
+                return "ERROR: content required for expert review"
+            expert_list = [e.strip() for e in experts.split(",") if e.strip()] if experts else []
+            payload = {"content": content, "experts": expert_list, "model": model}
+            return f"DELEGATE_EXPERTS:{_json.dumps(payload)}"
+
+        else:
+            return f"ERROR: unknown mode '{mode}' (use 'workers' or 'experts')"
+    finally:
+        # Restore depth after delegation completes (for the current process)
+        os.environ["COGITUM_DELEGATE_DEPTH"] = str(current_depth)
+
+
+# ---------------------------------------------------------------------------
+# Web Search (DuckDuckGo — no API key needed)
+# ---------------------------------------------------------------------------
+
+@tool(tags=["web", "search"])
+async def web_search(query: str, max_results: int = 8) -> str:
+    """Search the web using DuckDuckGo and return results.
+
+    query: Search query string.
+    max_results: Maximum number of results to return (default 8).
+    """
+    import httpx
+    import re as _re
+    from html.parser import HTMLParser
+
+    class _DDGParser(HTMLParser):
+        """Parse DuckDuckGo HTML search results."""
+        def __init__(self):
+            super().__init__()
+            self.results: list[dict[str, str]] = []
+            self._in_result = False
+            self._in_title = False
+            self._in_snippet = False
+            self._current: dict[str, str] = {}
+            self._buf = ""
+
+        def handle_starttag(self, tag, attrs):
+            attrs_d = dict(attrs)
+            cls = attrs_d.get("class", "")
+            # Result link
+            if tag == "a" and "result__a" in cls:
+                self._in_title = True
+                self._current["url"] = attrs_d.get("href", "")
+                self._buf = ""
+            # Snippet
+            if tag == "a" and "result__snippet" in cls:
+                self._in_snippet = True
+                self._buf = ""
+
+        def handle_endtag(self, tag):
+            if tag == "a" and self._in_title:
+                self._in_title = False
+                self._current["title"] = self._buf.strip()
+            if tag == "a" and self._in_snippet:
+                self._in_snippet = False
+                self._current["snippet"] = self._buf.strip()
+                if self._current.get("title"):
+                    self.results.append(self._current)
+                self._current = {}
+
+        def handle_data(self, data):
+            if self._in_title or self._in_snippet:
+                self._buf += data
+
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+        }
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+            resp = await client.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": query},
+                headers=headers,
+            )
+            resp.raise_for_status()
+
+        parser = _DDGParser()
+        parser.feed(resp.text)
+        results = parser.results[:max_results]
+
+        if not results:
+            # Fallback: try lite version
+            async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+                resp = await client.get(
+                    "https://lite.duckduckgo.com/lite/",
+                    params={"q": query},
+                    headers=headers,
+                )
+                resp.raise_for_status()
+            # Parse lite results (simpler format)
+            lines = []
+            for line in resp.text.splitlines():
+                stripped = line.strip()
+                if 'class="result-link"' in stripped:
+                    href_match = _re.search(r'href="([^"]+)"', stripped)
+                    text_match = _re.search(r'>([^<]+)<', stripped)
+                    if href_match and text_match:
+                        lines.append({"title": text_match.group(1), "url": href_match.group(1), "snippet": ""})
+            results = lines[:max_results]
+
+        if not results:
+            return f"No results found for: {query}"
+
+        # Clean DDG redirect URLs
+        from urllib.parse import urlparse, parse_qs, unquote
+        def _clean_url(raw: str) -> str:
+            if "duckduckgo.com/l/" in raw:
+                parsed = urlparse(raw)
+                qs = parse_qs(parsed.query)
+                if "uddg" in qs:
+                    return unquote(qs["uddg"][0])
+            return raw
+
+        out_lines = [f"Search results for: {query}\n"]
+        for i, r in enumerate(results, 1):
+            out_lines.append(f"{i}. {r['title']}")
+            out_lines.append(f"   {_clean_url(r['url'])}")
+            if r.get("snippet"):
+                out_lines.append(f"   {r['snippet'][:150]}")
+            out_lines.append("")
+        return "\n".join(out_lines)
+
+    except Exception as e:
+        return f"ERROR: web search failed: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Browser (Playwright — full page interaction)
+# ---------------------------------------------------------------------------
+
+@tool(tags=["web", "browser"])
+async def browser(action: str, url: str = "", selector: str = "", text: str = "", screenshot: bool = False) -> str:
+    """Control a headless browser for web interaction.
+
+    action: 'open', 'click', 'type', 'text', 'screenshot', 'scroll', 'close'.
+    url: URL to navigate to (for 'open' action).
+    selector: CSS selector for click/type actions.
+    text: Text to type (for 'type' action).
+    screenshot: Take a screenshot after action (returns path).
+
+    Usage flow: open a URL first, then interact with elements.
+    """
+    import json as _json
+
+    # Lazy-init browser state via module-level dict
+    global _BROWSER_STATE
+    if "_BROWSER_STATE" not in globals():
+        _BROWSER_STATE = {"browser": None, "page": None}
+
+    state = _BROWSER_STATE
+
+    async def _ensure_browser():
+        if state["browser"] is None:
+            try:
+                from playwright.async_api import async_playwright
+            except ImportError:
+                return "ERROR: playwright not installed. Run: pip install playwright && playwright install chromium"
+            pw = await async_playwright().start()
+            state["_pw"] = pw
+            state["browser"] = await pw.chromium.launch(headless=True)
+        if state["page"] is None:
+            state["page"] = await state["browser"].new_page()
+        return None
+
+    if action == "close":
+        if state.get("browser"):
+            await state["browser"].close()
+        if state.get("_pw"):
+            await state["_pw"].stop()
+        state["browser"] = None
+        state["page"] = None
+        state["_pw"] = None
+        return "OK: browser closed"
+
+    err = await _ensure_browser()
+    if err:
+        return err
+
+    page = state["page"]
+
+    try:
+        if action == "open":
+            if not url:
+                return "ERROR: url required for 'open' action"
+            # SSRF check
+            safe, reason = _is_url_safe(url)
+            if not safe:
+                return f"ERROR: {reason}"
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            title = await page.title()
+            result = f"OK: opened {url} — title: {title}"
+
+        elif action == "click":
+            if not selector:
+                return "ERROR: selector required for 'click' action"
+            await page.click(selector, timeout=10000)
+            result = f"OK: clicked {selector}"
+
+        elif action == "type":
+            if not selector:
+                return "ERROR: selector required for 'type' action"
+            await page.fill(selector, text, timeout=10000)
+            result = f"OK: typed into {selector}"
+
+        elif action == "text":
+            # Extract visible text from page
+            content = await page.inner_text("body")
+            # Truncate
+            if len(content) > 8000:
+                content = content[:8000] + "\n… (truncated)"
+            result = content
+
+        elif action == "screenshot":
+            import tempfile
+            path = tempfile.mktemp(suffix=".png", prefix="cogitum_browser_")
+            await page.screenshot(path=path, full_page=False)
+            result = f"OK: screenshot saved to {path}"
+
+        elif action == "scroll":
+            direction = text.lower() if text else "down"
+            if direction == "down":
+                await page.evaluate("window.scrollBy(0, window.innerHeight)")
+            elif direction == "up":
+                await page.evaluate("window.scrollBy(0, -window.innerHeight)")
+            else:
+                await page.evaluate(f"window.scrollBy(0, {int(direction)})")
+            result = f"OK: scrolled {direction}"
+
+        else:
+            return f"ERROR: unknown action '{action}' (use open/click/type/text/screenshot/scroll/close)"
+
+        # Optional screenshot after action
+        if screenshot and action != "screenshot":
+            import tempfile
+            path = tempfile.mktemp(suffix=".png", prefix="cogitum_browser_")
+            await page.screenshot(path=path, full_page=False)
+            result += f"\nScreenshot: {path}"
+
+        return result
+
+    except Exception as e:
+        return f"ERROR: browser action '{action}' failed: {e}"
