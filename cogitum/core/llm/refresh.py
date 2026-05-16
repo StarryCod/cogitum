@@ -165,6 +165,15 @@ async def _fetch_one(
     except Exception as e:
         return pid, "error", [], f"discovery error: {e}"
 
+    # M9: discover_models returns sentinel dicts on auth/rate failures so we
+    # can surface the real cause to the UI instead of "no models".
+    if models and isinstance(models[0], dict) and models[0].get("_auth_error"):
+        sc = models[0].get("status_code", "?")
+        return pid, "auth_error", [], f"auth failed (HTTP {sc}) — key may be expired/revoked"
+    if models and isinstance(models[0], dict) and models[0].get("_rate_limited"):
+        sc = models[0].get("status_code", "?")
+        return pid, "rate_limited", [], f"rate limited (HTTP {sc}) — try again later"
+
     if not models:
         return pid, "error", [], "endpoint returned 0 models"
 

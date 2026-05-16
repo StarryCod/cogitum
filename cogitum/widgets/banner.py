@@ -3,6 +3,9 @@
 The shadow font already includes integrated depth (the glyphs have
 double walls). We render it once in high gold and tint the heavy
 shadow lines a darker bronze so it reads as embossed.
+
+In narrow terminals (< 60 cols) the figlet logo would overflow and
+mangle the layout, so we fall back to a compact single-line title.
 """
 from __future__ import annotations
 
@@ -24,6 +27,8 @@ from ..design import (
 
 
 _LOGO_RAW = pyfiglet.figlet_format("COGITUM", font="ansi_shadow", width=200).rstrip("\n")
+_LOGO_WIDTH = max((len(line) for line in _LOGO_RAW.splitlines()), default=0)
+_NARROW_THRESHOLD = max(_LOGO_WIDTH, 60)
 
 
 def _layered(text: str) -> Text:
@@ -51,6 +56,22 @@ _CANT = "forge mark vii  ·  agentic cli"
 
 class Banner(Widget):
     def render(self):
+        # M14: narrow-terminal fallback. If the figlet logo would overflow
+        # the available width (e.g. user split the pane or runs in a small
+        # tmux pane), draw a compact single-line title instead. The full
+        # logo is gorgeous but un-survivable in <60-col terminals.
+        try:
+            avail = self.size.width
+        except Exception:
+            avail = _LOGO_WIDTH
+        if avail and avail < _NARROW_THRESHOLD:
+            compact = Text()
+            compact.append("◆ ", style=GOLD_HI)
+            compact.append("COGITUM", style=f"bold {GOLD_HI}")
+            compact.append("  ·  ", style=MUTED)
+            compact.append(_CANT, style=f"italic {GOLD_DIM}")
+            return Align.center(compact)
+
         logo = _layered(_LOGO_RAW)
         cant = Text(_CANT, style=f"italic {GOLD_DIM}")
         return Group(Align.center(logo), Align.center(Text("")), Align.center(cant))

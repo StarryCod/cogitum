@@ -73,7 +73,7 @@ class QueueBar(Widget):
         if not self._items:
             return Text("")
         out = Text()
-        out.append("⏳ ", style=GOLD)
+        out.append("◇ ", style=GOLD)
         out.append(f"queue ({len(self._items)})", style=f"bold {GOLD_DIM}")
         out.append("  ↑ to edit last", style=MUTED)
         out.append("\n")

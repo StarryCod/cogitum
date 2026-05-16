@@ -171,7 +171,7 @@ class ProcessManager:
         Live processes and recently-finished ones are kept so the agent can
         still read their final output.
         """
-        now = time.time()
+        time.time()
         to_remove = []
         for pid, bp in self._processes.items():
             if not bp.finished:

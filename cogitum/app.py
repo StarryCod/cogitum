@@ -124,7 +124,7 @@ class CogitumApp(App):
         try:
             await asyncio.sleep(0.3)  # let UI settle first
             results = await refresh_all_providers(timeout=6.0, only_empty=False)
-        except Exception as e:
+        except Exception:
             return
 
         added_total = sum(r["count"] for r in results.values()

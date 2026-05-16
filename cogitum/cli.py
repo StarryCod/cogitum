@@ -133,19 +133,19 @@ def _setup_api_keys() -> None:
                 import keyring
                 keyring.set_password("cogitum", env_name, key)
                 print(f"  ✓ stored in system keyring as cogitum / {env_name}")
-                print(f"    To use it, add to ~/.config/cogitum/providers.toml:")
+                print("    To use it, add to ~/.config/cogitum/providers.toml:")
                 print(f'    secret_ref = "keyring:cogitum:{env_name}"')
             except Exception as e:
                 print(f"  keyring failed: {e}")
                 print("  Falling back to plain in providers.toml (NOT recommended).")
                 _patch_provider_secret(provider_id, f"plain:{key}")
         elif backend == "env-shell":
-            print(f"  Add to ~/.bashrc or ~/.zshrc:")
+            print("  Add to ~/.bashrc or ~/.zshrc:")
             print(f"    export {env_name}={key!r}")
             print(f"  providers.toml already references env:{env_name} for {provider_id}.")
         else:
             _patch_provider_secret(provider_id, f"plain:{key}")
-            print(f"  ✓ written to providers.toml (plain — rotate later)")
+            print("  ✓ written to providers.toml (plain — rotate later)")
 
         # Auto-enable the provider entry.
         _set_provider_enabled(provider_id, True)

@@ -1962,7 +1962,7 @@ class SetupScreen(Screen):
         # Build final message
         body_lines = [
             f"{pid} now uses secret_ref = {result.secret_ref}",
-            f"Provider enabled.",
+            "Provider enabled.",
             "",
         ]
         if count > 0:
@@ -2005,7 +2005,7 @@ class SetupScreen(Screen):
         except Exception as e:
             return (0, f"could not resolve key ({secret_ref}): {e}")
         if not api_key:
-            return (0, f"key not yet available (env var not exported?)")
+            return (0, "key not yet available (env var not exported?)")
 
         try:
             models = await discover_models(base_url, api_key)
@@ -2013,7 +2013,7 @@ class SetupScreen(Screen):
             return (0, f"discovery request failed: {e}")
 
         if not models:
-            return (0, f"endpoint returned no models — add manually via providers.toml")
+            return (0, "endpoint returned no models — add manually via providers.toml")
 
         # Add discovered models to config
         for m in models:
@@ -2096,7 +2096,9 @@ class SetupScreen(Screen):
         self._render_section()
 
     def _open_in_editor(self) -> None:
-        import os, shutil, subprocess
+        import os
+        import shutil
+        import subprocess
         ed = os.environ.get("EDITOR") or shutil.which("nvim") or shutil.which("vim") or shutil.which("nano")
         if not ed:
             self.app.push_screen(MessageModal(
@@ -2105,7 +2107,7 @@ class SetupScreen(Screen):
             return
         # We need to suspend the textual app briefly.
         with self.app.suspend():
-            subprocess.call([ed, str(_PROVIDERS_PATH)])
+            subprocess.call([ed, str(_PROVIDERS_PATH)], timeout=3600)
         self._writer = ConfigWriter()
         self._render_section()
 

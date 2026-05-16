@@ -180,7 +180,7 @@ class Inspector(Static):
 
         # Cache stats (if any)
         if st.cache_read or st.cache_write:
-            cache_total = st.cache_read + st.cache_write
+            st.cache_read + st.cache_write
             saved_pct = int(st.cache_read / max(st.tokens_in, 1) * 100)
             rows.append(_kv("cached",    f"{st.cache_read:,} read", OK))
             if saved_pct > 0:

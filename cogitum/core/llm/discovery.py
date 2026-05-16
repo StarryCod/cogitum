@@ -193,6 +193,21 @@ async def discover_models(
                 headers={"Authorization": f"Bearer {api_key}"},
             )
             resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        # M9: distinguish auth failure from "no models" so the UI can show
+        # the right hint (key expired vs key correct + provider has 0 models).
+        # We use a sentinel: a single "model" with id _AUTH_ERROR + the http
+        # status. discover_models callers that just want a list still get a
+        # non-list-like signal they can detect.
+        sc = e.response.status_code
+        if sc in (401, 403):
+            logger.warning("discover_models: auth failed (%s) — key may be expired or revoked", sc)
+            return [{"_auth_error": True, "status_code": sc, "message": str(e)}]
+        if sc == 429:
+            logger.warning("discover_models: rate limited (429) — try again later")
+            return [{"_rate_limited": True, "status_code": sc, "message": str(e)}]
+        logger.warning("discover_models: HTTP %s: %s", sc, e)
+        return []
     except httpx.HTTPError as e:
         logger.warning("discover_models: request failed: %s", e)
         return []

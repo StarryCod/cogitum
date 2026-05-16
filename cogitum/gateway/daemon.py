@@ -9,9 +9,38 @@ import subprocess
 import sys
 from pathlib import Path
 
+# All systemctl invocations are bounded by this hard timeout. Without it,
+# a hung systemd-user (rare but real on headless boxes) would freeze every
+# `cog tg ...` subcommand indefinitely (M2).
+_SYSTEMCTL_TIMEOUT = 15
+
 _SERVICE_NAME = "cogitum-tg"
 _SERVICE_DIR = Path.home() / ".config" / "systemd" / "user"
 _SERVICE_PATH = _SERVICE_DIR / f"{_SERVICE_NAME}.service"
+
+
+def _systemctl(*args: str, capture: bool = True) -> subprocess.CompletedProcess:
+    """Run `systemctl --user <args>` with a bounded timeout.
+
+    Returns the CompletedProcess so callers can inspect rc/stdout/stderr.
+    On timeout we synthesize a CompletedProcess with rc=124 (the
+    conventional 'command timed out' exit code) and an explanatory
+    stderr message — callers don't need to special-case TimeoutExpired.
+    """
+    try:
+        return subprocess.run(
+            ["systemctl", "--user", *args],
+            capture_output=capture,
+            text=True,
+            timeout=_SYSTEMCTL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=["systemctl", "--user", *args],
+            returncode=124,
+            stdout="",
+            stderr=f"systemctl --user {' '.join(args)} timed out after {_SYSTEMCTL_TIMEOUT}s",
+        )
 
 
 def _python_path() -> str:
@@ -47,17 +76,14 @@ def install_service() -> str:
     """Install the systemd user service file."""
     _SERVICE_DIR.mkdir(parents=True, exist_ok=True)
     _SERVICE_PATH.write_text(_service_content(), encoding="utf-8")
-    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    _systemctl("daemon-reload")
     return f"Service installed: {_SERVICE_PATH}"
 
 
 def enable_service() -> str:
     """Enable auto-start on login."""
     install_service()
-    result = subprocess.run(
-        ["systemctl", "--user", "enable", _SERVICE_NAME],
-        capture_output=True, text=True,
-    )
+    result = _systemctl("enable", _SERVICE_NAME)
     if result.returncode != 0:
         return f"Enable failed: {result.stderr.strip()}"
     return f"Enabled: {_SERVICE_NAME} (auto-start on login)"
@@ -66,10 +92,7 @@ def enable_service() -> str:
 def start_service() -> str:
     """Start the gateway daemon."""
     install_service()
-    result = subprocess.run(
-        ["systemctl", "--user", "start", _SERVICE_NAME],
-        capture_output=True, text=True,
-    )
+    result = _systemctl("start", _SERVICE_NAME)
     if result.returncode != 0:
         return f"Start failed: {result.stderr.strip()}"
     return "Started ✓"
@@ -77,22 +100,21 @@ def start_service() -> str:
 
 def stop_service() -> str:
     """Stop the gateway daemon."""
-    result = subprocess.run(
-        ["systemctl", "--user", "stop", _SERVICE_NAME],
-        capture_output=True, text=True,
-    )
+    result = _systemctl("stop", _SERVICE_NAME)
     if result.returncode != 0:
         return f"Stop failed: {result.stderr.strip()}"
     return "Stopped ✓"
 
 
 def restart_service() -> str:
-    """Restart the gateway daemon."""
+    """Restart the gateway daemon.
+
+    Note: systemctl restart is more robust than stop-then-start because
+    systemd handles the unit-state transition atomically (M16). If you
+    need a hard reset (e.g. unit got stuck), call stop_service() first.
+    """
     install_service()
-    result = subprocess.run(
-        ["systemctl", "--user", "restart", _SERVICE_NAME],
-        capture_output=True, text=True,
-    )
+    result = _systemctl("restart", _SERVICE_NAME)
     if result.returncode != 0:
         return f"Restart failed: {result.stderr.strip()}"
     return "Restarted ✓"
@@ -100,10 +122,7 @@ def restart_service() -> str:
 
 def status_service() -> dict[str, str]:
     """Get daemon status."""
-    result = subprocess.run(
-        ["systemctl", "--user", "status", _SERVICE_NAME],
-        capture_output=True, text=True,
-    )
+    result = _systemctl("status", _SERVICE_NAME)
     output = result.stdout.strip()
 
     # Parse status
@@ -114,10 +133,7 @@ def status_service() -> dict[str, str]:
             active = line.split(":", 1)[1].strip()
             break
 
-    is_enabled = subprocess.run(
-        ["systemctl", "--user", "is-enabled", _SERVICE_NAME],
-        capture_output=True, text=True,
-    ).stdout.strip()
+    is_enabled = _systemctl("is-enabled", _SERVICE_NAME).stdout.strip()
 
     return {
         "active": active,
@@ -129,10 +145,7 @@ def status_service() -> dict[str, str]:
 
 def disable_service() -> str:
     """Disable auto-start."""
-    result = subprocess.run(
-        ["systemctl", "--user", "disable", _SERVICE_NAME],
-        capture_output=True, text=True,
-    )
+    result = _systemctl("disable", _SERVICE_NAME)
     if result.returncode != 0:
         return f"Disable failed: {result.stderr.strip()}"
     return "Disabled (won't auto-start)"
@@ -144,5 +157,5 @@ def uninstall_service() -> str:
     disable_service()
     if _SERVICE_PATH.exists():
         _SERVICE_PATH.unlink()
-    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    _systemctl("daemon-reload")
     return "Service removed"

@@ -29,7 +29,8 @@ def test_save_and_load_secret(tmp_path, monkeypatch):
 
 def test_save_secret_replaces_existing(tmp_path, monkeypatch):
     monkeypatch.setenv("COGITUM_CONFIG_DIR", str(tmp_path))
-    import importlib, cogitum.core.llm.secrets_env as se
+    import importlib
+    import cogitum.core.llm.secrets_env as se
     importlib.reload(se)
 
     se.save_secret("KEY1", "first")
@@ -48,7 +49,8 @@ def test_save_secret_replaces_existing(tmp_path, monkeypatch):
 
 def test_save_secret_quotes_values_with_specials(tmp_path, monkeypatch):
     monkeypatch.setenv("COGITUM_CONFIG_DIR", str(tmp_path))
-    import importlib, cogitum.core.llm.secrets_env as se
+    import importlib
+    import cogitum.core.llm.secrets_env as se
     importlib.reload(se)
 
     se.save_secret("WITH_SPACE", "hello world")
@@ -67,7 +69,8 @@ def test_save_secret_quotes_values_with_specials(tmp_path, monkeypatch):
 
 def test_load_does_not_override_existing_env(tmp_path, monkeypatch):
     monkeypatch.setenv("COGITUM_CONFIG_DIR", str(tmp_path))
-    import importlib, cogitum.core.llm.secrets_env as se
+    import importlib
+    import cogitum.core.llm.secrets_env as se
     importlib.reload(se)
 
     # Persist a secret to disk
@@ -86,7 +89,8 @@ def test_load_does_not_override_existing_env(tmp_path, monkeypatch):
 
 def test_remove_secret(tmp_path, monkeypatch):
     monkeypatch.setenv("COGITUM_CONFIG_DIR", str(tmp_path))
-    import importlib, cogitum.core.llm.secrets_env as se
+    import importlib
+    import cogitum.core.llm.secrets_env as se
     importlib.reload(se)
 
     se.save_secret("DELETE_ME", "v1")
@@ -101,7 +105,8 @@ def test_remove_secret(tmp_path, monkeypatch):
 
 def test_list_secrets_masks_values(tmp_path, monkeypatch):
     monkeypatch.setenv("COGITUM_CONFIG_DIR", str(tmp_path))
-    import importlib, cogitum.core.llm.secrets_env as se
+    import importlib
+    import cogitum.core.llm.secrets_env as se
     importlib.reload(se)
 
     se.save_secret("LONG_KEY", "abcdefghijklmnopqrstuvwxyz")
@@ -117,7 +122,8 @@ def test_list_secrets_masks_values(tmp_path, monkeypatch):
 
 def test_load_handles_missing_file(tmp_path, monkeypatch):
     monkeypatch.setenv("COGITUM_CONFIG_DIR", str(tmp_path))
-    import importlib, cogitum.core.llm.secrets_env as se
+    import importlib
+    import cogitum.core.llm.secrets_env as se
     importlib.reload(se)
 
     # No file exists yet — load returns 0, doesn't crash

@@ -822,7 +822,6 @@ class Agent:
         from cogitum.core.llm.mesh import StreamRequest
 
         # Preserve the system message (first message if role is system-like)
-        system_msg = self.cfg.system
 
         # Build compaction prompt with the full conversation
         conversation_text_parts: list[str] = []

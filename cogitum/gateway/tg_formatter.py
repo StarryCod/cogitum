@@ -241,7 +241,7 @@ def format_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
 
 def format_tool_result(tool_name: str, result: str, error: bool) -> str:
     """Format a tool result as a compact status line."""
-    icon = _TOOL_ICONS.get(tool_name, "🔧")
+    _TOOL_ICONS.get(tool_name, "🔧")
     status = "❌" if error else "✅"
     # Compact preview of result
     preview = result.strip().split("\n")[0][:80]

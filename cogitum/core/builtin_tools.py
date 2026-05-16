@@ -147,7 +147,7 @@ def _auto_cogit_save(label: str, scope_path: str | None = None) -> str | None:
                 # File outside project — don't checkpoint random files
                 return None
         store = CogitStore(session_id=session_id, project_dir=project_dir)
-        cp = store.save(label=f"auto: {label}", scope=scope)
+        store.save(label=f"auto: {label}", scope=scope)
         return None
     except Exception:
         return None  # don't block the operation on checkpoint failure
@@ -165,7 +165,7 @@ def _is_path_safe(p: Path) -> tuple[bool, str]:
     # Block known sensitive files
     for sensitive in _SENSITIVE_PATHS:
         if resolved.endswith(sensitive) or f"/{sensitive}" in resolved:
-            return False, f"access denied: sensitive file"
+            return False, "access denied: sensitive file"
 
     return True, ""
 
@@ -1193,24 +1193,37 @@ async def browser(action: str, url: str = "", selector: str = "", text: str = ""
 # ---------------------------------------------------------------------------
 # Telegram media (available only when running via TG gateway)
 # ---------------------------------------------------------------------------
+# Telegram gateway context — injected per-run so send_media knows where to
+# deliver. We use contextvars (not module globals) so that parallel sub-
+# agents spawned by delegate_task each see the right chat_id; before this
+# fix, two concurrent worker chats writing to the same module globals
+# would race and one's media could end up in the other's chat (M15).
+# ---------------------------------------------------------------------------
 
-# Global reference set by TG gateway before agent runs
-_tg_api = None
-_tg_chat_id: int | None = None
+import contextvars  # noqa: E402
+
+_tg_api_var: contextvars.ContextVar = contextvars.ContextVar(
+    "cogitum_tg_api", default=None
+)
+_tg_chat_id_var: contextvars.ContextVar = contextvars.ContextVar(
+    "cogitum_tg_chat_id", default=None
+)
 
 
 def _set_tg_context(api, chat_id: int) -> None:
-    """Called by TG gateway to inject API reference for send_media tool."""
-    global _tg_api, _tg_chat_id
-    _tg_api = api
-    _tg_chat_id = chat_id
+    """Called by TG gateway to inject API reference for send_media tool.
+
+    Sets via ContextVar — affects only the current asyncio task and its
+    children, NOT other concurrent agent runs in the same process.
+    """
+    _tg_api_var.set(api)
+    _tg_chat_id_var.set(chat_id)
 
 
 def _clear_tg_context() -> None:
     """Called by TG gateway after agent finishes."""
-    global _tg_api, _tg_chat_id
-    _tg_api = None
-    _tg_chat_id = None
+    _tg_api_var.set(None)
+    _tg_chat_id_var.set(None)
 
 
 @tool(tags=["media", "telegram"])
@@ -1224,9 +1237,10 @@ async def send_media(path: str, caption: str = "", media_type: str = "auto") -> 
     caption: Optional caption text for the media.
     media_type: 'photo', 'document', or 'auto' (detect from extension).
     """
-    global _tg_api, _tg_chat_id
+    api = _tg_api_var.get()
+    chat_id = _tg_chat_id_var.get()
 
-    if _tg_api is None or _tg_chat_id is None:
+    if api is None or chat_id is None:
         return "ERROR: send_media is only available when running via Telegram gateway."
 
     from pathlib import Path as P
@@ -1245,9 +1259,9 @@ async def send_media(path: str, caption: str = "", media_type: str = "auto") -> 
 
     try:
         if media_type == "photo":
-            resp = await _tg_api.send_photo(_tg_chat_id, str(file_path), caption=caption)
+            resp = await api.send_photo(chat_id, str(file_path), caption=caption)
         else:
-            resp = await _tg_api.send_document(_tg_chat_id, str(file_path), caption=caption)
+            resp = await api.send_document(chat_id, str(file_path), caption=caption)
 
         if resp.get("ok"):
             return f"Sent {media_type}: {file_path.name}" + (f" with caption: {caption}" if caption else "")
