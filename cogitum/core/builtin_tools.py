@@ -678,14 +678,18 @@ def session_search(action: str, query: str = "", session_id: str = "", limit: in
 # ---------------------------------------------------------------------------
 
 @tool(tags=["cogit"])
-def cogit(action: str, label: str = "", index: int = 0) -> str:
+def cogit(action: str, label: str = "", index: int = 0, scope: str = "") -> str:
     """Smart checkpoints — save/restore project state.
 
-    action: 'save', 'list', or 'restore'.
+    action: 'save', 'list', 'restore', 'diff', or 'cleanup'.
     label: Description for save (e.g. 'before refactor auth').
-    index: Checkpoint number to restore.
+    index: Checkpoint number for restore/diff.
+    scope: Directory or file to checkpoint (relative path).
+           Examples: 'src/', 'cogitum/core/', 'main.py'.
+           Empty = entire project (with smart filtering).
 
-    Auto-saves before dangerous operations. Lighter than git.
+    Use scope to checkpoint only the relevant part of the project.
+    This keeps checkpoints fast and small.
     """
     from cogitum.core.cogit import CogitStore
     import os
@@ -697,8 +701,9 @@ def cogit(action: str, label: str = "", index: int = 0) -> str:
     store = CogitStore(session_id=session_id, project_dir=project_dir)
 
     if action == "save":
-        cp = store.save(label=label)
-        return f"OK: checkpoint #{cp.index} '{cp.label}' saved ({cp.file_count} files changed)"
+        cp = store.save(label=label, scope=scope or None)
+        scope_info = f" [scope: {cp.scope}]" if cp.scope != "." else ""
+        return f"OK: checkpoint #{cp.index} '{cp.label}' saved ({cp.file_count} files){scope_info}"
     elif action == "list":
         checkpoints = store.list_checkpoints()
         if not checkpoints:
@@ -707,14 +712,22 @@ def cogit(action: str, label: str = "", index: int = 0) -> str:
         for cp in checkpoints:
             from datetime import datetime
             ts = datetime.fromtimestamp(cp.timestamp).strftime("%H:%M")
-            lines.append(f"  #{cp.index} [{ts}] {cp.label} ({cp.file_count} files)")
+            scope_info = f" [{cp.scope}]" if cp.scope != "." else ""
+            lines.append(f"  #{cp.index} [{ts}] {cp.label} ({cp.file_count} files){scope_info}")
         return f"Checkpoints ({len(checkpoints)}):\n" + "\n".join(lines)
     elif action == "restore":
         if index <= 0:
             return "ERROR: index required (positive integer)"
         return store.restore(index)
+    elif action == "diff":
+        if index <= 0:
+            return "ERROR: index required for diff"
+        return store.diff(index)
+    elif action == "cleanup":
+        removed = store.cleanup(keep_last=10)
+        return f"OK: removed {removed} old checkpoints" if removed else "Nothing to clean up."
     else:
-        return f"ERROR: unknown action '{action}' (use save/list/restore)"
+        return f"ERROR: unknown action '{action}' (use save/list/restore/diff/cleanup)"
 
 
 # ---------------------------------------------------------------------------
