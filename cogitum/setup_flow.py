@@ -425,8 +425,14 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
 # Add provider modal
 # ---------------------------------------------------------------------------
 
-class AddProviderModal(ModalScreen[ProviderPreset | None]):
-    """Pick a preset or define a fully custom provider."""
+class AddProviderModal(ModalScreen[ProviderPreset | str | None]):
+    """Pick a preset or define a fully custom provider.
+
+    Returns:
+        ProviderPreset — preset chosen
+        "custom"       — user picked the custom slot
+        None           — user cancelled
+    """
 
     DEFAULT_CSS = """
     AddProviderModal { align: center middle; background: rgba(0,0,0,0.55); }
@@ -454,7 +460,8 @@ class AddProviderModal(ModalScreen[ProviderPreset | None]):
     def __init__(self, existing: set[str]) -> None:
         super().__init__()
         self._existing = existing
-        self._items: list[ProviderPreset | None] = []
+        # _items[i] is either a ProviderPreset or the string "custom"
+        self._items: list[ProviderPreset | str] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="ap-shell"):
@@ -472,7 +479,7 @@ class AddProviderModal(ModalScreen[ProviderPreset | None]):
             self._items.append(preset)
             row = self._render_preset(preset)
             lv.append(ListItem(_Static(row), id=f"ap-{preset.id}"))
-        self._items.append(None)
+        self._items.append("custom")
         lv.append(ListItem(_Static(self._render_custom()), id="ap-custom"))
         lv.focus()
 
@@ -592,10 +599,13 @@ class CustomProviderModal(ModalScreen[ProviderPreset | None]):
 # Key manager — list / delete keys per provider
 # ---------------------------------------------------------------------------
 
-class KeyManagerModal(ModalScreen[bool]):
+class KeyManagerModal(ModalScreen[str]):
     """Show all keys for a provider, allow removing them.
 
-    Returns True if at least one key was changed (so caller can re-render).
+    Returns one of:
+        "closed"     — user closed without changes
+        "changed"    — keys were removed (caller should re-render)
+        "add"        — user wants to add a new key (caller should chain add-key flow)
     """
 
     DEFAULT_CSS = """
@@ -628,7 +638,7 @@ class KeyManagerModal(ModalScreen[bool]):
         self._name = provider_name
         self._writer = ConfigWriter()
         self._key_ids: list[str] = []
-        self._changed = False
+        self._any_changed = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="km-shell"):
@@ -645,20 +655,25 @@ class KeyManagerModal(ModalScreen[bool]):
     def on_mount(self) -> None:
         self._refresh_list()
 
-    def _refresh_list(self) -> None:
+    async def _refresh_list_async(self) -> None:
+        """Async refresh — awaits clear() so old ids are gone before new mount."""
         lv = self.query_one("#km-list", ListView)
-        lv.clear()
+        await lv.clear()
         self._key_ids = []
         keys = self._writer.list_keys(self._pid)
         if not keys:
-            lv.append(ListItem(_Static(Text("  no keys — close and add one",
-                                          style=COPPER))))
+            await lv.append(ListItem(_Static(Text("  no keys — close and add one",
+                                                style=COPPER))))
             return
         for kid, kdata in keys.items():
             self._key_ids.append(kid)
             row = self._render_key_row(kid, kdata)
-            lv.append(ListItem(_Static(row), id=f"km-row-{kid}"))
+            await lv.append(ListItem(_Static(row), id=f"km-row-{kid}"))
         lv.focus()
+
+    def _refresh_list(self) -> None:
+        """Sync wrapper — kicks off the async refresh as a task."""
+        asyncio.ensure_future(self._refresh_list_async())
 
     def _render_key_row(self, kid: str, kdata) -> Text:
         out = Text()
@@ -683,26 +698,32 @@ class KeyManagerModal(ModalScreen[bool]):
         return out
 
     @on(Button.Pressed, "#km-remove")
-    def _btn_remove(self) -> None:
-        self.action_remove_selected()
+    async def _btn_remove(self) -> None:
+        await self._do_remove_selected()
 
     @on(Button.Pressed, "#km-add")
     def _btn_add(self) -> None:
-        # Close with changed=True so caller can chain into add-key flow
-        self._changed = True
-        self.dismiss(self._changed)
+        # Signal caller to open add-key flow
+        self.dismiss("add")
 
     @on(Button.Pressed, "#km-close")
     def _btn_close(self) -> None:
-        self.dismiss(self._changed)
+        self.dismiss("changed" if self._any_changed else "closed")
 
     def action_close(self) -> None:
-        self.dismiss(self._changed)
+        self.dismiss("changed" if self._any_changed else "closed")
 
     async def action_remove_selected(self) -> None:
-        idx = self.query_one("#km-list", ListView).index
-        if idx is None or idx >= len(self._key_ids):
+        await self._do_remove_selected()
+
+    async def _do_remove_selected(self) -> None:
+        if not self._key_ids:
+            self.app.notify("No keys to remove", severity="warning")
             return
+        lv = self.query_one("#km-list", ListView)
+        idx = lv.index
+        if idx is None or idx >= len(self._key_ids):
+            idx = 0
         kid = self._key_ids[idx]
         ok = await self.app.push_screen_wait(
             ConfirmModal("Remove key", f"Delete key '{kid}' from {self._name}?")
@@ -711,8 +732,9 @@ class KeyManagerModal(ModalScreen[bool]):
             return
         self._writer.remove_key(self._pid, kid)
         self._writer.save()
-        self._changed = True
-        self._refresh_list()
+        self._any_changed = True
+        await self._refresh_list_async()
+        self.app.notify(f"Removed key '{kid}'", severity="information")
 
 
 # ---------------------------------------------------------------------------
@@ -1375,14 +1397,18 @@ class SetupScreen(Screen):
 
         if bid == "prov-add":
             existing = set(self._writer.providers().keys())
-            preset = await self.app.push_screen_wait(AddProviderModal(existing))
-            if preset is not None:
-                await self._add_provider_flow(preset)
-            else:
-                # "custom" selected — open free-form provider definition
+            picked = await self.app.push_screen_wait(AddProviderModal(existing))
+            if picked is None:
+                # User cancelled — do nothing
+                return
+            if picked == "custom":
+                # User explicitly chose the "custom" slot — open the form
                 custom_preset = await self.app.push_screen_wait(CustomProviderModal())
                 if custom_preset is not None:
                     await self._add_provider_flow(custom_preset)
+            else:
+                # ProviderPreset chosen
+                await self._add_provider_flow(picked)
             self._render_section()
             return
 
@@ -1399,8 +1425,11 @@ class SetupScreen(Screen):
             pid = bid.removeprefix("prov-keys-")
             raw = self._writer.provider(pid)
             name = raw.get("name", pid) if raw else pid
-            changed = await self.app.push_screen_wait(KeyManagerModal(pid, name))
-            # Re-render to reflect any deletions
+            result = await self.app.push_screen_wait(KeyManagerModal(pid, name))
+            if result == "add":
+                # User clicked "Add new" — chain into add-key flow
+                await self._add_key_flow(pid)
+            # Always re-render to reflect any deletions
             self._render_section()
             return
 
@@ -1503,43 +1532,63 @@ class SetupScreen(Screen):
         self._writer.save()
 
         # Auto-discover models if provider has none
-        await self._auto_discover_models(pid, result.secret_ref)
+        count, discovery_msg = await self._auto_discover_models(pid, result.secret_ref)
+
+        # Build final message
+        body_lines = [
+            f"{pid} now uses secret_ref = {result.secret_ref}",
+            f"Provider enabled.",
+            "",
+        ]
+        if count > 0:
+            body_lines.append(f"✓ {discovery_msg}")
+        else:
+            body_lines.append(f"ℹ models: {discovery_msg}")
+            if result.backend == "env":
+                body_lines.append("  (if env var isn't exported yet, restart shell and reopen setup)")
 
         await self.app.push_screen_wait(MessageModal(
             "Key saved",
-            f"{pid} now uses secret_ref = {result.secret_ref}\nProvider enabled.",
+            "\n".join(body_lines),
         ))
         self._render_section()
 
-    async def _auto_discover_models(self, pid: str, secret_ref: str) -> None:
-        """Try to discover models from /v1/models endpoint."""
+    async def _auto_discover_models(self, pid: str, secret_ref: str) -> tuple[int, str]:
+        """Try to discover models from /v1/models endpoint.
+
+        Returns:
+            (count, message) — count of models added, status message for the user.
+        """
         from .core.llm.discovery import discover_models, resolve_secret_ref
 
         provider_data = self._writer.provider(pid)
         if not provider_data:
-            return
+            return (0, "provider record missing")
 
         # Skip if provider already has models defined
         existing_models = provider_data.get("models", {})
         if existing_models and len(existing_models) > 0:
-            return
+            return (0, f"provider already has {len(existing_models)} models — skipped discovery")
 
         base_url = provider_data.get("base_url", "")
         if not base_url:
-            return
+            return (0, "no base_url — cannot discover")
 
         # Resolve the key
-        api_key = resolve_secret_ref(secret_ref)
+        try:
+            api_key = resolve_secret_ref(secret_ref)
+        except Exception as e:  # noqa: BLE001
+            return (0, f"could not resolve key ({secret_ref}): {e}")
         if not api_key:
-            return
+            return (0, f"key not yet available (env var not exported?)")
 
         try:
             models = await discover_models(base_url, api_key)
-        except Exception:  # noqa: BLE001
-            return
+        except Exception as e:  # noqa: BLE001
+            return (0, f"discovery request failed: {e}")
 
         if not models:
-            return
+            return (0, f"endpoint returned no models — add manually via providers.toml")
 
         # Add discovered models to config
         for m in models:
@@ -1551,6 +1600,7 @@ class SetupScreen(Screen):
                 max_output_tokens=m.get("max_output_tokens", 16000),
             )
         self._writer.save()
+        return (len(models), f"discovered {len(models)} models")
 
     async def _oauth_flow(self, pid: str) -> None:
         if pid not in OAUTH_REGISTRY:
