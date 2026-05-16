@@ -130,8 +130,11 @@ class ApprovalWidget(Widget):
 
     def watch_selected(self) -> None:
         """Update display when selection changes."""
-        options_widget = self.query_one("#approval-options", Static)
-        options_widget.update(self._render_options())
+        try:
+            options_widget = self.query_one("#approval-options", Static)
+            options_widget.update(self._render_options())
+        except Exception:
+            pass  # Widget not yet composed
 
     def on_key(self, event: events.Key) -> None:
         """Handle arrow keys and Enter."""

@@ -243,29 +243,49 @@ class AgentConfig:
         "confirm with the user before executing.\n\n"
 
         "═══ TOOLS ═══\n"
+        "All tools have automatic danger classification (low/medium/danger). "
+        "Medium and danger commands require user approval — you don't need to "
+        "specify danger level, it's detected automatically from the command.\n\n"
+
         "TERMINAL — 3 modes:\n"
         "• terminal(command='...') — normal mode, waits for completion, no timeout.\n"
         "• terminal(command='...', mode='timeout', timeout=30) — kills if exceeds limit.\n"
+        "  Use for commands that might hang (network, builds). Agent gets timeout error.\n"
         "• terminal(command='...', mode='background') — starts in background, returns PID.\n"
-        "  Management: terminal(command='list/read/kill/write', mode='background', pid=N)\n"
-        "  Use background for servers, long builds, watchers. Read output with 'read'.\n\n"
+        "  Management commands (mode='background'):\n"
+        "    terminal(command='list') — show all background processes\n"
+        "    terminal(command='read', pid=N) — read stdout/stderr of process\n"
+        "    terminal(command='kill', pid=N) — terminate process\n"
+        "    terminal(command='write', pid=N, stdin='input') — send input to process\n"
+        "  Use background for: servers, long builds, watchers, anything that runs indefinitely.\n\n"
+
+        "FILE OPERATIONS:\n"
+        "• read_file(path='...', offset=0, limit=100) — read file with line numbers.\n"
+        "• write_file(path='...', content='...') — create/overwrite file.\n"
+        "• edit_file(path='...', old='...', new='...') — find-and-replace in file.\n"
+        "• list_dir(path='.') — list directory contents.\n\n"
+
+        "COGIT — smart checkpoints (your version control):\n"
+        "• cogit(action='save', label='before refactor') — save checkpoint.\n"
+        "• cogit(action='save', label='auth module', scope='src/auth/') — save ONLY specific dir.\n"
+        "  scope is KEY: use it to checkpoint only the relevant part, not the whole project.\n"
+        "  Examples: scope='cogitum/core/', scope='main.py', scope='*.py'\n"
+        "• cogit(action='list') — see all checkpoints with file counts and scope.\n"
+        "• cogit(action='diff', index=N) — show what changed since checkpoint N.\n"
+        "• cogit(action='restore', index=N) — restore files from checkpoint N.\n"
+        "• cogit(action='cleanup') — remove old checkpoints (keeps last 10).\n"
+        "• Use cogit like git stash — save state before risky changes, restore if broken.\n"
+        "• Auto-saves happen before dangerous operations (rm, overwrite, git reset).\n\n"
 
         "DELEGATE — for complex multi-part tasks:\n"
         "• delegate_task spawns parallel sub-agents with full tool access.\n"
         "• Use workers mode for independent subtasks, experts mode for review.\n"
         "• Subagents have NO memory of your conversation — pass all context explicitly.\n\n"
 
-        "COGIT — smart checkpoints (your version control):\n"
-        "• Auto-saves before dangerous operations (write_file overwrite, rm, git reset).\n"
-        "• Save manually: cogit(action='save', label='before refactor')\n"
-        "• Restore: cogit(action='restore', index=N)\n"
-        "• List: cogit(action='list') — see all checkpoints with diffs\n"
-        "• Use cogit like git stash — save state before risky changes, restore if broken.\n\n"
-
         "SESSION SEARCH — cross-session memory:\n"
         "• session_search(action='list') — browse recent sessions.\n"
-        "• session_search(action='search', query='...') — find sessions by title.\n"
-        "• session_search(action='read', session_id='...') — read messages from a session.\n"
+        "• session_search(action='search', query='...') — find sessions by title/content.\n"
+        "• session_search(action='read', session_id='...', limit=20) — read messages.\n"
         "• Use when user references past work or you need context from before.\n\n"
 
         "WEB — search and browse:\n"
@@ -277,6 +297,17 @@ class AgentConfig:
         "MEDIA — send files to user (Telegram gateway only):\n"
         "• send_media(path='/path/to/file.png') — send photo or document.\n"
         "• Auto-detects type from extension (.png/.jpg/.webp → photo, else → document).\n\n"
+
+        "MEMORY:\n"
+        "• memory(action='save', content='...') — save a fact to persistent memory.\n"
+        "• memory(action='list') — see all saved memories.\n"
+        "• memory(action='delete', index=N) — remove a memory entry.\n\n"
+
+        "SKILLS:\n"
+        "• skills(action='list') — list available skills.\n"
+        "• skills(action='read', name='...') — load a skill's instructions.\n"
+        "• skills(action='save', name='...', content='...') — save new skill.\n"
+        "• skills(action='update', name='...', content='...') — update existing skill.\n\n"
 
         "═══ WORKFLOW ═══\n"
         "1. Understand the request. Ask clarifying questions only if truly ambiguous.\n"
@@ -835,7 +866,7 @@ class Agent:
                 ))
             # Wait for approval decision
             try:
-                call_id, decision = await asyncio.wait_for(
+                decision = await asyncio.wait_for(
                     self._approval_queue.get(), timeout=300.0  # 5 min to decide
                 )
                 if decision == "reject":
