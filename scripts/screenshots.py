@@ -11,15 +11,31 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from textual.app import App
+from textual.widgets import Static
+
 from cogitum.app import CogitumApp
 from cogitum.setup_flow import SetupScreen
 from cogitum.widgets.model_picker import ModelPicker
 from cogitum.widgets.session_picker import SessionPicker
-from cogitum.core.llm.loader import seed_default_config, _PROVIDERS_PATH
+from cogitum.core.llm.loader import seed_default_config, _PROVIDERS_PATH, load_mesh
 from cogitum.core.sessions import get_store
 from cogitum.core.events import Message, TextPart
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
+
+# Screen size tuned for 1920×1080 aspect ratio (16:9).
+_COLS, _ROWS = 158, 43
+
+
+class _ModalShotApp(App):
+    """Bare app with dark background — used for clean modal screenshots."""
+    CSS = """
+    Screen { align: center middle; background: #0e0e11; }
+    """
+
+    def compose(self):
+        yield Static()
 
 
 async def main() -> None:
@@ -28,7 +44,7 @@ async def main() -> None:
     # Ensure default config exists so mesh loads
     seed_default_config(_PROVIDERS_PATH)
 
-    # Seed a dummy session so session picker isn't empty
+    # Seed dummy sessions for session picker
     store = get_store()
     if not store.list_sessions(limit=1):
         sid = store.create_session("demo-session", title="Demo: Auth refactor", model="kimi-k2.6")
@@ -37,14 +53,8 @@ async def main() -> None:
         sid2 = store.create_session("demo-session-2", title="Debug: queue race", model="claude-sonnet-4-5")
         store.append_message(sid2, Message(role="user", parts=[TextPart(text="Fix the queue race condition")]))
 
-    # Screen size tuned for 1920×1080 aspect ratio (16:9).
-    # Textual cells are ~12.3×25.5 px in SVG export.
-    # cols/rows ≈ 3.68 gives a 16:9 viewBox.
-    _COLS, _ROWS = 158, 43
-
-    app = CogitumApp()
-
     # --- 1. Main window --------------------------------------------------
+    app = CogitumApp()
     async with app.run_test(size=(_COLS, _ROWS)) as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -52,19 +62,20 @@ async def main() -> None:
         (ASSETS / "main.svg").write_text(svg, encoding="utf-8")
         print(f"wrote {ASSETS / 'main.svg'}")
 
-    # --- 2. Model picker -------------------------------------------------
-    app2 = CogitumApp()
+    # --- 2. Model picker (clean background) -----------------------------
+    mesh = load_mesh()
+    app2 = _ModalShotApp()
     async with app2.run_test(size=(_COLS, _ROWS)) as pilot:
         await pilot.pause()
-        app2.push_screen(ModelPicker(app2.mesh, current=app2.current_model))
+        app2.push_screen(ModelPicker(mesh, current="kimi-k2.6"))
         await pilot.pause()
         await pilot.pause()
         svg = app2.export_screenshot(title="COGITUM — Models")
         (ASSETS / "models.svg").write_text(svg, encoding="utf-8")
         print(f"wrote {ASSETS / 'models.svg'}")
 
-    # --- 3. Setup wizard -------------------------------------------------
-    app3 = CogitumApp()
+    # --- 3. Setup wizard (clean background) -----------------------------
+    app3 = _ModalShotApp()
     async with app3.run_test(size=(_COLS, _ROWS)) as pilot:
         await pilot.pause()
         app3.push_screen(SetupScreen())
@@ -74,8 +85,8 @@ async def main() -> None:
         (ASSETS / "setup.svg").write_text(svg, encoding="utf-8")
         print(f"wrote {ASSETS / 'setup.svg'}")
 
-    # --- 4. Session picker -----------------------------------------------
-    app4 = CogitumApp()
+    # --- 4. Session picker (clean background) ---------------------------
+    app4 = _ModalShotApp()
     async with app4.run_test(size=(_COLS, _ROWS)) as pilot:
         await pilot.pause()
         app4.push_screen(SessionPicker())

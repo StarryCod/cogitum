@@ -145,43 +145,46 @@ class SessionPicker(ModalScreen):
                 yield Vertical(id="session-list-pane")
                 yield Vertical(id="session-preview-pane")
 
-    def on_mount(self) -> None:
-        self._load_sessions("")
+    async def on_mount(self) -> None:
+        await self._load_sessions("")
         self.query_one("#session-search", Input).focus()
 
     @on(Input.Changed, "#session-search")
-    def _on_search_changed(self, event: Input.Changed) -> None:
-        self._load_sessions(event.value)
+    async def _on_search_changed(self, event: Input.Changed) -> None:
+        await self._load_sessions(event.value)
 
-    def _load_sessions(self, query: str) -> None:
+    async def _load_sessions(self, query: str) -> None:
         store = get_store()
         if query.strip():
             self._items = store.search(query.strip(), limit=20)
         else:
             self._items = store.list_sessions(limit=20)
         self._selected_idx = 0
-        self._render_list()
-        self._render_preview()
+        await self._render_list()
+        await self._render_preview()
 
-    def _render_list(self) -> None:
+    async def _render_list(self) -> None:
         container = self.query_one("#session-list-pane", Vertical)
-        container.remove_children()
+        await container.remove_children()
         if not self._items:
-            container.mount(Static("no sessions found"))
+            await container.mount(Static("no sessions found"))
             return
+        items: list[SessionItem] = []
         for i, meta in enumerate(self._items):
             item = SessionItem(meta, id=f"session-{i}")
             if i == self._selected_idx:
                 item._selected = True
-            container.mount(item)
+            items.append(item)
+        if items:
+            await container.mount(*items)
 
-    def _render_preview(self) -> None:
+    async def _render_preview(self) -> None:
         """Show last messages from selected session."""
         preview_pane = self.query_one("#session-preview-pane", Vertical)
-        preview_pane.remove_children()
+        await preview_pane.remove_children()
 
         if not self._items:
-            preview_pane.mount(Static("no session selected"))
+            await preview_pane.mount(Static("no session selected"))
             return
 
         meta = self._items[self._selected_idx]
@@ -195,7 +198,7 @@ class SessionPicker(ModalScreen):
             short_model = meta.model.split("/")[-1] if "/" in meta.model else meta.model
             header_parts.append((f"  {short_model}", BRONZE))
         header_parts.append((f"  {meta.count} msgs", TXT_DIM))
-        preview_pane.mount(Static(Text.assemble(*header_parts)))
+        await preview_pane.mount(Static(Text.assemble(*header_parts)))
 
         # Load last N messages for preview
         messages = store.load_session(meta.id)
@@ -203,7 +206,7 @@ class SessionPicker(ModalScreen):
         preview_msgs = messages[-8:] if len(messages) > 8 else messages
 
         if not preview_msgs:
-            preview_pane.mount(Static("(empty session)"))
+            await preview_pane.mount(Static("(empty session)"))
             return
 
         lines: list[Text] = []
@@ -244,9 +247,9 @@ class SessionPicker(ModalScreen):
 
         # Render all lines as one Static with newlines
         combined = Text("\n").join(lines)
-        preview_pane.mount(Static(combined))
+        await preview_pane.mount(Static(combined))
 
-    def on_key(self, event) -> None:
+    async def on_key(self, event) -> None:
         if event.key == "escape":
             self.dismiss(None)
             event.prevent_default()
@@ -255,14 +258,14 @@ class SessionPicker(ModalScreen):
             if self._items and self._selected_idx > 0:
                 self._selected_idx -= 1
                 self._update_selection()
-                self._render_preview()
+                await self._render_preview()
             event.prevent_default()
             event.stop()
         elif event.key == "down":
             if self._items and self._selected_idx < len(self._items) - 1:
                 self._selected_idx += 1
                 self._update_selection()
-                self._render_preview()
+                await self._render_preview()
             event.prevent_default()
             event.stop()
         elif event.key == "enter":
@@ -276,7 +279,7 @@ class SessionPicker(ModalScreen):
             if self._items:
                 meta = self._items[self._selected_idx]
                 get_store().delete_session(meta.id)
-                self._load_sessions(
+                await self._load_sessions(
                     self.query_one("#session-search", Input).value
                 )
             event.prevent_default()

@@ -55,7 +55,7 @@ class CogitumApp(App):
     SUB_TITLE = "forge mark vii"
 
     BINDINGS: ClassVar[list[Binding]] = [
-        Binding("ctrl+c", "copy_selection", "copy", priority=True),
+        Binding("ctrl+c", "copy_selection", "copy"),  # no priority — let modals / TextArea handle first
         Binding("ctrl+q", "quit", "quit"),
         Binding("ctrl+p", "open_models", "models", priority=True),
         Binding("ctrl+s", "open_setup", "setup", priority=True),
@@ -393,15 +393,21 @@ class CogitumApp(App):
     # ------------------------------------------------------------------
 
     def action_copy_selection(self) -> None:
-        """Copy selected text to clipboard, or cancel agent if nothing selected."""
-        selected = self.screen.get_selected_text()
+        """Copy selected text to clipboard, or show quit hint."""
+        try:
+            selected = self.screen.get_selected_text()
+        except Exception:
+            selected = None
         if selected:
             self.copy_to_clipboard(selected)
-            self.screen.clear_selection()
+            try:
+                self.screen.clear_selection()
+            except Exception:
+                pass
             self.notify("Copied!", timeout=1.5)
         else:
-            # No selection — act as cancel (Ctrl+C default behavior)
-            self.action_cancel_agent()
+            # No selection — show quit hint (Esc stops the agent, not Ctrl+C)
+            self.notify("Use Ctrl+Q to quit", timeout=2.5)
 
     def action_cancel_agent(self) -> None:
         # Only handle Esc if agent is actually running — otherwise let it

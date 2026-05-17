@@ -48,8 +48,9 @@ class MessageViewer(ModalScreen):
 
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "dismiss", "close"),
-        Binding("ctrl+c", "copy_selected", "copy", priority=True),
+        Binding("ctrl+c", "copy_selected", "copy"),  # no priority — let TextArea try first
         Binding("ctrl+a", "select_all", "select all", priority=True),
+        Binding("ctrl+q", "quit_app", "quit"),
     ]
 
     DEFAULT_CSS = f"""
@@ -107,6 +108,9 @@ class MessageViewer(ModalScreen):
     def action_select_all(self) -> None:
         area = self.query_one("#viewer-area", TextArea)
         area.select_all()
+
+    def action_quit_app(self) -> None:
+        self.app.exit()
 
 
 # ── Feed entries ─────────────────────────────────────────────────────────────
