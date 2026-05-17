@@ -21,11 +21,15 @@ function run(cmd, args, opts = {}) {
   return spawnSync(cmd, args, { stdio: opts.silent ? 'pipe' : 'inherit', ...opts });
 }
 
+function runCapture(cmd, args) {
+  return spawnSync(cmd, args, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+}
+
 function findPython() {
   for (const py of ['python3.11', 'python3.12', 'python3.13', 'python3']) {
-    const r = run(py, ['--version'], { silent: true });
+    const r = runCapture(py, ['--version']);
     if (r.status === 0) {
-      const ver = (r.stdout.toString().trim() || r.stderr.toString().trim()).match(/(\d+)\.(\d+)/);
+      const ver = (r.stdout || r.stderr || '').match(/(\d+)\.(\d+)/);
       if (ver) {
         const major = parseInt(ver[1], 10);
         const minor = parseInt(ver[2], 10);
@@ -47,27 +51,34 @@ function ensureInstalled() {
     error('Install it first: sudo apt install python3.11 python3.11-venv');
     process.exit(1);
   }
+  log('Using:', python);
 
   if (!fs.existsSync(INSTALL_DIR)) {
     log('Cloning repository ...');
-    const r = run('git', ['clone', '--depth', '1', REPO, INSTALL_DIR], { silent: true });
+    const r = runCapture('git', ['clone', '--depth', '1', REPO, INSTALL_DIR]);
     if (r.status !== 0) {
-      error('git clone failed. Is git installed?');
+      error('git clone failed:', r.stderr);
       process.exit(1);
     }
   }
 
   if (!fs.existsSync(VENV_DIR)) {
     log('Creating virtual environment ...');
-    run(python, ['-m', 'venv', VENV_DIR], { silent: true });
+    run(python, ['-m', 'venv', VENV_DIR]);
+  }
+
+  log('Upgrading pip ...');
+  const pipUpgrade = runCapture(path.join(VENV_DIR, 'bin', 'python'), ['-m', 'pip', 'install', '--upgrade', 'pip']);
+  if (pipUpgrade.status !== 0) {
+    error('pip upgrade failed:', pipUpgrade.stderr);
   }
 
   log('Installing Python dependencies ...');
-  const pip = path.join(VENV_DIR, 'bin', 'pip');
-  run(python, [pip, 'install', '--upgrade', 'pip'], { silent: true });
-  const r = run(python, [pip, 'install', '-e', `${INSTALL_DIR}[all]`], { silent: true });
+  const r = runCapture(path.join(VENV_DIR, 'bin', 'python'), ['-m', 'pip', 'install', '-e', `${INSTALL_DIR}[all]`]);
   if (r.status !== 0) {
-    error('pip install failed.');
+    error('pip install failed:');
+    console.error(r.stdout);
+    console.error(r.stderr);
     process.exit(1);
   }
 
