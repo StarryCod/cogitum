@@ -93,7 +93,7 @@ curl -fsSL https://raw.githubusercontent.com/StarryCod/cogitum/master/scripts/in
 Or via **npm** (Node.js wrapper, installs Python backend automatically):
 
 ```bash
-npm install -g cogit
+npm install -g cogitum
 ```
 
 ### Windows — Manual install (PowerShell)
