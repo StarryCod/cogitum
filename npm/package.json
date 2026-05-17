@@ -1,14 +1,12 @@
 {
   "name": "cogitum",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Cogitum — sovereign agentic CLI (Linux/macOS installer wrapper)",
   "bin": {
     "cogit": "bin/cogit",
     "cog": "bin/cog"
   },
-  "scripts": {
-    "postinstall": "node scripts/postinstall.js"
-  },
+  "scripts": {},
   "os": ["linux", "darwin"],
   "engines": {
     "node": ">=16"

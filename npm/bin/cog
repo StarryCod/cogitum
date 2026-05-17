@@ -2,12 +2,79 @@
 const { spawnSync } = require('child_process');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
 
-const VENV_DIR = path.join(os.homedir(), '.local', 'share', 'cogitum', '.venv');
+const INSTALL_DIR = path.join(os.homedir(), '.local', 'share', 'cogitum');
+const VENV_DIR = path.join(INSTALL_DIR, '.venv');
 const COG = path.join(VENV_DIR, 'bin', 'cog');
+const REPO = 'https://github.com/StarryCod/cogitum.git';
 
-const result = spawnSync(COG, process.argv.slice(2), {
-  stdio: 'inherit',
-  env: process.env,
-});
+function log(...args) {
+  console.log('\x1b[32m[cogitum]\x1b[0m', ...args);
+}
+
+function error(...args) {
+  console.error('\x1b[31m[cogitum]\x1b[0m', ...args);
+}
+
+function run(cmd, args, opts = {}) {
+  return spawnSync(cmd, args, { stdio: opts.silent ? 'pipe' : 'inherit', ...opts });
+}
+
+function findPython() {
+  for (const py of ['python3.11', 'python3.12', 'python3.13', 'python3']) {
+    const r = run(py, ['--version'], { silent: true });
+    if (r.status === 0) {
+      const ver = (r.stdout.toString().trim() || r.stderr.toString().trim()).match(/(\d+)\.(\d+)/);
+      if (ver) {
+        const major = parseInt(ver[1], 10);
+        const minor = parseInt(ver[2], 10);
+        if (major > 3 || (major === 3 && minor >= 11)) return py;
+      }
+    }
+  }
+  return null;
+}
+
+function ensureInstalled() {
+  if (fs.existsSync(COG)) return true;
+
+  log('First run — installing Cogitum Python backend ...');
+
+  const python = findPython();
+  if (!python) {
+    error('Python 3.11+ is required but not found.');
+    error('Install it first: sudo apt install python3.11 python3.11-venv');
+    process.exit(1);
+  }
+
+  if (!fs.existsSync(INSTALL_DIR)) {
+    log('Cloning repository ...');
+    const r = run('git', ['clone', '--depth', '1', REPO, INSTALL_DIR], { silent: true });
+    if (r.status !== 0) {
+      error('git clone failed. Is git installed?');
+      process.exit(1);
+    }
+  }
+
+  if (!fs.existsSync(VENV_DIR)) {
+    log('Creating virtual environment ...');
+    run(python, ['-m', 'venv', VENV_DIR], { silent: true });
+  }
+
+  log('Installing Python dependencies ...');
+  const pip = path.join(VENV_DIR, 'bin', 'pip');
+  run(python, [pip, 'install', '--upgrade', 'pip'], { silent: true });
+  const r = run(python, [pip, 'install', '-e', `${INSTALL_DIR}[all]`], { silent: true });
+  if (r.status !== 0) {
+    error('pip install failed.');
+    process.exit(1);
+  }
+
+  log('Ready!');
+  return true;
+}
+
+ensureInstalled();
+const result = spawnSync(COG, process.argv.slice(2), { stdio: 'inherit', env: process.env });
 process.exit(result.status ?? 0);

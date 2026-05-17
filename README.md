@@ -90,11 +90,13 @@
 curl -fsSL https://raw.githubusercontent.com/StarryCod/cogitum/master/scripts/install.sh | bash
 ```
 
-Or via **npm** (Node.js wrapper, installs Python backend automatically):
+Or via **npm** (fast wrapper — Python backend installs on first run):
 
 ```bash
 npm install -g cogitum
 ```
+
+> ⚠️ **Do not use `sudo npm install -g`.** If you need elevated permissions, [fix npm permissions](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally) or use `npx cogitum` instead.
 
 ### Windows — Manual install (PowerShell)
 
@@ -184,6 +186,40 @@ cog
 - `memory` — Persistent key-value notes (`user.md` + `memory.md`) injected into every system prompt.
 - `skills` — Markdown skill library with YAML frontmatter, categories, fuzzy search.
 - `session_search` — Search and read past conversation sessions.
+
+---
+
+## 📦 Cogit — Smart Checkpoints (Built-in)
+
+Cogitum includes its own **git-like checkpoint system** called `cogit`. It is not a wrapper around git — it is a standalone, content-addressable snapshot engine designed specifically for AI agent workflows.
+
+### What it does
+
+| Command | Action |
+|---------|--------|
+| `cogit save [label] [path]` | Snapshot files, directories, or the entire project |
+| `cogit list` | Show all checkpoints with timestamp, label, and file count |
+| `cogit restore <index>` | Roll back to a previous checkpoint |
+| `cogit diff <index>` | See added / removed / modified files vs. now |
+| `cogit cleanup` | Delete old checkpoints, keep last 10 |
+
+### How it works
+
+- **Content-addressed storage** — File blobs are deduplicated by SHA; manifests store `{path → sha}` references.
+- **Project-scoped** — Checkpoints are keyed to a stable hash of the project directory; restore refuses to write into a mismatched path.
+- **Pre-restore safety** — `restore()` automatically saves a `__pre_restore__` snapshot of the current state before overwriting anything.
+- **Orphan deletion** — Restoring removes files that exist now but were absent in the checkpoint, so the working tree truly matches the saved state.
+
+### Auto-checkpoints — Agent Safety Net
+
+The agent **automatically creates a cogit checkpoint** before every destructive operation:
+
+- `write_file` — before overwriting an existing file
+- `edit_file` — before any find-and-replace
+- `terminal` — before running dangerous commands (`rm`, `git reset --hard`, `drop table`, package installs, etc.)
+- `cogit restore` — before rolling back (courtesy save)
+
+This means you can always say *"undo that"* — even if the agent made a mistake, you can revert to the exact state before the change.
 
 ---
 
