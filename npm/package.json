@@ -1,6 +1,6 @@
 {
   "name": "cogitum",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Cogitum — sovereign agentic CLI (Linux/macOS installer wrapper)",
   "bin": {
     "cogit": "bin/cogit",

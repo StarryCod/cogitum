@@ -73,12 +73,10 @@ function ensureInstalled() {
     error('pip upgrade failed:', pipUpgrade.stderr);
   }
 
-  log('Installing Python dependencies ...');
-  const r = runCapture(path.join(VENV_DIR, 'bin', 'python'), ['-m', 'pip', 'install', '-e', `${INSTALL_DIR}[all]`]);
+  log('Installing Python dependencies (this may take a minute) ...');
+  const r = run(path.join(VENV_DIR, 'bin', 'python'), ['-m', 'pip', 'install', '-e', `${INSTALL_DIR}[all]`]);
   if (r.status !== 0) {
-    error('pip install failed:');
-    console.error(r.stdout);
-    console.error(r.stderr);
+    error('pip install failed with exit code', r.status);
     process.exit(1);
   }
 
