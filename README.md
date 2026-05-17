@@ -30,8 +30,9 @@
 | 🧰 **15+ Built-in Tools** | Terminal, browser (Playwright), web search, file read/write/edit, git-style search, memory, skills, checkpoints, delegation, MCP servers. |
 | 🛡️ **Approval Layer** | Dangerous operations (`rm`, `git push`, package installs) pause for your approval. Per-tool risk levels. |
 | 💾 **Persistent Sessions** | Every conversation is auto-saved as JSONL. Resume anytime with `/resume`. Search across sessions. |
-| 🧠 **Memory & Skills** | Cross-session memory + reusable markdown skill library injected into the system prompt. |
+| 🧠 **Memory & Skills** | Cross-session memory + **82+ built-in skills** (coding, research, MLOps, red-teaming, smart-home…) injected into every system prompt. |
 | 📦 **Cogit Checkpoints** | One-command project snapshots before destructive edits. Restore, diff, garbage-collect. |
+| 🎯 **Self-Learning Skills** | The agent observes your workflow and **writes its own skills** via the `skills` tool — refining its expertise for your specific projects over time. |
 | 🤖 **Delegation Modes** | Spawn parallel worker agents or expert review boards (`security`, `scale`, `ux`, `frontend`…). |
 | 📡 **Telegram Gateway** | Run the same agent as a personal Telegram bot with streaming, inline keyboards, and media support. |
 | 🔌 **MCP Integration** | Connect external MCP servers (stdio / HTTP) — tools are auto-discovered and registered dynamically. |
@@ -153,6 +154,29 @@ cog setup
 - `memory` — Persistent key-value notes (`user.md` + `memory.md`) injected into every system prompt.
 - `skills` — Markdown skill library with YAML frontmatter, categories, fuzzy search.
 - `session_search` — Search and read past conversation sessions.
+
+---
+
+## 🎓 Skill Library — 82+ Built-in Skills
+
+Cogitum ships with **82+ pre-written skills** organized into categories. They are markdown files with YAML frontmatter, automatically injected into the system prompt so the agent knows how to handle specialized tasks:
+
+| Category | Example Skills |
+|----------|----------------|
+| **github** | PR workflow, issue triage, release management, code review |
+| **mlops** | Model deployment, training pipelines, monitoring, A/B testing |
+| **data-science** | EDA, feature engineering, visualization, statistical testing |
+| **creative** | Writing, storytelling, brainstorming, content strategy |
+| **productivity** | Meeting notes, todo management, calendar automation |
+| **red-teaming** | Adversarial testing, prompt injection checks, security audits |
+| **research** | Literature review, hypothesis testing, citation management |
+| **smart-home** | Device automation, scene scripting, energy optimization |
+| **autonomous-ai-agents** | Agent design patterns, tool chaining, self-reflection |
+| **custom** | Skills the agent **wrote itself** while working on your projects |
+
+**Self-Learning:** The agent can create, update, and delete skills via the `skills` tool. Over time it builds a **personalized knowledge base** tailored to your codebase, workflow, and preferences. Skills persist across sessions in `~/.config/cogitum/skills/`.
+
+---
 
 ### Advanced
 - `cogit` — Content-addressable project checkpoints. Save, list, restore, diff, cleanup.

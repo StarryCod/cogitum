@@ -30,3 +30,6 @@ cogitum = "cogitum.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["cogitum"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"cogitum/data" = "cogitum/data"

@@ -38,6 +38,7 @@ from .core.llm.loader import (
     load_settings,
     seed_default_config,
 )
+from cogitum.core.skills import seed_default_skills
 
 
 logger = logging.getLogger("cogitum.cli")
@@ -52,6 +53,7 @@ def _setup_command(args: argparse.Namespace) -> int:
     if getattr(args, "tty", False):
         return _setup_tty(args)
     seed_default_config(_PROVIDERS_PATH)
+    seed_default_skills()
     from .app import CogitumApp
     from .setup_flow import SetupScreen
 
@@ -635,6 +637,7 @@ def _tg_command(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def _tui_command(args: argparse.Namespace) -> int:
+    seed_default_skills()
     from .app import CogitumApp
     CogitumApp().run()
     return 0

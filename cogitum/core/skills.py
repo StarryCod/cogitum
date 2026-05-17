@@ -22,6 +22,25 @@ from dataclasses import dataclass
 
 _SKILLS_DIR = Path("~/.config/cogitum/skills").expanduser()
 
+# Default skills shipped with the package
+_DEFAULT_SKILLS_PACKAGE = Path(__file__).resolve().parent.parent / "data" / "skills"
+
+
+def seed_default_skills() -> None:
+    """Copy built-in skills to user config dir if it is empty."""
+    _SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    existing = list(_SKILLS_DIR.rglob("SKILL.md")) + list(_SKILLS_DIR.glob("*.md"))
+    if existing:
+        return  # user already has skills, never overwrite
+    if not _DEFAULT_SKILLS_PACKAGE.exists():
+        return
+    for src in _DEFAULT_SKILLS_PACKAGE.rglob("*"):
+        if src.is_file():
+            rel = src.relative_to(_DEFAULT_SKILLS_PACKAGE)
+            dst = _SKILLS_DIR / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
 
 @dataclass
 class SkillMeta:
