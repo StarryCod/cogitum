@@ -9,30 +9,31 @@ const VENV_DIR = path.join(INSTALL_DIR, '.venv');
 const COG = path.join(VENV_DIR, 'bin', 'cog');
 const REPO = 'https://github.com/StarryCod/cogitum.git';
 
-function log(...args) {
-  console.log('\x1b[32m[cogitum]\x1b[0m', ...args);
-}
+const G = '\x1b[32m';
+const R = '\x1b[31m';
+const Y = '\x1b[33m';
+const C = '\x1b[36m';
+const N = '\x1b[0m';
 
-function error(...args) {
-  console.error('\x1b[31m[cogitum]\x1b[0m', ...args);
-}
+function log(msg)  { console.log(`${G}⚔${N} ${msg}`); }
+function warn(msg) { console.log(`${Y}⚠${N} ${msg}`); }
+function err(msg)  { console.error(`${R}✗${N} ${msg}`); }
 
-function run(cmd, args, opts = {}) {
-  return spawnSync(cmd, args, { stdio: opts.silent ? 'pipe' : 'inherit', ...opts });
-}
-
-function runCapture(cmd, args) {
-  return spawnSync(cmd, args, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+function run(cmd, args, silent = false) {
+  return spawnSync(cmd, args, {
+    stdio: silent ? ['pipe', 'pipe', 'pipe'] : 'inherit',
+    encoding: 'utf-8',
+  });
 }
 
 function findPython() {
   for (const py of ['python3.11', 'python3.12', 'python3.13', 'python3']) {
-    const r = runCapture(py, ['--version']);
+    const r = run(py, ['--version'], true);
     if (r.status === 0) {
-      const ver = (r.stdout || r.stderr || '').match(/(\d+)\.(\d+)/);
-      if (ver) {
-        const major = parseInt(ver[1], 10);
-        const minor = parseInt(ver[2], 10);
+      const m = (r.stdout || r.stderr || '').match(/(\d+)\.(\d+)/);
+      if (m) {
+        const major = parseInt(m[1], 10);
+        const minor = parseInt(m[2], 10);
         if (major > 3 || (major === 3 && minor >= 11)) return py;
       }
     }
@@ -40,44 +41,70 @@ function findPython() {
   return null;
 }
 
-function ensureInstalled() {
+function checkDep(name) {
+  const r = run(path.join(VENV_DIR, 'bin', 'python'), ['-c', `import ${name}`], true);
+  return r.status === 0;
+}
+
+function install() {
   const python = findPython();
   if (!python) {
-    error('Python 3.11+ is required but not found.');
-    error('Install it first: sudo apt install python3.11 python3.11-venv');
+    err('Python 3.11+ is required but not found.');
+    err('Install it first: sudo apt install python3.11 python3.11-venv');
     process.exit(1);
   }
 
+  let fresh = false;
   if (!fs.existsSync(INSTALL_DIR)) {
-    log('First run — installing Cogitum Python backend ...');
-    log('Cloning repository ...');
-    const r = runCapture('git', ['clone', '--depth', '1', REPO, INSTALL_DIR]);
+    fresh = true;
+    log('First run — cloning Cogitum ...');
+    const r = run('git', ['clone', '--depth', '1', REPO, INSTALL_DIR]);
     if (r.status !== 0) {
-      error('git clone failed:', r.stderr);
+      err('git clone failed. Is git installed?');
       process.exit(1);
     }
-  } else {
-    log('Updating Cogitum ...');
-    runCapture('git', ['-C', INSTALL_DIR, 'pull', '--ff-only']);
   }
 
   if (!fs.existsSync(VENV_DIR)) {
+    fresh = true;
     log('Creating virtual environment ...');
-    run(python, ['-m', 'venv', VENV_DIR]);
+    const r = run(python, ['-m', 'venv', VENV_DIR]);
+    if (r.status !== 0) {
+      err('Failed to create venv');
+      process.exit(1);
+    }
   }
 
-  log('Installing / updating Python dependencies ...');
-  const venvPython = path.join(VENV_DIR, 'bin', 'python');
-  runCapture(venvPython, ['-m', 'pip', 'install', '--upgrade', 'pip']);
-  const r = run(venvPython, ['-m', 'pip', 'install', '-e', `${INSTALL_DIR}[all]`]);
+  const venvPy = path.join(VENV_DIR, 'bin', 'python');
+
+  if (!fresh) {
+    log('Updating Cogitum ...');
+    run('git', ['-C', INSTALL_DIR, 'fetch', '--depth', '1', 'origin', 'master']);
+    run('git', ['-C', INSTALL_DIR, 'reset', '--hard', 'origin/master']);
+  }
+
+  log('Installing Python dependencies ...');
+  run(venvPy, ['-m', 'pip', 'install', '--upgrade', 'pip']);
+  const r = run(venvPy, ['-m', 'pip', 'install', '-e', `${INSTALL_DIR}[all]`]);
   if (r.status !== 0) {
-    error('pip install failed with exit code', r.status);
+    err('pip install failed.');
     process.exit(1);
   }
 
-  return true;
+  if (!checkDep('tomlkit')) {
+    err('Installation verification failed — tomlkit missing.');
+    process.exit(1);
+  }
+
+  log('Ready!');
 }
 
-ensureInstalled();
+if (!fs.existsSync(COG)) {
+  install();
+} else if (!checkDep('tomlkit')) {
+  warn('Dependencies out of date — reinstalling ...');
+  install();
+}
+
 const result = spawnSync(COG, process.argv.slice(2), { stdio: 'inherit', env: process.env });
 process.exit(result.status ?? 0);
