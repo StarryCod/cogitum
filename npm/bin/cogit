@@ -41,25 +41,24 @@ function findPython() {
 }
 
 function ensureInstalled() {
-  if (fs.existsSync(COG)) return true;
-
-  log('First run — installing Cogitum Python backend ...');
-
   const python = findPython();
   if (!python) {
     error('Python 3.11+ is required but not found.');
     error('Install it first: sudo apt install python3.11 python3.11-venv');
     process.exit(1);
   }
-  log('Using:', python);
 
   if (!fs.existsSync(INSTALL_DIR)) {
+    log('First run — installing Cogitum Python backend ...');
     log('Cloning repository ...');
     const r = runCapture('git', ['clone', '--depth', '1', REPO, INSTALL_DIR]);
     if (r.status !== 0) {
       error('git clone failed:', r.stderr);
       process.exit(1);
     }
+  } else {
+    log('Updating Cogitum ...');
+    runCapture('git', ['-C', INSTALL_DIR, 'pull', '--ff-only']);
   }
 
   if (!fs.existsSync(VENV_DIR)) {
@@ -67,20 +66,15 @@ function ensureInstalled() {
     run(python, ['-m', 'venv', VENV_DIR]);
   }
 
-  log('Upgrading pip ...');
-  const pipUpgrade = runCapture(path.join(VENV_DIR, 'bin', 'python'), ['-m', 'pip', 'install', '--upgrade', 'pip']);
-  if (pipUpgrade.status !== 0) {
-    error('pip upgrade failed:', pipUpgrade.stderr);
-  }
-
-  log('Installing Python dependencies (this may take a minute) ...');
-  const r = run(path.join(VENV_DIR, 'bin', 'python'), ['-m', 'pip', 'install', '-e', `${INSTALL_DIR}[all]`]);
+  log('Installing / updating Python dependencies ...');
+  const venvPython = path.join(VENV_DIR, 'bin', 'python');
+  runCapture(venvPython, ['-m', 'pip', 'install', '--upgrade', 'pip']);
+  const r = run(venvPython, ['-m', 'pip', 'install', '-e', `${INSTALL_DIR}[all]`]);
   if (r.status !== 0) {
     error('pip install failed with exit code', r.status);
     process.exit(1);
   }
 
-  log('Ready!');
   return true;
 }
 
