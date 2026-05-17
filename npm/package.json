@@ -1,0 +1,24 @@
+{
+  "name": "cogit",
+  "version": "0.0.1",
+  "description": "Cogitum — sovereign agentic CLI (Linux/macOS installer wrapper)",
+  "bin": {
+    "cogit": "bin/cogit",
+    "cog": "bin/cog"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "os": ["linux", "darwin"],
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": ["cli", "ai", "agent", "terminal", "llm"],
+  "author": "OpenReason",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/StarryCod/cogitum.git"
+  },
+  "homepage": "https://github.com/StarryCod/cogitum#readme"
+}

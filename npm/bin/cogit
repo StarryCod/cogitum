@@ -1,0 +1,13 @@
+#!/usr/bin/env node
+const { spawnSync } = require('child_process');
+const path = require('path');
+const os = require('os');
+
+const VENV_DIR = path.join(os.homedir(), '.local', 'share', 'cogitum', '.venv');
+const COG = path.join(VENV_DIR, 'bin', 'cog');
+
+const result = spawnSync(COG, process.argv.slice(2), {
+  stdio: 'inherit',
+  env: process.env,
+});
+process.exit(result.status ?? 0);

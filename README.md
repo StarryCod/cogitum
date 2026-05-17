@@ -84,19 +84,49 @@
 
 ## 🚀 Quick Start
 
+### Linux / macOS — One-line install
+
 ```bash
-# Clone & install
-pip install -e ".[all]"
-
-# Or minimal (no vault/keyring/MCP)
-pip install -e .
-
-# Launch TUI
-cog
-
-# First-time setup
-cog setup
+curl -fsSL https://raw.githubusercontent.com/StarryCod/cogitum/master/scripts/install.sh | bash
 ```
+
+Or via **npm** (Node.js wrapper, installs Python backend automatically):
+
+```bash
+npm install -g cogit
+```
+
+### Windows — Manual install (PowerShell)
+
+```powershell
+# 1. Ensure Python 3.11+ is installed
+python --version
+
+# 2. Clone and install
+git clone https://github.com/StarryCod/cogitum.git $env:LOCALAPPDATA\cogitum
+cd $env:LOCALAPPDATA\cogitum
+python -m venv .venv
+.venv\Scripts\pip install -e ".[all]"
+
+# 3. Add to PATH
+# Add $env:LOCALAPPDATA\cogitum\.venv\Scripts to your PATH
+
+# 4. Run
+cog setup   # first-time wizard
+cog         # launch TUI
+```
+
+### From source
+
+```bash
+git clone https://github.com/StarryCod/cogitum.git
+cd cogitum
+pip install -e ".[all]"
+cog setup
+cog
+```
+
+> **Requirements:** Python 3.11+, Git. Optional: Node.js 16+ for npm install.
 
 ### Key Bindings (TUI)
 
