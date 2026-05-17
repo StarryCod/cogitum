@@ -1197,6 +1197,7 @@ class SetupScreen(Screen):
         ("subs", "Subscriptions"),
         ("default", "Default model"),
         ("telegram", "Telegram"),
+        ("mcp", "MCP servers"),
         ("vault", "Vault"),
         ("diag", "Diagnostics"),
     )
@@ -1299,6 +1300,9 @@ class SetupScreen(Screen):
             self._render_default(content)
         elif self._active == "telegram":
             self._render_telegram(content)
+        elif self._active == "mcp":
+            from .setup_mcp import render_mcp_section
+            render_mcp_section(content)
         elif self._active == "vault":
             self._render_vault(content)
         elif self._active == "diag":
@@ -1695,6 +1699,14 @@ class SetupScreen(Screen):
     @work(exclusive=True)
     async def _on_button(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
+
+        # MCP buttons (Add server / Edit / Test / Delete / Risk picker / etc.)
+        if bid.startswith("mcp-"):
+            from .setup_mcp import handle_mcp_button
+            handled = await handle_mcp_button(self, bid)
+            if handled:
+                self._render_section()
+            return
 
         if bid == "prov-add":
             existing = set(self._writer.providers().keys())

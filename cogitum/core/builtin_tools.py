@@ -86,6 +86,18 @@ def classify_danger(tool_name: str, arguments: dict) -> str:
 
     Returns the level as a string.
     """
+    # MCP tools: per-tool risk override from ~/.config/cogitum/mcp.toml
+    if tool_name.startswith("mcp_"):
+        try:
+            from cogitum.core.mcp import risk_for_mcp_tool
+            risk = risk_for_mcp_tool(tool_name)
+            if risk in ("low", "medium", "danger"):
+                return risk
+        except Exception:
+            pass
+        # Fallback: medium so unknown MCP tools require approval by default
+        return "medium"
+
     # Terminal commands need deeper analysis
     if tool_name == "terminal":
         cmd = arguments.get("command", "")
@@ -460,9 +472,11 @@ async def terminal(
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                start_new_session=True,
             )
             stdout, _ = await proc.communicate()
             output = stdout.decode(errors="replace").strip()
@@ -481,9 +495,11 @@ async def terminal(
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                start_new_session=True,
             )
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -990,23 +1006,45 @@ async def web_search(query: str, max_results: int = 8) -> str:
 
 @tool(tags=["web", "browser"])
 async def browser(action: str, url: str = "", selector: str = "", text: str = "", screenshot: bool = False) -> str:
-    """Control a headless browser for web interaction.
+    """Headless Chromium browser for live web interaction. Persistent session
+    across calls — cookies, login state, scroll position survive between actions.
+    A single page is reused; call action='close' when done to free resources.
 
-    Actions:
-      open       url=…             — navigate to URL (waits for DOM)
-      click      selector=…        — click element by CSS selector
-      type       selector=…, text= — fill input/textarea
-      text                          — extract visible body text (capped 8KB)
-      extract    selector=…        — inner_text of one element (capped 8KB)
-      links                         — list every <a> on the page (href + label)
-      act        text=<JS>         — run arbitrary page.evaluate(JS); JSON result
-      screenshot                    — save .png; returns absolute path
-      scroll     text=down|up|N    — scroll one viewport or N px
-      back / forward / reload       — history navigation
-      title / url                   — current title / current url
-      close                         — shut the browser, free resources
+    Use this for tasks that need a real browser:
+      • dynamic / JS-heavy pages where fetch_url returns empty HTML
+      • clicking through a flow (login, search results, pagination)
+      • extracting visible text after JS render
+      • running custom JS via 'act' to grab data
 
-    All actions reuse a single page so cookies/login persist between calls.
+    Typical workflow:
+      1) browser(action='open', url='https://example.com')
+      2) browser(action='text')                       — get readable text
+      3) browser(action='click', selector='button.go')
+      4) browser(action='screenshot')                 — save .png, returns path
+      5) browser(action='close')                      — free Chromium
+
+    Action reference:
+      open      — navigate to url=… (waits for DOM)
+      click     — click element matching selector=… (CSS)
+      type      — fill input/textarea: selector=…, text=…
+      text      — extract visible body text (capped 8KB)
+      extract   — innerText of one element by selector=…
+      links     — list every <a> on the page (href + label, max 200)
+      act       — run JS via page.evaluate(text=<JS>); JSON result
+      screenshot — save .png to a temp file; returns absolute path
+      scroll    — text='down'|'up'|'<pixels>' (default: down one viewport)
+      back / forward / reload — history navigation
+      title / url — current title / current url
+      close     — shut the browser, free resources
+
+    Requires playwright + chromium installed. If not installed, returns ERROR
+    with the install command.
+
+    action: which browser action to perform (enum: open|click|type|text|extract|links|act|screenshot|scroll|back|forward|reload|title|url|close)
+    url: URL to navigate to (required for action='open')
+    selector: CSS selector (required for action='click', 'type', 'extract')
+    text: text to type (for 'type'), JS expression (for 'act'), or scroll direction (for 'scroll')
+    screenshot: if true, also take a screenshot after the action completes
     """
     import json as _json
 

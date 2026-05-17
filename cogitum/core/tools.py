@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 import textwrap
 from dataclasses import dataclass, field
 from typing import Any, Callable, get_type_hints
@@ -76,6 +77,8 @@ def _build_schema(fn: Callable) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     required: list[str] = []
 
+    doc = fn.__doc__ or ""
+
     for name, param in sig.parameters.items():
         if name in ("self", "cls"):
             continue
@@ -84,11 +87,20 @@ def _build_schema(fn: Callable) -> dict[str, Any]:
         prop: dict[str, Any] = _py_type_to_json(annotation)
 
         # Pull description from param docstring convention: "param: description"
-        doc = fn.__doc__ or ""
+        # Also support enum hints:  "param: description (enum: a|b|c)"
         for line in doc.splitlines():
             stripped = line.strip()
             if stripped.startswith(f"{name}:"):
-                prop["description"] = stripped[len(name) + 1:].strip()
+                desc = stripped[len(name) + 1:].strip()
+                # extract trailing "(enum: a|b|c)" if present
+                m = re.search(r"\(enum:\s*([^)]+)\)\s*$", desc)
+                if m:
+                    values = [v.strip() for v in m.group(1).split("|") if v.strip()]
+                    if values:
+                        prop["enum"] = values
+                    desc = desc[: m.start()].strip()
+                if desc:
+                    prop["description"] = desc
                 break
 
         properties[name] = prop
@@ -101,6 +113,50 @@ def _build_schema(fn: Callable) -> dict[str, Any]:
         "properties": properties,
         "required": required,
     }
+
+
+def _build_description(fn: Callable) -> str:
+    """Build a rich tool description from the full docstring.
+
+    Strips per-parameter lines (``param: description (enum: …)``) since those
+    are emitted as JSON-schema fields, but keeps the full multi-line summary
+    so the LLM sees actions, examples, and pitfalls — not just the first line.
+    """
+    raw = fn.__doc__ or ""
+    if not raw.strip():
+        return fn.__name__
+
+    sig = inspect.signature(fn)
+    param_names = {
+        n for n in sig.parameters if n not in ("self", "cls")
+    }
+
+    out: list[str] = []
+    for line in textwrap.dedent(raw).splitlines():
+        stripped = line.strip()
+        # Skip lines that are pure parameter docs (consumed by _build_schema).
+        if any(stripped.startswith(f"{p}:") for p in param_names):
+            continue
+        out.append(line.rstrip())
+
+    # Trim leading/trailing blank lines, collapse runs of >1 blank.
+    while out and not out[0].strip():
+        out.pop(0)
+    while out and not out[-1].strip():
+        out.pop()
+
+    cleaned: list[str] = []
+    blank = False
+    for line in out:
+        if not line.strip():
+            if blank:
+                continue
+            blank = True
+        else:
+            blank = False
+        cleaned.append(line)
+
+    return "\n".join(cleaned).strip() or fn.__name__
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +238,7 @@ class ToolRegistry:
         """Decorator: @registry.tool() or @registry.tool(name='x', tags=['fs'])"""
         def decorator(fn: Callable) -> Callable:
             _name = name or fn.__name__
-            _desc = description or textwrap.dedent(fn.__doc__ or "").strip().split("\n")[0]
+            _desc = description or _build_description(fn)
             spec = ToolSpec(
                 name=_name,
                 description=_desc,

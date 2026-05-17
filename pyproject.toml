@@ -21,7 +21,8 @@ dependencies = [
 [project.optional-dependencies]
 keyring = ["keyring>=25"]
 vault = ["cryptography>=42", "argon2-cffi>=23"]
-all = ["keyring>=25", "cryptography>=42", "argon2-cffi>=23"]
+mcp = ["mcp>=1.0"]
+all = ["keyring>=25", "cryptography>=42", "argon2-cffi>=23", "mcp>=1.0"]
 
 [project.scripts]
 cog = "cogitum.cli:main"

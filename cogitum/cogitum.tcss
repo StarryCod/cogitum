@@ -120,6 +120,19 @@ Screen {
     background: #16140F;
 }
 
+/* MCP-specific card tweaks (scoped to .mcp-card so other Setup sections
+   keep their existing button/action layout untouched). */
+.mcp-card .card-actions {
+    height: 3;
+    margin: 0;
+    padding: 0;
+}
+.mcp-card .card-actions Button {
+    margin: 0 1 0 0;
+    min-width: 8;
+    height: 3;
+}
+
 /* ───── Status bar ────────────────────────────────────────────────────── */
 #statusbar {
     height: 1;

@@ -60,6 +60,7 @@ class ProcessManager:
             stderr=asyncio.subprocess.STDOUT,
             stdin=asyncio.subprocess.PIPE,
             cwd=cwd,
+            start_new_session=True,
         )
 
         bp = BackgroundProcess(pid=proc.pid, proc=proc, command=command)

@@ -182,7 +182,7 @@ class AgentBlock(Static):
         """Render accumulated text as Rich Markdown with header."""
         from rich.console import Group
         header = self._header()
-        if not self._text.strip():
+        if not self._text:
             return header
         md = Markdown(self._text, code_theme="monokai")
         return Group(header, md)
@@ -212,8 +212,17 @@ class AgentBlock(Static):
             self.parent.scroll_end(animate=False)
 
     def append_delta(self, delta: str) -> None:
-        """Append streaming text delta and schedule a debounced re-render."""
+        """Append streaming text delta and schedule a debounced re-render.
+
+        The first delta renders immediately so single-character responses
+        (or very short ones) don't stay invisible until the debounce fires.
+        """
+        was_empty = not self._text
         self._text += delta
+        if was_empty:
+            # First delta — render right away so the user sees something
+            self._do_render()
+            return
         if not self._render_pending:
             self._render_pending = True
             self._render_timer = self.set_timer(
@@ -298,10 +307,57 @@ class ToolCallCard(Static):
         super().__init__(self._build(), **kw)
 
     def _build(self) -> Text:
+        # MCP tools: render a generic card with the [MCP server.tool] header
+        if self._tool_name.startswith("mcp_"):
+            return self._build_mcp()
         special = self._SPECIAL_TOOLS.get(self._tool_name)
         if special:
             return self._build_special(special)
         return self._build_generic()
+
+    def _build_mcp(self) -> Text:
+        """Render a Cogitum-styled card for an MCP tool call."""
+        # Pull `server` and `tool` out of the registered name
+        # (mcp_<server>_<tool>). Fall back to raw if parsing fails.
+        server = "mcp"
+        bare_tool = self._tool_name
+        try:
+            from cogitum.core.mcp.discovery import parse_tool_id
+            parsed = parse_tool_id(self._tool_name)
+            if parsed:
+                server, bare_tool = parsed
+        except Exception:
+            pass
+
+        out = Text()
+        out.append("  ┌─", style=COPPER)
+        out.append(" ⬢ ", style=f"bold {GOLD_HI}")
+        out.append("MCP", style=f"bold {GOLD}")
+        out.append(f"  {server}", style=GOLD_HI)
+        out.append(f".{bare_tool}", style=GOLD)
+        if self._call_id:
+            out.append(f"  {self._call_id[:8]}", style=MUTED)
+        out.append("\n")
+
+        # Args (compact)
+        self._render_args(out)
+
+        # Result / status
+        if self._result is not None:
+            self._render_result(out)
+        elif self._preparing:
+            out.append("  │ ", style=COPPER)
+            out.append("preparing…", style=MUTED)
+            out.append("\n")
+        else:
+            out.append("  │ ", style=COPPER)
+            out.append("⏳ running…", style=MUTED)
+            out.append("\n")
+
+        out.append("  └─", style=COPPER)
+        if out.plain.endswith("\n"):
+            out.right_crop(1)
+        return out
 
     def _build_special(self, spec: tuple) -> Text:
         glyph, label, status_text = spec

@@ -40,6 +40,7 @@ COMMANDS: list[CommandDef] = [
     CommandDef("model", "Switch model: /model <id>", aliases=["mod"]),
     CommandDef("new", "Clear history, start fresh", aliases=["n", "reset"]),
     CommandDef("tools", "List available tools", aliases=["t"]),
+    CommandDef("mcp", "MCP servers: /mcp [list|reload|risk]", aliases=[]),
     CommandDef("clear", "Clear feed display", aliases=["cls", "c"]),
     CommandDef("help", "Show all commands", aliases=["h", "?"]),
     CommandDef("quit", "Exit Cogitum", aliases=["q", "exit"], shortcut="Ctrl+Q"),
@@ -159,6 +160,15 @@ class ComposerArea(TextArea):
     class HistoryRequest(Message):
         direction: int  # -1 = older, +1 = newer
 
+    @dataclass
+    class EmptyUpRequest(Message):
+        """Sent when user presses ↑ on an empty composer (first line).
+
+        Used by the App to pop a queued message back for editing,
+        bypassing normal history browsing.
+        """
+        pass
+
     async def _on_key(self, event: events.Key) -> None:
         """Intercept Enter BEFORE TextArea processes it."""
         if event.key == "enter":
@@ -174,11 +184,14 @@ class ComposerArea(TextArea):
             self.insert("\n")
             return
         elif event.key == "up":
-            # If on first line and text is empty or cursor at start → history
+            # If on first line → history (or queue-pop when empty)
             if self.cursor_location[0] == 0:
                 event.prevent_default()
                 event.stop()
-                self.post_message(self.HistoryRequest(direction=-1))
+                if not self.text.strip():
+                    self.post_message(self.EmptyUpRequest())
+                else:
+                    self.post_message(self.HistoryRequest(direction=-1))
                 return
         elif event.key == "down":
             # If on last line → history forward

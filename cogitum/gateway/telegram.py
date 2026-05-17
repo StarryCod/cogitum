@@ -51,6 +51,7 @@ from .tg_formatter import (
     markdown_to_tg,
     split_message,
 )
+from .tg_stream import TgStream
 
 log = logging.getLogger("cogitum.gateway.telegram")
 
@@ -227,6 +228,7 @@ class CogitumBot:
         self.agent: Agent | None = None
         self._running = False
         self._offset = self._load_offset()
+        self._mcp_watcher_task: asyncio.Task | None = None
         # Dedup ring for callback_query IDs. Telegram retries unanswered
         # callbacks for ~15s, so a stale handler crash can otherwise cause
         # the same approval click to fire 2-3 times. We remember the last
@@ -324,6 +326,55 @@ class CogitumBot:
             config=AgentConfig(model=current_model, platform="telegram"),
         )
 
+        # MCP: connect configured servers and register their tools
+        try:
+            from cogitum.core.mcp import (
+                discover_mcp_tools,
+                load_config,
+                start_watcher,
+            )
+            from cogitum.core.mcp.sampling import build_sampling_callback
+            mcp_cfg = load_config()
+            cb = build_sampling_callback(self.mesh, current_model)
+            result = discover_mcp_tools(REGISTRY, mcp_cfg, sampling_callback=cb)
+            connected = sum(
+                1 for s in result.get("servers", []) if s.get("state") == "connected"
+            )
+            log.info(
+                "MCP: %d servers connected, %d tools registered",
+                connected, len(result.get("registered", [])),
+            )
+            for s in result.get("servers", []):
+                if s.get("state") != "connected":
+                    log.warning(
+                        "MCP server %r %s: %s",
+                        s.get("name"), s.get("state"), s.get("last_error"),
+                    )
+
+            # Start the mcp.toml file watcher so external edits
+            # (cog mcp add/remove/risk, hand edits, TUI Setup) are picked up
+            # without restarting the daemon.
+            async def _mcp_rebuild() -> None:
+                fresh_cfg = load_config()
+                fresh_cb = build_sampling_callback(
+                    self.mesh, self.agent.cfg.model if self.agent else current_model
+                )
+                rs = discover_mcp_tools(REGISTRY, fresh_cfg, sampling_callback=fresh_cb)
+                added = len(rs.get("registered", []))
+                removed = len(rs.get("unregistered", []))
+                connected = sum(
+                    1 for s in rs.get("servers", []) if s.get("state") == "connected"
+                )
+                log.info(
+                    "MCP watcher reconcile: %d connected, +%d tools, -%d tools",
+                    connected, added, removed,
+                )
+
+            self._mcp_watcher_task = start_watcher(_mcp_rebuild)
+        except Exception as e:
+            log.warning("MCP discovery failed (non-fatal): %s", e)
+            self._mcp_watcher_task = None
+
         self._running = True
         log.info("Gateway ready. Model: %s. Polling...", current_model)
 
@@ -355,6 +406,17 @@ class CogitumBot:
             await self.api.close()
             if self.mesh:
                 await self.mesh.aclose()
+            if self._mcp_watcher_task is not None:
+                self._mcp_watcher_task.cancel()
+                try:
+                    await self._mcp_watcher_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            try:
+                from cogitum.core.mcp import shutdown_mcp
+                shutdown_mcp()
+            except Exception:
+                log.debug("mcp shutdown failed", exc_info=True)
 
     async def stop(self) -> None:
         self._running = False
@@ -433,6 +495,32 @@ class CogitumBot:
             except Exception:
                 log.debug("swallowed exception", exc_info=True)
 
+        # Reconcile MCP: re-read mcp.toml and add/remove/reconnect servers.
+        # `discover_mcp_tools` is fully idempotent — same call as startup.
+        mcp_summary = ""
+        try:
+            from cogitum.core.mcp import discover_mcp_tools, load_config
+            from cogitum.core.mcp.sampling import build_sampling_callback
+            mcp_cfg = load_config()
+            cb = build_sampling_callback(new_mesh, current_model)
+            result = discover_mcp_tools(REGISTRY, mcp_cfg, sampling_callback=cb)
+            connected = sum(
+                1 for s in result.get("servers", []) if s.get("state") == "connected"
+            )
+            added = len(result.get("registered", []))
+            removed = len(result.get("unregistered", []))
+            mcp_summary = (
+                f"\nMCP: `{connected}` servers"
+                + (f" · `+{added}`" if added else "")
+                + (f" · `-{removed}`" if removed else "")
+            )
+            log.info(
+                "MCP reconcile: %d servers connected, +%d tools, -%d tools",
+                connected, added, removed,
+            )
+        except Exception as e:
+            log.warning("MCP reconcile failed: %s", e)
+
         if not silent and chat_id is not None:
             n_models = len(new_mesh.list_resolved())
             n_providers = len(new_mesh.providers)
@@ -441,7 +529,8 @@ class CogitumBot:
                 f"⟳ *Reloaded*\n"
                 f"Providers: `{n_providers}`\n"
                 f"Models: `{n_models}`\n"
-                f"Current: `{escape_md(current_model)}`",
+                f"Current: `{escape_md(current_model)}`"
+                f"{mcp_summary}",
             )
 
     # ── Polling ──────────────────────────────────────────────────────────────
@@ -889,46 +978,14 @@ class CogitumBot:
         text_buf = ""
         tool_results_shown = 0
 
-        # Message IDs for editing
-        thinking_msg_id: int | None = None
-        status_msg_id: int | None = None
-        status_lines: list[str] = []
-
-        async def _send_or_edit_thinking(buf: str) -> None:
-            """Send or update thinking spoiler message."""
-            nonlocal thinking_msg_id
-            if not buf.strip() or not self.config.show_thinking:
-                return
-            formatted = format_thinking(buf)
-            if thinking_msg_id is None:
-                resp = await self.api.send_message(chat_id, formatted)
-                if resp.get("ok"):
-                    thinking_msg_id = resp["result"]["message_id"]
-            else:
-                await self.api.edit_message(chat_id, thinking_msg_id, formatted)
-
-        async def _send_or_edit_status(line: str) -> None:
-            """Send or update tool status message."""
-            nonlocal status_msg_id, status_lines, _last_typing
-            status_lines.append(line)
-            text = "\n".join(status_lines[-10:])
-            if status_msg_id is None:
-                resp = await self.api.send_message(chat_id, text, parse_mode="MarkdownV2")
-                if resp.get("ok"):
-                    status_msg_id = resp["result"]["message_id"]
-            else:
-                await self.api.edit_message(chat_id, status_msg_id, text, parse_mode="MarkdownV2")
-            # Refresh typing
-            now = time.time()
-            if now - _last_typing > 4:
-                await self.api.send_typing(chat_id)
-                _last_typing = now
+        # Streaming surface: handles debounce, dedup, edit retries, splits.
+        stream = TgStream(self.api, chat_id)
 
         try:
-            # Drain events until done — mirror TUI order:
-            # 1. Thinking (spoiler, updated live)
-            # 2. Tool calls (status message, edited)
-            # 3. Final response (separate message)
+            # Drain events until done.
+            #   thinking → spoiler rail (live edits)
+            #   tool calls → status rail (rolling tail, live edits)
+            #   text → response rail (live stream, auto-split at 3800 chars)
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=180)
@@ -937,32 +994,41 @@ class CogitumBot:
 
                 if isinstance(event, AgentThinking):
                     thinking_buf += event.delta
+                    if self.config.show_thinking:
+                        await stream.update_thinking(
+                            thinking_buf, formatter=format_thinking
+                        )
 
                 elif isinstance(event, AgentText):
                     text_buf += event.delta
+                    # Live-stream the response body so users see typing.
+                    await stream.update_response(
+                        text_buf, formatter=markdown_to_tg
+                    )
 
                 elif isinstance(event, AgentToolCall):
-                    # Flush thinking before first tool call
-                    if thinking_buf.strip() and thinking_msg_id is None:
-                        await _send_or_edit_thinking(thinking_buf)
                     if not event.preliminary and self.config.show_tool_calls:
                         line = format_tool_call(event.tool_name, event.arguments)
-                        await _send_or_edit_status(line)
+                        await stream.push_status(line)
 
                 elif isinstance(event, AgentToolResult):
                     if self.config.show_tool_calls:
-                        line = format_tool_result(event.tool_name, event.result, event.error)
-                        await _send_or_edit_status(line)
+                        line = format_tool_result(
+                            event.tool_name, event.result, event.error
+                        )
+                        await stream.push_status(line)
                     tool_results_shown += 1
-                    # Check if result contains a file path (screenshot, etc.)
+                    # Auto-attach screenshot output.
                     if "screenshot saved to" in event.result.lower():
-                        import re
-                        path_match = re.search(r"(/\S+\.png)", event.result)
+                        import re as _re
+                        path_match = _re.search(r"(/\S+\.png)", event.result)
                         if path_match and Path(path_match.group(1)).exists():
-                            await self.api.send_photo(chat_id, path_match.group(1))
+                            await stream.attach_photo(path_match.group(1))
 
                 elif isinstance(event, AgentApprovalRequest):
-                    # Show approval buttons to user (40K-styled glyphs).
+                    # Force pending edits before injecting an approval prompt
+                    # so the buttons land below the latest status, not above.
+                    await stream.flush()
                     danger_rune = "▲" if event.danger_level == "danger" else "◈"
                     from cogitum.gateway.tg_formatter import escape_md
                     from cogitum.core.builtin_tools import _tool_subtitle_for_approval
@@ -986,21 +1052,14 @@ class CogitumBot:
                     break
 
                 elif isinstance(event, AgentError):
+                    await stream.flush()
                     await self.api.send_message(
                         chat_id, f"✕ *Error:* {escape_md(event.message)}"
                     )
                     break
 
-            # If thinking was never sent (no tool calls happened), send it now
-            if thinking_buf.strip() and thinking_msg_id is None and self.config.show_thinking:
-                await _send_or_edit_thinking(thinking_buf)
-
-            # Send main response (always last, like in TUI)
-            if text_buf.strip():
-                formatted = markdown_to_tg(text_buf.strip())
-                chunks = split_message(formatted)
-                for chunk in chunks:
-                    await self.api.send_message(chat_id, chunk)
+            # Commit any debounced edits still in flight before we move on.
+            await stream.flush()
 
             # Update history
             if task.done() and not task.cancelled() and not task.exception():

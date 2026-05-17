@@ -158,6 +158,13 @@ class AgentToolResult:
 
 
 @dataclass
+class AgentInjected:
+    """A queued user message was consumed by the agent mid-turn."""
+    text: str
+    turn: int = 0
+
+
+@dataclass
 class AgentDone:
     turns: int
     usage: Usage | None = None
@@ -169,7 +176,7 @@ class AgentError:
     exc: BaseException | None = None
 
 
-AgentEvent = AgentText | AgentThinking | AgentRetry | AgentToolCall | AgentApprovalRequest | AgentToolResult | AgentDone | AgentError
+AgentEvent = AgentText | AgentThinking | AgentRetry | AgentToolCall | AgentApprovalRequest | AgentToolResult | AgentInjected | AgentDone | AgentError
 
 # ---------------------------------------------------------------------------
 # Agent config
@@ -664,10 +671,7 @@ class Agent:
                         except asyncio.QueueEmpty:
                             break
                         messages.append(Message(role="user", parts=[TextPart(text=injected_text)]))
-                        await q.put(AgentText(
-                            delta=f"\n▸ injected: {injected_text[:60]}{'…' if len(injected_text) > 60 else ''}\n",
-                            turn=iteration,
-                        ))
+                        await q.put(AgentInjected(text=injected_text, turn=iteration))
 
             await q.put(AgentDone(turns=iteration, usage=total_usage))
 

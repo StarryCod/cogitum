@@ -164,6 +164,19 @@ class ApprovalWidget(Widget, can_focus=True):
     def _describe_tool(self) -> str:
         """Generate compact description of what the tool will do."""
         args = self.arguments
+        if self.tool_name.startswith("mcp_"):
+            try:
+                from cogitum.core.mcp.discovery import parse_tool_id
+                parsed = parse_tool_id(self.tool_name)
+                if parsed:
+                    server, bare = parsed
+                    arg_summary = ", ".join(
+                        f"{k}={str(v)[:40]}" for k, v in list(args.items())[:3]
+                    )
+                    return f"MCP {server}.{bare}  {arg_summary}"[:140]
+            except Exception:
+                pass
+            return f"MCP tool · {str(args)[:80]}"
         if self.tool_name == "terminal":
             cmd = args.get("command", "")
             mode = args.get("mode", args.get("kind", "normal"))

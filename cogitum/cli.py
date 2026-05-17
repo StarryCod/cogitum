@@ -704,6 +704,10 @@ def build_parser() -> argparse.ArgumentParser:
     sec_sub.add_parser("path", help="print the secrets.env file path")
     sec.set_defaults(func=_secret_command)
 
+    # MCP servers
+    from .cli_mcp import add_mcp_subparser
+    add_mcp_subparser(sub)
+
     return p
 
 

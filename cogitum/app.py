@@ -11,7 +11,7 @@ from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.widgets import Static
 
-from .core.agent import Agent, AgentApprovalRequest, AgentConfig, AgentDone, AgentError, AgentRetry, AgentText, AgentThinking, AgentToolCall, AgentToolResult
+from .core.agent import Agent, AgentApprovalRequest, AgentConfig, AgentDone, AgentError, AgentInjected, AgentRetry, AgentText, AgentThinking, AgentToolCall, AgentToolResult
 from .core.builtin_tools import *
 from .widgets.approval import ApprovalWidget
 from .core.llm.loader import load_mesh, load_settings, write_settings
@@ -109,11 +109,33 @@ class CogitumApp(App):
         self._bg_tasks.add(bg)
         bg.add_done_callback(self._bg_tasks.discard)
 
+        # MCP file watcher: react to external mcp.toml edits (cog mcp ...,
+        # hand edits) without requiring a Cogitum restart. The watcher just
+        # invokes the same _discover_mcp_tools we already use.
+        try:
+            from .core.mcp import start_watcher
+
+            async def _mcp_rebuild() -> None:
+                self._discover_mcp_tools(self.query_one("#feed-pane", Feed))
+
+            self._mcp_watcher_task = start_watcher(_mcp_rebuild)
+            self._bg_tasks.add(self._mcp_watcher_task)
+            self._mcp_watcher_task.add_done_callback(self._bg_tasks.discard)
+        except Exception:
+            log.debug("mcp watcher start failed", exc_info=True)
+            self._mcp_watcher_task = None
+
     async def on_unmount(self) -> None:
         """Clean up resources on exit."""
         mesh = getattr(self, "mesh", None)
         if mesh is not None:
             await mesh.aclose()
+        # Tear down MCP sessions
+        try:
+            from .core.mcp import shutdown_mcp
+            shutdown_mcp()
+        except Exception:
+            log.debug("mcp shutdown failed", exc_info=True)
 
     async def _auto_refresh_models(self) -> None:
         """Run model discovery against all configured providers in background.
@@ -188,6 +210,8 @@ class CogitumApp(App):
                 registry=REGISTRY,
                 config=AgentConfig(model=self.current_model),
             )
+            # MCP: connect configured servers, register their tools into REGISTRY
+            self._discover_mcp_tools(feed)
             # Update inspector with real data
             inspector = self.query_one("#inspector-widget", Inspector)
             model_name = self.current_model or "—"
@@ -210,6 +234,159 @@ class CogitumApp(App):
             self.query_one("#statusbar", StatusBar).set_model(model)
         except Exception:
             log.debug("swallowed exception", exc_info=True)
+
+    def _discover_mcp_tools(self, feed) -> None:
+        """
+        Connect to MCP servers configured in ~/.config/cogitum/mcp.toml,
+        discover their tools, and register them into REGISTRY with the
+        prefix ``mcp_{server}_{tool}``.
+
+        Idempotent: re-running on mesh reload only adds new servers/tools.
+        """
+        try:
+            from .core.mcp import discover_mcp_tools, load_config
+            from .core.mcp.sampling import build_sampling_callback
+        except Exception:
+            log.debug("mcp module import failed", exc_info=True)
+            return
+
+        try:
+            cfg = load_config()
+        except Exception as e:
+            feed.append_error(f"mcp config error: {e}", meta="mcp")
+            return
+
+        if not cfg.servers:
+            return
+
+        sampling_cb = None
+        if self.mesh and self.current_model:
+            try:
+                sampling_cb = build_sampling_callback(self.mesh, self.current_model)
+            except Exception:
+                log.debug("mcp sampling callback build failed", exc_info=True)
+
+        try:
+            result = discover_mcp_tools(REGISTRY, cfg, sampling_callback=sampling_cb)
+        except Exception as e:
+            feed.append_error(f"mcp discovery failed: {e}", meta="mcp")
+            return
+
+        servers = result.get("servers", []) or []
+        registered = result.get("registered", []) or []
+        unregistered = result.get("unregistered", []) or []
+        connected = sum(1 for s in servers if s.get("state") == "connected")
+        failed = [s for s in servers if s.get("state") == "failed"]
+
+        if connected or registered or unregistered:
+            parts = [f"mcp · {connected}/{len(servers)} servers"]
+            if registered:
+                parts.append(f"+{len(registered)} tools")
+            if unregistered:
+                parts.append(f"-{len(unregistered)} tools")
+            feed.append_system(" · ".join(parts), "mcp")
+        if failed:
+            for s in failed:
+                feed.append_error(
+                    f"mcp server {s['name']!r} failed: {s.get('last_error') or 'unknown'}",
+                    meta="mcp",
+                )
+
+    def _handle_mcp_command(self, rest: str, feed) -> None:
+        """
+        Handle the `/mcp` slash command.
+
+        Subcommands:
+          /mcp                  — show servers + tools + risks
+          /mcp list             — same as above
+          /mcp reload           — re-read mcp.toml and connect new servers
+          /mcp risk <srv> <tool> <low|medium|danger>
+                                — set per-tool risk live (no restart needed)
+        """
+        try:
+            from .core.mcp import load_config, save_config, mcp_status, discovery
+            from .core.mcp.config import VALID_RISKS
+        except Exception as e:
+            feed.append_error(f"mcp module unavailable: {e}", meta="mcp")
+            return
+
+        parts = rest.split() if rest else []
+        action = parts[0].lower() if parts else "list"
+
+        if action in ("list", "ls", ""):
+            cfg = load_config()
+            statuses = {s["name"]: s for s in mcp_status()}
+            if not cfg.servers:
+                feed.append_system(
+                    "no MCP servers configured · use `cog mcp add <name>` or "
+                    "the Setup → MCP section",
+                    "mcp",
+                )
+                return
+            lines = [f"MCP · default risk: {cfg.default_risk}"]
+            for name, srv in cfg.servers.items():
+                st = statuses.get(name, {})
+                state = st.get("state", "unknown")
+                tcount = st.get("tool_count", 0)
+                target = (
+                    f"{srv.command} {' '.join(srv.args)}".strip()
+                    if srv.transport == "stdio"
+                    else (srv.url or "<no url>")
+                )
+                lines.append(f"  • {name} [{state}] {tcount} tools — {target}")
+                if srv.risks:
+                    risks = ", ".join(f"{t}={r}" for t, r in srv.risks.items())
+                    lines.append(f"      risks: {risks}")
+            feed.append_system("\n".join(lines), "mcp")
+            return
+
+        if action == "reload":
+            try:
+                cfg = load_config()
+                # Update live config so risk_for_mcp_tool sees changes
+                discovery._LIVE_CONFIG = cfg  # type: ignore[attr-defined]
+                # Connect any newly-added servers (idempotent)
+                self._discover_mcp_tools(feed)
+                feed.append_system(
+                    f"mcp reloaded · {len(cfg.servers)} servers in config",
+                    "mcp",
+                )
+            except Exception as e:
+                feed.append_error(f"mcp reload failed: {e}", meta="mcp")
+            return
+
+        if action == "risk":
+            if len(parts) != 4:
+                feed.append_system(
+                    "usage: /mcp risk <server> <tool> <low|medium|danger>",
+                    "mcp",
+                )
+                return
+            srv_name, tool_name, level = parts[1], parts[2], parts[3].lower()
+            if level not in VALID_RISKS:
+                feed.append_error(f"level must be one of {VALID_RISKS}", meta="mcp")
+                return
+            cfg = load_config()
+            if srv_name not in cfg.servers:
+                feed.append_error(f"no server named {srv_name!r}", meta="mcp")
+                return
+            cfg.servers[srv_name].risks[tool_name] = level
+            try:
+                save_config(cfg)
+                # Hot-reload live config so classify_danger picks up the change
+                discovery._LIVE_CONFIG = cfg  # type: ignore[attr-defined]
+                feed.append_system(
+                    f"{srv_name}.{tool_name} risk = {level} (saved & live)",
+                    "mcp",
+                )
+            except Exception as e:
+                feed.append_error(f"save failed: {e}", meta="mcp")
+            return
+
+        feed.append_system(
+            f"unknown /mcp action {action!r} — try: list, reload, risk",
+            "mcp",
+        )
 
     # ------------------------------------------------------------------
     # actions
@@ -274,12 +451,18 @@ class CogitumApp(App):
 
     def _on_setup_close(self, _result: object) -> None:
         # Reload mesh + settings + agent so providers/models/default_model
-        # changes from the wizard take effect immediately.
+        # changes from the wizard take effect immediately. _load_mesh_async
+        # also calls _discover_mcp_tools which now reconciles fully — added,
+        # removed, disabled, or reconfigured MCP servers all sync up here
+        # without needing a Cogitum restart.
         self._load_mesh_async()
-        self.query_one("#feed-pane", Feed).append_system(
-            f"config reloaded — {len(self.mesh.list_resolved()) if self.mesh else 0} models available",
-            "setup closed",
+        feed = self.query_one("#feed-pane", Feed)
+        msg = (
+            f"config reloaded — "
+            f"{len(self.mesh.list_resolved()) if self.mesh else 0} models, "
+            f"{sum(1 for n in REGISTRY.names() if n.startswith('mcp_'))} MCP tools"
         )
+        feed.append_system(msg, "setup closed")
 
     def _on_model_picked(self, resolved: ResolvedModel | None) -> None:
         if resolved is None:
@@ -361,19 +544,14 @@ class CogitumApp(App):
             self._run_agent(text, feed)
         )
 
-    @on(ComposerArea.HistoryRequest)
-    def _on_history_for_queue(self, event: ComposerArea.HistoryRequest) -> None:
-        """Arrow up with empty input while agent running → pop last queued message back to input."""
-        if event.direction != -1:
-            return
-        # Only intercept if agent is running and there are queued messages
+    @on(ComposerArea.EmptyUpRequest)
+    def _on_empty_up_for_queue(self, event: ComposerArea.EmptyUpRequest) -> None:
+        """Empty composer + ↑ while agent running → pop last queued message back for editing."""
         if not self._pending_messages:
             return
         if not self._agent_task or self._agent_task.done():
             return
         area = self.query_one("#composer-area", ComposerArea)
-        if area.text.strip():
-            return  # don't override if user is typing something
         # Pop last queued message back into composer
         text = self._pending_messages.pop()
         self.query_one("#queue-bar", QueueBar).pop_last()
@@ -468,6 +646,36 @@ class CogitumApp(App):
                         waiting = feed.append_waiting()
                     waiting.set_status(label)
 
+                elif isinstance(event, AgentInjected):
+                    # A queued message was consumed mid-turn — remove from
+                    # _pending_messages so it isn't re-sent after AgentDone.
+                    try:
+                        self._pending_messages.remove(event.text)
+                    except ValueError:
+                        pass
+                    queue_bar = self.query_one("#queue-bar", QueueBar)
+                    queue_bar.clear()
+                    for msg in self._pending_messages:
+                        queue_bar.add(msg)
+                    # Render the injected message as a standalone user bubble,
+                    # then close the current agent block so the response
+                    # starts fresh in a new block.
+                    feed.append_user(event.text)
+                    if agent_block is not None:
+                        agent_block.finish_streaming()
+                        agent_block = None
+                    if thinking_block is not None:
+                        thinking_block.finish()
+                        thinking_block = None
+                    # Kill any lingering waiting indicator from the previous
+                    # turn so it doesn't stick around when the agent starts
+                    # responding to the injected message.
+                    if waiting is not None:
+                        waiting.stop()
+                        waiting = None
+                    # Show a fresh waiting indicator for the new response.
+                    waiting = feed.append_waiting()
+
                 elif isinstance(event, AgentToolCall):
                     # Stop waiting on first tool call
                     if waiting is not None:
@@ -536,6 +744,9 @@ class CogitumApp(App):
                         waiting.set_status("thinking…")
 
                 elif isinstance(event, AgentDone):
+                    if waiting is not None:
+                        waiting.stop()
+                        waiting = None
                     if thinking_block is not None:
                         thinking_block.finish()
                     if agent_block is not None:
@@ -664,20 +875,16 @@ class CogitumApp(App):
         except Exception as exc:
             feed.append_error(str(exc), meta="agent")
 
-        # Sync: remove from _pending_messages any items that were already
-        # injected by the agent mid-turn (they were consumed from inject_queue).
-        # Whatever remains in _pending_messages but NOT in inject_queue was consumed.
-        remaining_in_inject = []
+        # Drain inject_queue so unconsumed messages don't leak into the next
+        # turn.  _pending_messages is already kept in sync by AgentInjected
+        # events that fire whenever the agent consumes a queued message.
         while not self._inject_queue.empty():
             try:
-                remaining_in_inject.append(self._inject_queue.get_nowait())
+                self._inject_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        # Only messages still in inject_queue were NOT consumed by agent
-        # (e.g. agent finished without tool calls after they were queued).
-        # Those are the ones we need to process as separate turns.
-        self._pending_messages = remaining_in_inject
-        # Update QueueBar to reflect actual remaining
+
+        # Refresh QueueBar to match current _pending_messages
         queue_bar = self.query_one("#queue-bar", QueueBar)
         queue_bar.clear()
         for msg in self._pending_messages:
@@ -831,11 +1038,16 @@ class CogitumApp(App):
             feed.append_system(f"{len(names)} tools: {', '.join(names)}", "tools")
             return
 
+        if cmd == "mcp":
+            self._handle_mcp_command(rest, feed)
+            return
+
         if cmd == "help":
             feed.append_system(
                 "/setup — provider wizard · /models — pick model · "
                 "/model <id> — direct switch · /new — clear history · "
-                "/tools — list tools · /clear — clear feed · /quit — exit",
+                "/tools — list tools · /mcp — manage MCP servers · "
+                "/clear — clear feed · /quit — exit",
                 "commands",
             )
             return
