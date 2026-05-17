@@ -37,10 +37,15 @@ async def main() -> None:
         sid2 = store.create_session("demo-session-2", title="Debug: queue race", model="claude-sonnet-4-5")
         store.append_message(sid2, Message(role="user", parts=[TextPart(text="Fix the queue race condition")]))
 
+    # Screen size tuned for 1920×1080 aspect ratio (16:9).
+    # Textual cells are ~12.3×25.5 px in SVG export.
+    # cols/rows ≈ 3.68 gives a 16:9 viewBox.
+    _COLS, _ROWS = 158, 43
+
     app = CogitumApp()
 
     # --- 1. Main window --------------------------------------------------
-    async with app.run_test(size=(140, 44)) as pilot:
+    async with app.run_test(size=(_COLS, _ROWS)) as pilot:
         await pilot.pause()
         await pilot.pause()
         svg = app.export_screenshot(title="COGITUM — Mk.V")
@@ -49,9 +54,8 @@ async def main() -> None:
 
     # --- 2. Model picker -------------------------------------------------
     app2 = CogitumApp()
-    async with app2.run_test(size=(140, 44)) as pilot:
+    async with app2.run_test(size=(_COLS, _ROWS)) as pilot:
         await pilot.pause()
-        # Open model picker
         app2.push_screen(ModelPicker(app2.mesh, current=app2.current_model))
         await pilot.pause()
         await pilot.pause()
@@ -61,7 +65,7 @@ async def main() -> None:
 
     # --- 3. Setup wizard -------------------------------------------------
     app3 = CogitumApp()
-    async with app3.run_test(size=(140, 44)) as pilot:
+    async with app3.run_test(size=(_COLS, _ROWS)) as pilot:
         await pilot.pause()
         app3.push_screen(SetupScreen())
         await pilot.pause()
@@ -72,7 +76,7 @@ async def main() -> None:
 
     # --- 4. Session picker -----------------------------------------------
     app4 = CogitumApp()
-    async with app4.run_test(size=(140, 44)) as pilot:
+    async with app4.run_test(size=(_COLS, _ROWS)) as pilot:
         await pilot.pause()
         app4.push_screen(SessionPicker())
         await pilot.pause()
