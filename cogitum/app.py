@@ -1064,7 +1064,9 @@ class CogitumApp(App):
             return
 
         if cmd == "godmode":
-            from .core.godmode import get_preset, list_presets, DEFAULT_PRESET
+            from .core.godmode import (
+                get_preset, list_presets, auto_pick_preset, DEFAULT_PRESET,
+            )
             # Remember the current system prompt the first time we enable
             # godmode in this session so /godmode off restores exactly
             # what the user had — not the AgentConfig class default
@@ -1072,13 +1074,19 @@ class CogitumApp(App):
             if not hasattr(self, "_pre_godmode_system"):
                 self._pre_godmode_system: str | None = None
 
-            if not rest or rest == "on":
-                preset_name = DEFAULT_PRESET
+            current_model = getattr(self, "current_model", None) or ""
+
+            if not rest or rest == "on" or rest == "auto":
+                preset_name = auto_pick_preset(current_model)
                 preset = get_preset(preset_name)
                 if self._pre_godmode_system is None:
                     self._pre_godmode_system = self._agent.cfg.system
                 self._agent.cfg.system = preset
-                feed.append_system(f"godmode: {preset_name} — enabled", "godmode")
+                feed.append_system(
+                    f"godmode: {preset_name} — enabled "
+                    f"(auto-picked for {current_model or 'unknown model'})",
+                    "godmode",
+                )
             elif rest == "off":
                 if self._pre_godmode_system is not None:
                     self._agent.cfg.system = self._pre_godmode_system
@@ -1088,8 +1096,10 @@ class CogitumApp(App):
                     feed.append_system("godmode: already off", "godmode")
             elif rest == "list":
                 names = ", ".join(list_presets())
+                auto_name = auto_pick_preset(current_model)
                 feed.append_system(
-                    f"godmode presets: {names}  ·  default: {DEFAULT_PRESET}",
+                    f"godmode presets: {names}  ·  "
+                    f"auto for {current_model or '(no model)'}: {auto_name}",
                     "godmode",
                 )
             elif rest == "status":
