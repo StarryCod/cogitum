@@ -1,6 +1,6 @@
 {
   "name": "cogitum",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Cogitum — sovereign agentic CLI. Imperial Fists colorway. Cross-platform npm wrapper.",
   "bin": {
     "cog": "bin/cog.js",

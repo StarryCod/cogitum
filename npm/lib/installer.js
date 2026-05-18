@@ -209,7 +209,21 @@ function ensureClone() {
   fs.mkdirSync(dir, { recursive: true });
 
   if (fs.existsSync(path.join(dir, '.git'))) {
-    return; // Already cloned.
+    // Repo already cloned. Sync with origin so a stale clone (left
+    // over from a previous npm-package version, or from a manual
+    // git clone the user did months ago) doesn't make the new
+    // wrapper run against ancient code.
+    log('Existing clone found — syncing with origin/' + BRANCH + ' ...');
+    let r = run('git', ['-C', dir, 'fetch', '--all', '--quiet']);
+    if (r.status !== 0) {
+      warn('git fetch failed; proceeding with whatever is on disk.');
+      return;
+    }
+    r = run('git', ['-C', dir, 'reset', '--hard', `origin/${BRANCH}`, '--quiet']);
+    if (r.status !== 0) {
+      warn('git reset failed; proceeding with whatever is on disk.');
+    }
+    return;
   }
 
   log(`Cloning Cogitum to ${dir} ...`);
