@@ -394,10 +394,12 @@ class LegionTreeScreen(ModalScreen[None]):
             return
 
         # Spacer between L0 and the L1 row — pure padding, no connectors.
-        # Earlier iteration tried real box-drawing branch lines but they
-        # never aligned cleanly across font widths and Textual's centred
-        # layout, and looked worse than a clean gap. Per user feedback
-        # we removed them entirely.
+        # Box-drawing branch lines (┌─┴─┐ etc.) never align cleanly
+        # across font widths and Textual's centred layout: the trunk
+        # vertical drop and the branch midpoint drift relative to the
+        # cards as soon as cards reflow, so the connectors point at
+        # nothing. A single empty line reads better than misaligned
+        # ASCII art.
         area.mount(Static(" ", classes="legion-spacer"))
 
         # ── L1 row + L2 stacks ────────────────────────────────────

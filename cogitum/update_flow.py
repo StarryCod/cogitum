@@ -2,50 +2,48 @@
 cogitum.update_flow
 ~~~~~~~~~~~~~~~~~~~
 
-`cog update` — self-update flow with a small Textual UI.
+`cog update` — single-card, full-screen self-update flow.
 
-What it does, in order:
+Layout (one card spanning the entire viewport):
 
-  1. Show a card "checking origin/master…" while it probes the
-     remote ``pyproject.toml`` (4s timeout, no cache so the user's
-     deliberate `cog update` always sees fresh data).
-  2. If installed == latest → "Cogitum is up to date" and exit.
-  3. If newer is available, show the version diff and ask to
-     proceed (Enter / [Y] = yes, Esc / [N] = no).
-  4. On confirm: detect the install root, run the right upgrade
-     command (`git pull --ff-only` for npm-style installs that
-     keep the repo at ``%LOCALAPPDATA%\\cogitum`` or
-     ``~/.local/share/cogitum``; `git pull --ff-only` for source
-     clones too — both layouts are .git checkouts, the difference
-     is just where the dir sits).
-  5. Stream stdout/stderr from the upgrade process line-by-line
-     into a scrolling log pane.
-  6. On success, prompt "Restart Cogitum to apply" and exit 0.
-     On failure, surface the error and exit 1.
+  ┌──────────────── ⚔  COGITUM  UPDATE ────────────────┐
+  │                                                     │
+  │           current  0.3.0   →   latest  0.4.0        │
+  │                                                     │
+  │   ████████████████████░░░░░░░░░░░░░░░░░░░  56%      │
+  │                                                     │
+  │   running ›  Resolving deltas: 100% (4/4), done.    │
+  │                                                     │
+  │                    [   Close   ]                    │
+  └─────────────────────────────────────────────────────┘
 
-Why a separate flow / Textual screen rather than printing to
-stdout? Two reasons:
+The single bottom output line replaces itself on every new line
+from `git pull` — feels like a live ticker, no log spam.
 
-  * The user explicitly asked for a "красивая менюшка с прогрессом
-    которая сверяет последний коммит и локальную версию и делает
-    обновление и потом просит перезапустить Cogitum". Cogitum's
-    aesthetic is the TUI; a plain stdout output would feel out of
-    register.
-  * Streaming subprocess output through the agent's existing
-    rendering primitives (round-bordered card, gold text, status
-    glyphs) keeps the look unified.
+Phases the same card walks through:
 
-Why standalone Textual app instead of a modal inside the main
-Cogitum app? `cog update` runs from a fresh process — there's no
-main app to mount a modal *into*. A standalone `App` is the right
-shape for one-shot CLI screens.
+  1. checking      — probe origin/master, progress 5 %
+  2. up-to-date    — green status, single Close button, exit 0
+  3. ready         — newer found, [Upgrade now] [Cancel]
+  4. upgrading     — progress bar advances on each git stage,
+                     ticker line shows current git output
+  5. success       — "✓ Restart Cogitum to apply", Close
+  6. error         — "✗ <reason>", Close, exit 1
+
+Why one card and one ticker line: a single self-replacing line
+forces us to surface only the informative output, and reads
+dramatically calmer than a scrolling pane of git noise.
+
+Why standalone Textual app: `cog update` runs in its own process
+(no main Cogitum app to mount a modal into).
 """
 from __future__ import annotations
 
 import asyncio
 import os
-import shutil
+import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
@@ -53,8 +51,8 @@ from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, Static
+from textual.containers import Center, Horizontal, Vertical
+from textual.widgets import Button, ProgressBar, Static
 
 from .core.update_check import (
     UpdateInfo, _fetch_latest_version, detect_install_method, is_newer,
@@ -71,35 +69,46 @@ from .design import (
 
 
 def _find_update_root() -> Path | None:
-    """Return the .git checkout root that should be `git pull`-ed.
-
-    Order:
-      1. ``COGITUM_HOME`` env var (set by the npm wrapper).
-      2. The directory containing this Python package's ``__file__``,
-         walking up until we find a ``.git`` directory or run out of
-         parents. Covers source clones (``~/Cogitum``) AND the npm
-         wrapper's clone (``~/.local/share/cogitum``,
-         ``%LOCALAPPDATA%\\cogitum``, …).
-
-    Returns ``None`` if no .git root is found — in that case the
-    update flow surfaces a "can't determine install location" error
-    and asks the user to upgrade manually.
-    """
+    """Return the .git checkout root that should be `git pull`-ed."""
     env_home = os.environ.get("COGITUM_HOME")
     if env_home:
         p = Path(env_home)
         if (p / ".git").is_dir():
             return p
-
     try:
         import cogitum
         start = Path(cogitum.__file__).resolve().parent
     except Exception:
         return None
-
     for cand in (start, *start.parents):
         if (cand / ".git").is_dir():
             return cand
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# git output → progress hint
+# ─────────────────────────────────────────────────────────────────────────
+#
+# git porcelain doesn't emit machine-readable progress, but its
+# stdout/stderr lines have predictable shapes. We map common stages to
+# coarse percentages so the bar advances meaningfully on each line.
+
+_GIT_STAGE_PROGRESS: list[tuple[re.Pattern, int]] = [
+    (re.compile(r"^remote:\s*Counting objects"), 30),
+    (re.compile(r"^remote:\s*Compressing objects"), 45),
+    (re.compile(r"^Receiving objects"), 65),
+    (re.compile(r"^Resolving deltas"), 80),
+    (re.compile(r"^Updating "), 90),
+    (re.compile(r"^Fast-forward"), 95),
+    (re.compile(r"\bdone\b\s*$"), 95),
+]
+
+
+def _progress_for_line(line: str) -> int | None:
+    for pat, pct in _GIT_STAGE_PROGRESS:
+        if pat.search(line):
+            return pct
     return None
 
 
@@ -111,50 +120,65 @@ def _find_update_root() -> Path | None:
 class _UpdateApp(App[int]):
     """One-shot Textual app for `cog update`. Returns exit code."""
 
-    DEFAULT_CSS = """
+    CSS = """
     Screen { background: #0E0E11; }
 
+    /* Outer wrapper: center one card horizontally, fill height. */
     #shell {
-        align: center top;
+        align: center middle;
         padding: 2 4;
         height: 100%;
+        width: 100%;
     }
 
+    /* The single card — fills almost the entire viewport. */
     #card {
-        width: 80;
-        max-width: 100%;
-        padding: 1 2;
+        width: 100%;
+        height: 100%;
+        max-width: 120;
+        max-height: 32;
+        padding: 2 4;
         background: #161618;
         border: round #A8732D;
         color: #E6E1CF;
-    }
-    #title  { color: #F5C24A; text-style: bold; height: 1; }
-    #status { color: #C8C2A8; height: auto; padding-top: 1; }
-
-    #version-row {
-        height: auto; padding-top: 1; padding-bottom: 1;
+        layout: vertical;
     }
 
-    #log-card {
-        width: 80;
-        max-width: 100%;
-        height: 14;
-        margin-top: 1;
-        background: #1A1A1D;
-        border: round #2A2620;
-        color: #C8C2A8;
-        padding: 1 2;
-    }
-    #log-title { color: #F5C24A; text-style: bold; height: 1; }
-    #log-body { padding-top: 1; }
+    #title       { color: #F5C24A; text-style: bold; height: 1; text-align: center; }
+    #subtitle    { color: #9C957D; height: 1; padding-top: 1; text-align: center; }
+    #version-row { height: auto; padding-top: 2; padding-bottom: 1; text-align: center; color: #E6E1CF; }
+    #status      { height: auto; padding-top: 1; text-align: center; }
 
-    #actions {
+    /* Progress bar lane — give the bar full width, center the % readout. */
+    #progress-lane {
         height: 3;
-        padding-top: 1;
+        padding-top: 2;
         align: center middle;
     }
+    ProgressBar { width: 100%; }
+    ProgressBar > Bar { width: 1fr; }
+    ProgressBar > PercentageStatus { color: #F5C24A; }
 
-    #foot { padding-top: 1; height: 1; color: #7A5A1A; text-align: center; }
+    #ticker {
+        height: 2;
+        padding-top: 2;
+        text-align: center;
+        color: #C8C2A8;
+    }
+
+    /* Action row pinned to the bottom of the card. */
+    #actions {
+        dock: bottom;
+        height: 5;
+        align: center middle;
+        padding: 1 0;
+    }
+    #actions Button {
+        min-width: 20;
+        height: 3;
+        content-align: center middle;
+        margin: 0 1;
+    }
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
@@ -174,32 +198,34 @@ class _UpdateApp(App[int]):
     def compose(self) -> ComposeResult:
         with Vertical(id="shell"):
             with Vertical(id="card"):
-                yield Static("⚔ COGITUM UPDATE", id="title")
-                yield Static("Checking origin/master…", id="status")
+                yield Static("⚔  COGITUM  UPDATE", id="title")
+                yield Static("checking origin/master…", id="subtitle")
                 yield Static("", id="version-row")
+                yield Static("", id="status")
+                with Center(id="progress-lane"):
+                    yield ProgressBar(total=100, show_eta=False, id="progress")
+                yield Static("", id="ticker")
                 with Horizontal(id="actions"):
-                    pass  # buttons mounted dynamically once we know state
-            with VerticalScroll(id="log-card"):
-                yield Static("── Output ──", id="log-title")
-                yield Static("", id="log-body")
-            yield Static("Esc close", id="foot")
+                    pass
 
     async def on_mount(self) -> None:
+        self._set_progress(5)
         self.run_worker(self._check_for_updates(), exclusive=True)
 
     # --- check phase ---------------------------------------------------
 
     async def _check_for_updates(self) -> None:
         from . import __version__ as installed
+        self._set_ticker("contacting raw.githubusercontent…")
         latest = await _fetch_latest_version()
         if latest is None:
-            self._set_status(
-                "Could not reach origin/master.\n"
-                "Check your network and try again.", error=True)
-            self._exit_code = 1
-            self._mount_close_button()
+            self._show_error(
+                "Could not reach origin/master. Check your network "
+                "and try `cog update` again."
+            )
             return
 
+        self._set_progress(15)
         info = UpdateInfo(
             current=installed,
             latest=latest,
@@ -207,60 +233,42 @@ class _UpdateApp(App[int]):
             install_method=detect_install_method(),
         )
         self._info = info
+        self._set_version_row(info)
 
         if not info.newer:
-            self._set_status(
-                f"Cogitum is up to date.  ({installed})", ok=True)
-            row = self.query_one("#version-row", Static)
-            row.update(self._render_version_row(info))
+            self._set_progress(100)
+            self._set_subtitle("Cogitum is up to date.", style=OK, bold=True)
+            self._set_ticker(f"installed = {installed}    ·    master = {latest}")
             self._mount_close_button()
             return
 
+        # Newer version found → check we have a viable .git root.
         self._update_root = _find_update_root()
         if self._update_root is None:
-            self._set_status(
-                "Found a newer version, but could not determine where "
+            self._show_error(
+                "Found a newer version, but couldn't determine where "
                 "Cogitum is installed (no .git in the package's parent "
-                "tree). Run `npm install -g cogitum` manually.",
-                error=True)
-            row = self.query_one("#version-row", Static)
-            row.update(self._render_version_row(info))
-            self._exit_code = 1
-            self._mount_close_button()
+                "tree). Run `npm install -g cogitum` manually."
+            )
             return
 
-        # Found new version + viable .git root → offer to upgrade.
-        self._set_status(
-            f"A newer version is available.\n"
-            f"Will run: git pull --ff-only  in  {self._update_root}",
-            ok=False)
-        row = self.query_one("#version-row", Static)
-        row.update(self._render_version_row(info))
-        self._mount_upgrade_button()
-
-    def _render_version_row(self, info: UpdateInfo) -> Text:
-        out = Text()
-        out.append("current  ", style=TXT_DIM)
-        out.append(info.current, style=TXT)
-        out.append("    →    ", style=GOLD_DIM)
-        out.append("latest  ", style=TXT_DIM)
-        if info.newer:
-            out.append(info.latest or "?", style=f"bold {OK}")
-        else:
-            out.append(info.latest or "?", style=TXT)
-        return out
+        self._set_progress(20)
+        self._set_subtitle("A newer version is available.", style=GOLD_HI, bold=True)
+        self._set_ticker(f"will run  git pull --ff-only  in  {self._update_root}")
+        self._mount_upgrade_buttons()
 
     # --- upgrade phase -------------------------------------------------
 
     async def _run_upgrade(self) -> None:
         assert self._update_root is not None
         self._busy = True
-        self._set_status("Pulling latest from origin/master…")
         self._clear_actions()
+        self._set_subtitle("upgrading…", style=GOLD_HI, bold=True)
+        self._set_progress(25)
+        self._set_ticker("starting git pull --ff-only…")
 
-        # Disable git pager just in case the user's global config has
-        # one — pagers hang when run with no tty.
-        env = {**os.environ, "GIT_PAGER": "cat", "PAGER": "cat"}
+        env = {**os.environ, "GIT_PAGER": "cat", "PAGER": "cat",
+               "GIT_TERMINAL_PROMPT": "0"}
 
         proc = await asyncio.create_subprocess_exec(
             "git", "pull", "--ff-only", "origin", "master",
@@ -269,56 +277,90 @@ class _UpdateApp(App[int]):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
-        log = self.query_one("#log-body", Static)
-        accumulated: list[str] = []
 
-        async def _drain() -> None:
-            assert proc.stdout is not None
-            async for raw in proc.stdout:
-                line = raw.decode("utf-8", "replace").rstrip()
-                if not line:
-                    continue
-                accumulated.append(line)
-                # Keep the log pane to the last 200 lines so a noisy
-                # pull can't blow up the widget.
-                if len(accumulated) > 200:
-                    del accumulated[: len(accumulated) - 200]
-                log.update("\n".join(accumulated))
+        # Stream stdout, mapping each new line to the ticker + progress hint.
+        # Last raw line of any kind is also kept so the error path can
+        # surface it if the pull fails.
+        last_line = ""
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", "replace").rstrip()
+            if not line:
+                continue
+            last_line = line
+            self._set_ticker(line)
+            hint = _progress_for_line(line)
+            if hint is not None:
+                self._set_progress(hint)
 
-        await _drain()
         rc = await proc.wait()
 
         if rc == 0:
-            self._set_status(
-                "✓ Pull succeeded.\n"
-                "Restart Cogitum to apply the new version.", ok=True)
+            self._set_progress(100)
+            self._set_subtitle(
+                "✓ pulled. Restart Cogitum to apply.", style=OK, bold=True)
+            self._set_ticker(f"updated to {self._info.latest if self._info else '?'}")
             self._exit_code = 0
         else:
-            self._set_status(
-                f"✗ git pull failed (exit {rc}). See output above.",
-                error=True)
+            self._show_error(
+                f"git pull failed (exit {rc})", detail=last_line or "(no output)")
             self._exit_code = 1
 
         self._busy = False
         self._mount_close_button()
 
-    # --- action helpers ------------------------------------------------
+    # --- helpers ------------------------------------------------------
 
-    def _set_status(self, text: str, *, ok: bool = False, error: bool = False) -> None:
+    def _show_error(self, headline: str, detail: str = "") -> None:
+        self._set_progress(100)
+        self._set_subtitle(headline, style=RUST, bold=True)
+        if detail:
+            self._set_ticker(detail)
+        self._exit_code = 1
+        self._mount_close_button()
+
+    def _set_subtitle(self, text: str, *, style: str = TXT_DIM, bold: bool = False) -> None:
+        node = self.query_one("#subtitle", Static)
+        s = f"bold {style}" if bold else style
+        node.update(Text(text, style=s))
+
+    def _set_version_row(self, info: UpdateInfo) -> None:
+        node = self.query_one("#version-row", Static)
+        out = Text()
+        out.append("current  ", style=TXT_DIM)
+        out.append(info.current, style=TXT)
+        out.append("    →    ", style=GOLD_DIM)
+        out.append("latest  ", style=TXT_DIM)
+        out.append(info.latest or "?", style=f"bold {OK if info.newer else TXT}")
+        node.update(out)
+
+    def _set_status(self, text: str, *, style: str = TXT) -> None:
         node = self.query_one("#status", Static)
-        if error:
-            node.update(Text(text, style=RUST))
-        elif ok:
-            node.update(Text(text, style=OK))
-        else:
-            node.update(Text(text, style=TXT))
+        node.update(Text(text, style=style))
+
+    def _set_ticker(self, line: str) -> None:
+        node = self.query_one("#ticker", Static)
+        # Trim very long lines so the ticker row stays single-line.
+        if len(line) > 200:
+            line = line[:197] + "…"
+        out = Text()
+        out.append("›  ", style=GOLD_DIM)
+        out.append(line, style=TXT_DIM)
+        node.update(out)
+
+    def _set_progress(self, pct: int) -> None:
+        try:
+            bar = self.query_one("#progress", ProgressBar)
+            bar.update(progress=max(0, min(100, pct)))
+        except Exception:
+            pass
 
     def _clear_actions(self) -> None:
         actions = self.query_one("#actions", Horizontal)
         for child in list(actions.children):
             child.remove()
 
-    def _mount_upgrade_button(self) -> None:
+    def _mount_upgrade_buttons(self) -> None:
         self._clear_actions()
         actions = self.query_one("#actions", Horizontal)
         actions.mount(Button("Upgrade now", id="btn-upgrade", variant="primary"))
@@ -329,7 +371,7 @@ class _UpdateApp(App[int]):
         actions = self.query_one("#actions", Horizontal)
         actions.mount(Button("Close", id="btn-close", variant="primary"))
 
-    # --- button handlers ----------------------------------------------
+    # --- button + key bindings -----------------------------------------
 
     @on(Button.Pressed, "#btn-upgrade")
     def _on_upgrade(self) -> None:
@@ -340,17 +382,12 @@ class _UpdateApp(App[int]):
     def _on_close(self) -> None:
         self.exit(self._exit_code)
 
-    # --- key bindings -------------------------------------------------
-
     def action_abort(self) -> None:
         if self._busy:
             return  # don't yank the rug while git is running
         self.exit(self._exit_code)
 
     def action_primary(self) -> None:
-        # Enter behaves as the primary action for whichever phase
-        # we're in: confirm upgrade if the upgrade button is mounted,
-        # close otherwise.
         try:
             actions = self.query_one("#actions", Horizontal)
             for ch in actions.children:
@@ -370,14 +407,13 @@ class _UpdateApp(App[int]):
 def run() -> int:
     """Launch the update Textual app, return its exit code.
 
-    Falls back to a plain-text path if Textual fails to start (e.g.
-    no terminal, dumb pipe, missing capabilities). Plain-text path
-    just runs the same logic and prints linearly — keeps `cog update`
-    usable from CI / scripts.
+    Falls back to a plain-text path if Textual fails to start (no
+    terminal, dumb pipe, missing capabilities). Plain-text path runs
+    the same logic and prints linearly so `cog update` stays usable
+    from CI / scripts.
     """
     if not _can_use_textual():
         return _run_headless()
-
     try:
         return int(_UpdateApp().run() or 0)
     except Exception as e:
@@ -386,7 +422,6 @@ def run() -> int:
 
 
 def _can_use_textual() -> bool:
-    """Heuristic: stdout is a TTY and we have a non-dumb terminal."""
     import sys
     if not sys.stdout.isatty():
         return False
@@ -396,29 +431,24 @@ def _can_use_textual() -> bool:
 
 
 def _run_headless() -> int:
-    """No-TUI fallback. Same logic, plain prints."""
     from . import __version__ as installed
-
     print(f"⚔ Cogitum update — current: {installed}")
     print("checking origin/master …", flush=True)
-
     latest = asyncio.run(_fetch_latest_version())
     if latest is None:
         print("✗ could not reach origin/master")
         return 1
-
     print(f"latest: {latest}")
     if not is_newer(latest, installed):
         print("✓ Cogitum is up to date")
         return 0
-
     root = _find_update_root()
     if root is None:
         print("✗ could not find .git checkout — run `npm install -g cogitum` manually")
         return 1
-
     print(f"running: git pull --ff-only  (cwd={root})")
-    env = {**os.environ, "GIT_PAGER": "cat", "PAGER": "cat"}
+    env = {**os.environ, "GIT_PAGER": "cat", "PAGER": "cat",
+           "GIT_TERMINAL_PROMPT": "0"}
     rc = subprocess.call(
         ["git", "pull", "--ff-only", "origin", "master"],
         cwd=str(root), env=env,
