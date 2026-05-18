@@ -50,7 +50,13 @@ class HRule(Static):
 
 
 class CogitumApp(App):
-    CSS_PATH = "cogitum.tcss"
+    # Theme-aware CSS: rendered once per process from
+    # cogitum.tcss.template + the active theme's token map.
+    # CSS (a class attr) bakes the rendered string in at class
+    # definition time; CSS_PATH would require an on-disk file we'd
+    # have to keep in sync with the active theme.
+    from .tcss_render import render_tcss as _render_tcss
+    CSS = _render_tcss()
     TITLE = "COGITUM"
     SUB_TITLE = "forge mark vii"
 

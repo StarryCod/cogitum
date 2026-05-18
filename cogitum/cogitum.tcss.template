@@ -1,9 +1,18 @@
-/* Cogitum — Imperial Fists colorway, single warm tonal palette.
-   Charcoal canvas · gold accents · bronze details · rust for errors. */
+/* Cogitum — theme-aware TCSS template.
+
+   Hex literals are replaced by cogitum.tcss_render at app startup
+   from the active theme's token map (themes.py). DO NOT edit the
+   generated file in place — edit this template, then `cog` will
+   regenerate the .tcss on next launch.
+
+   Substitution syntax: $$TOKEN (no braces, the $$ here is escaped
+   for string.Template inside this comment block). All names listed
+   in cogitum.themes.TOKEN_NAMES are valid. Unknown placeholders
+   leave the literal $$... in the output (loud failure if you typo). */
 
 Screen {
-    background: #0E0E11;
-    color: #E6E1CF;
+    background: $BG;
+    color: $TXT;
     layout: vertical;
 }
 
@@ -11,15 +20,15 @@ Screen {
 #banner {
     height: 9;
     padding: 1 2 0 2;
-    background: #0E0E11;
+    background: $BG;
     content-align: center middle;
 }
 
 #banner-tags {
     height: 1;
     padding: 0 2 1 2;
-    color: #7A5A1A;
-    background: #0E0E11;
+    color: $GOLD_DIM;
+    background: $BG;
 }
 
 /* ───── Full-width horizontal rules ────────────────────────────────────── */
@@ -30,14 +39,14 @@ Screen {
 
 /* Top rule between header and main — invisible spacer, just a clean cut */
 #hrule-top {
-    background: #0E0E11;
-    color: #0E0E11;
+    background: $BG;
+    color: $BG;
 }
 
 /* Bottom rule above composer — slim, dim warm tone */
 #hrule-bottom {
-    background: #261E10;
-    color: #261E10;
+    background: $RULE;
+    color: $RULE;
 }
 
 /* ───── Main split ─────────────────────────────────────────────────────── */
@@ -48,34 +57,34 @@ Screen {
 
 #feed-pane {
     width: 2fr;
-    background: #0E0E11;
+    background: $BG;
     padding: 1 2 1 2;
-    border-right: vkey #2A2620;
+    border-right: vkey $RULE;
     overflow-y: auto;
 
-    scrollbar-color: #2A2620 #0E0E11;
-    scrollbar-color-active: #7A5A1A;
-    scrollbar-color-hover: #5A4A20;
-    scrollbar-background: #0E0E11;
-    scrollbar-background-active: #0E0E11;
-    scrollbar-background-hover: #0E0E11;
+    scrollbar-color: $RULE $BG;
+    scrollbar-color-active: $GOLD_DIM;
+    scrollbar-color-hover: $OLIVE;
+    scrollbar-background: $BG;
+    scrollbar-background-active: $BG;
+    scrollbar-background-hover: $BG;
     scrollbar-size: 1 1;
 }
 
 #inspector-pane {
     width: 1fr;
     min-width: 36;
-    background: #161618;
+    background: $BG_SOFT;
     padding: 1 2 1 2;
     overflow-y: auto;
 
     scrollbar-size-vertical: 1;
-    scrollbar-color: #161618;
-    scrollbar-background: #161618;
-    scrollbar-background-active: #161618;
-    scrollbar-background-hover: #161618;
-    scrollbar-color-active: #161618;
-    scrollbar-color-hover: #161618;
+    scrollbar-color: $BG_SOFT;
+    scrollbar-background: $BG_SOFT;
+    scrollbar-background-active: $BG_SOFT;
+    scrollbar-background-hover: $BG_SOFT;
+    scrollbar-color-active: $BG_SOFT;
+    scrollbar-color-hover: $BG_SOFT;
 }
 
 #inspector-widget {
@@ -89,8 +98,8 @@ Screen {
 }
 
 .feed-user {
-    background: #1F1B14;
-    border-left: thick #F5C24A;
+    background: $SURFACE_HI;
+    border-left: thick $GOLD_HI;
     padding: 1 2 1 2;
     margin: 1 4 1 0;
 }
@@ -101,8 +110,8 @@ Screen {
 }
 
 .feed-error {
-    background: #1C1816;
-    border-left: thick #9B3A2A;
+    background: $SURFACE;
+    border-left: thick $RUST;
     padding: 1 2 1 2;
     margin: 1 4 1 0;
 }
@@ -117,7 +126,7 @@ Screen {
 .card {
     height: auto;
     margin: 0 0 1 0;
-    background: #16140F;
+    background: $BG_SOFT;
 }
 
 /* MCP-specific card tweaks (scoped to .mcp-card so other Setup sections
@@ -136,8 +145,8 @@ Screen {
 /* ───── Status bar ────────────────────────────────────────────────────── */
 #statusbar {
     height: 1;
-    background: #0E0E11;
-    color: #7A5A1A;
+    background: $BG;
+    color: $GOLD_DIM;
     padding: 0 2;
 }
 

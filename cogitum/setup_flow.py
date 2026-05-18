@@ -1200,6 +1200,7 @@ class SetupScreen(Screen):
         ("telegram", "Telegram"),
         ("mcp", "MCP servers"),
         ("vault", "Vault"),
+        ("themes", "Themes"),
         ("experimental", "Experimental"),
         ("diag", "Diagnostics"),
     )
@@ -1307,6 +1308,8 @@ class SetupScreen(Screen):
             render_mcp_section(content)
         elif self._active == "vault":
             self._render_vault(content)
+        elif self._active == "themes":
+            self._render_themes(content)
         elif self._active == "experimental":
             self._render_experimental(content)
         elif self._active == "diag":
@@ -1679,6 +1682,94 @@ class SetupScreen(Screen):
         self.app.notify(result, severity="information")
         self._render_section()
 
+    # ---- themes ----
+
+    def _render_themes(self, content: VerticalScroll) -> None:
+        """Pick the visual theme. WH40K-canon presets only.
+
+        Each preset is a card showing a small palette swatch (3 hex
+        squares from the theme's accent / surface / text tokens),
+        the lore blurb, and an Apply button. The currently active
+        theme is highlighted; clicking Apply on a different one
+        writes ``[experimental] theme = "..."`` to settings.toml
+        and prompts for a Cogitum restart (CSS literals bake into
+        ``App.CSS`` at class load — full restart is the cleanest
+        way to swap them).
+        """
+        from .themes import (
+            THEMES, THEME_DISPLAY_NAMES, THEME_BLURBS,
+            get_active_theme_name,
+        )
+
+        active = get_active_theme_name()
+
+        # Section header.
+        header = Vertical(classes="card")
+        content.mount(header)
+        header.mount(_Static(Text("Themes", style=f"bold {GOLD_HI}"),
+                            classes="card-title"))
+        header.mount(_Static(Text(
+            "Visual presets, all WH40K-canon. Pick the colourway that "
+            "reads best on your terminal — gold can be too bright on "
+            "some monitors, the green / khaki / steel themes are easier "
+            "on the eyes while staying in-universe. Restart Cogitum "
+            "after changing for the palette to fully apply.",
+            style=TXT_DIM)))
+
+        # One card per theme.
+        for theme_id, palette in THEMES.items():
+            card = Vertical(classes="card")
+            content.mount(card)
+
+            display = THEME_DISPLAY_NAMES.get(theme_id, theme_id)
+            blurb = THEME_BLURBS.get(theme_id, "")
+            is_active = theme_id == active
+
+            # Title row: name + 3-swatch palette preview + active marker.
+            title = Text()
+            title.append(display, style=f"bold {GOLD_HI}")
+            title.append("    ")
+            # Three accent swatches: the primary highlight, the surface,
+            # and the text colour. Painted as filled blocks via the
+            # background style so the user sees the actual hue.
+            title.append("  ", style=f"on {palette['GOLD_HI']}")
+            title.append(" ")
+            title.append("  ", style=f"on {palette['BG_SOFT']}")
+            title.append(" ")
+            title.append("  ", style=f"on {palette['TXT']}")
+            title.append("    ")
+            if is_active:
+                title.append("● active", style=OK)
+            card.mount(_Static(title, classes="card-title"))
+
+            if blurb:
+                card.mount(_Static(Text(blurb, style=TXT_DIM)))
+
+            actions = Horizontal(classes="card-actions")
+            card.mount(actions)
+            if is_active:
+                actions.mount(Button("Active", id=f"theme-noop-{theme_id}",
+                                    disabled=True))
+            else:
+                actions.mount(Button("Apply", id=f"theme-apply-{theme_id}",
+                                    variant="primary"))
+
+    async def _apply_theme(self, theme_id: str) -> None:
+        from .themes import write_active_theme, THEME_DISPLAY_NAMES
+        try:
+            write_active_theme(theme_id)
+        except ValueError as e:
+            await self.app.push_screen_wait(MessageModal(
+                "Theme error", str(e), error=True))
+            return
+        await self.app.push_screen_wait(MessageModal(
+            "Theme applied",
+            f"Active theme set to {THEME_DISPLAY_NAMES.get(theme_id, theme_id)}.\n\n"
+            "Restart Cogitum for the palette to fully apply (CSS literals "
+            "bake at app load).",
+        ))
+        self._render_section()
+
     # ---- experimental ----
 
     def _render_experimental(self, content: VerticalScroll) -> None:
@@ -1801,6 +1892,11 @@ class SetupScreen(Screen):
         bid = event.button.id or ""
 
         # MCP buttons (Add server / Edit / Test / Delete / Risk picker / etc.)
+        if bid.startswith("theme-apply-"):
+            theme_id = bid[len("theme-apply-"):]
+            await self._apply_theme(theme_id)
+            return
+
         if bid == "exp-legion-on" or bid == "exp-legion-off":
             self._set_experimental_flag("legion_enabled", bid == "exp-legion-on")
             new_state = "enabled" if bid == "exp-legion-on" else "disabled"

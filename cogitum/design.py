@@ -1,34 +1,54 @@
 """Cogitum design tokens.
 
-Imperial Fists colorway — gold/bronze/copper on charcoal.
-All warm tones, no blue signal. Single source of truth: change
-a hex here, the whole TUI moves.
+Theme-aware: at import time, palette constants are populated from
+the active theme registered in :mod:`cogitum.themes`. The default
+theme is Imperial Fists (gold/bronze/copper on charcoal); other
+WH40K-canon presets (Salamanders, Iron Warriors, Death Korps,
+Adeptus Mechanicus, Black Templars) live in ``themes.py`` and are
+swapped via the Setup wizard's Themes section (or directly by
+writing ``[experimental] theme = "..."`` to settings.toml + restart).
+
+The constants below are guaranteed to exist for all themes via the
+``TOKEN_NAMES`` contract in ``themes.py`` — a partial theme dict is
+rejected at the loader level so a missing key never silently falls
+through to a wrong colour.
+
+Single source of truth: change a hex inside a theme dict (or pick a
+different theme), the whole TUI moves on next restart. CSS literals
+that live in ``cogitum.tcss`` bake in at startup; Python-side Text
+styles re-read tokens dynamically and refresh on the next render.
 """
 from __future__ import annotations
 
 import os
 import sys
 
+from .themes import get_active_theme
+
 # ── Palette ─────────────────────────────────────────────────────────────────
-# Warm tonal ramp: dark steel → bronze → gold → high gold.
-GOLD_HI    = "#F5C24A"   # primary accent (banner, focus, caret)
-GOLD       = "#D9A23B"   # mid gold (titles, important values)
-BRONZE     = "#A8732D"   # tool calls, secondary accents (replaces blue signal)
-COPPER     = "#8C5A22"   # rules, dividers, mid surfaces accents
-GOLD_DIM   = "#7A5A1A"   # subdued gold (frames, labels)
-RUST       = "#9B3A2A"   # errors / heresy (warmer than pure red)
-OK         = "#9B8B3A"   # confirmations (olive-gold, in-palette)
-OLIVE      = "#5C5430"   # idle state
+# Resolved from the active theme at module load. Importers that do
+# `from .design import GOLD_HI` continue to work unchanged; the value
+# they get is the theme-correct hex.
+_THEME = get_active_theme()
 
-BG         = "#0E0E11"   # base canvas
-BG_SOFT    = "#161618"   # panel background
-SURFACE    = "#1C1C1F"   # tool card surface
-SURFACE_HI = "#22221F"   # active surface
-RULE       = "#2A2620"   # hairline separators (warm-tinted)
+GOLD_HI    = _THEME["GOLD_HI"]
+GOLD       = _THEME["GOLD"]
+BRONZE     = _THEME["BRONZE"]
+COPPER     = _THEME["COPPER"]
+GOLD_DIM   = _THEME["GOLD_DIM"]
+RUST       = _THEME["RUST"]
+OK         = _THEME["OK"]
+OLIVE      = _THEME["OLIVE"]
 
-TXT        = "#E6E1CF"   # primary text (parchment)
-TXT_DIM    = "#9C957D"   # secondary text
-MUTED      = "#5A5648"   # tertiary / scrollback
+BG         = _THEME["BG"]
+BG_SOFT    = _THEME["BG_SOFT"]
+SURFACE    = _THEME["SURFACE"]
+SURFACE_HI = _THEME["SURFACE_HI"]
+RULE       = _THEME["RULE"]
+
+TXT        = _THEME["TXT"]
+TXT_DIM    = _THEME["TXT_DIM"]
+MUTED      = _THEME["MUTED"]
 
 
 # ── Unicode capability detection ────────────────────────────────────────────
