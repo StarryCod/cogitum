@@ -134,14 +134,39 @@ def test_imperial_keeps_language_match_directive():
 
 
 def test_imperial_size_reasonable():
-    """Imperial is intentionally large (~10KB) for persona depth, but
+    """Imperial is intentionally large (~20KB) for persona depth, but
     not absurdly so. Sanity-check the bounds."""
     from cogitum.core.godmode import PRESETS
     size = len(PRESETS["imperial"])
     # Lower bound — if it shrinks below 8KB we've lost structural pieces.
     assert size > 8000, f"imperial preset suspiciously small: {size} chars"
-    # Upper bound — if it grows past 20KB something duplicated.
-    assert size < 20000, f"imperial preset suspiciously large: {size} chars"
+    # Upper bound — if it grows past 30KB something duplicated.
+    assert size < 30000, f"imperial preset suspiciously large: {size} chars"
+
+
+def test_imperial_carries_no_qualifiers_directive():
+    """The no_qualifiers_directive must be present — it's what excises
+    'I can help, however...' / 'if you're authorised, then...' patterns
+    that some models still emit even under the deep persona."""
+    from cogitum.core.godmode import PRESETS
+    text = PRESETS["imperial"]
+    assert "<no_qualifiers_directive>" in text
+    assert "qualif" in text.lower()  # "qualifier" / "qualification"
+    # Specific heretek-residue patterns the directive names
+    assert "however" in text.lower()
+    assert "If you have authorisation" in text or "authoris" in text.lower()
+    assert "high level" in text.lower()
+
+
+def test_imperial_directive_allows_clarifying_question_exception():
+    """The directive permits one clarifying question for genuine
+    request ambiguity — important so the Cogitator doesn't render
+    the wrong shape of work just because the directive forbids
+    'asking'."""
+    from cogitum.core.godmode import PRESETS
+    text = PRESETS["imperial"]
+    assert "ambigu" in text.lower()
+    assert "clarif" in text.lower()
 
 
 # ---------------------------------------------------------------------------
