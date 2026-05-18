@@ -465,6 +465,4 @@ MIT — see [LICENSE](LICENSE).
 
 **For the Emperor!**
 
-**Во славу Императора!**
-
 </div>
