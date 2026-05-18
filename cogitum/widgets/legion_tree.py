@@ -229,15 +229,71 @@ class LegionTreeScreen(ModalScreen[None]):
             )
 
     async def on_mount(self) -> None:
-        # Initial render of L1+L2 + first refresh of L0 + detail.
+        # Initial render — captures whatever state the run is already
+        # in (node_added events that fired before this screen opened
+        # are already drained by anyone else / discarded; we recover
+        # by reading run.nodes directly here).
         self._refresh_full_tree()
-        # Subscribe to live events.
+        # Subscribe to live events for everything that happens FROM NOW
+        # ON. Plus a periodic refresh so even if events are lost (e.g.
+        # the queue overflowed and we silently dropped some), the tree
+        # eventually self-heals from run.nodes.
         import asyncio
         self._sub_task = asyncio.create_task(self._subscribe())
+        self._tick_task = asyncio.create_task(self._tick_refresh())
 
     async def on_unmount(self) -> None:
         if self._sub_task and not self._sub_task.done():
             self._sub_task.cancel()
+        if getattr(self, "_tick_task", None) and not self._tick_task.done():
+            self._tick_task.cancel()
+
+    # -------- periodic self-heal -----------------------------------------
+
+    async def _tick_refresh(self) -> None:
+        """Re-read the run state every 0.5s and update card contents.
+
+        The event-queue path can miss updates in two ways:
+          1. The events queue is single-consumer; if anything else
+             drains it (rare, but defensive code paths exist) our
+             subscription sees nothing.
+          2. Events that fired BEFORE this screen opened are already
+             gone — Queue is FIFO with no replay.
+
+        run.nodes is the source of truth and always reflects current
+        state. Polling it on a tight cadence (0.5s) is cheap (≤ 30
+        nodes max in a swarm), and it gives the tree-view a self-
+        heal property: even if events break, the user still sees
+        live status / last_action / output progress.
+        """
+        import asyncio
+        try:
+            while True:
+                await asyncio.sleep(0.5)
+                if self._run.is_complete():
+                    # One last render to flush final state, then stop
+                    # ticking to free the loop.
+                    for nid, card in self._card_by_id.items():
+                        card.update_from(self._run, self._selected_id)
+                    self._update_detail()
+                    self._update_status_line()
+                    return
+                # Live: update every card in place + status line +
+                # detail pane (in case selected node changed status).
+                for nid, card in self._card_by_id.items():
+                    card.update_from(self._run, self._selected_id)
+                self._update_detail()
+                self._update_status_line()
+                # If the run grew new L1/L2 nodes that aren't in our
+                # card registry yet, do a full rebuild so they appear.
+                if any(nid not in self._card_by_id
+                       for nid in self._run.nodes):
+                    self._refresh_full_tree()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Self-heal task should never crash the screen; swallow.
+            pass
 
     # -------- subscription ----------------------------------------------
 
