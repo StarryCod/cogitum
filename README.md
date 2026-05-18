@@ -545,11 +545,19 @@ Dorn's zealous splinter. Bone-white on near-black, crusader red as the single ac
 
 ### Iron Warriors
 
-Perturabo's siegers. Gunmetal greys with hazard-yellow stripes and rust accents. The closest preset to muted greyscale while remaining inside the canon. *(Screenshot pending.)*
+Perturabo's siegers. Gunmetal greys with hazard-yellow stripes and rust accents. The closest preset to muted greyscale while remaining inside the canon.
+
+<p align="center">
+  <img src="assets/iron_warriors.png" alt="Iron Warriors theme" width="85%">
+</p>
 
 ### Adeptus Mechanicus
 
-Cult Mechanicus. Mars-red robes over near-black, brass for confirmations. The colourway that matches the Cogitum-Primus persona itself. *(Screenshot pending.)*
+Cult Mechanicus. Mars-red robes over near-black, brass for confirmations. The colourway that matches the Cogitum-Primus persona itself.
+
+<p align="center">
+  <img src="assets/adeptus_mech.png" alt="Adeptus Mechanicus theme" width="85%">
+</p>
 
 ---
 
