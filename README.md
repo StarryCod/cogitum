@@ -507,20 +507,73 @@ cog mcp ...                     # MCP server management
 
 ---
 
+## 🎨 Themes — WH40K-canon palettes
+
+Cogitum ships with six visual presets, all in the warhammer 40k canon. Switch via Setup wizard → **Themes** (or write `[experimental] theme = "<id>"` to `settings.toml`). The active theme is read at app load — restart Cogitum after switching.
+
+### Imperial Fists *(default)*
+
+Sons of Dorn. Gold on charcoal, bronze trim, parchment text. Bright, ceremonial, high-contrast — Cogitum's original colourway.
+
+<p align="center">
+  <img src="assets/main.png" alt="Imperial Fists theme — main chat" width="85%">
+</p>
+
+### Salamanders
+
+Vulkan's sons. Forest-green plate with brass trim, ember undertones. Easier on the eyes than gold while staying warm and in-canon.
+
+<p align="center">
+  <img src="assets/salamanders.png" alt="Salamanders theme" width="85%">
+</p>
+
+### Death Korps of Krieg
+
+Trench guardsmen. Khaki, mud, weathered parchment, gunmetal. Reads as old paper and gun-oil — the most subdued of the warm presets.
+
+<p align="center">
+  <img src="assets/death_korps.png" alt="Death Korps of Krieg theme" width="85%">
+</p>
+
+### Black Templars
+
+Dorn's zealous splinter. Bone-white on near-black, crusader red as the single accent. Minimum colour, maximum contrast — for stark moods.
+
+<p align="center">
+  <img src="assets/black_templars.png" alt="Black Templars theme" width="85%">
+</p>
+
+### Iron Warriors
+
+Perturabo's siegers. Gunmetal greys with hazard-yellow stripes and rust accents. The closest preset to muted greyscale while remaining inside the canon. *(Screenshot pending.)*
+
+### Adeptus Mechanicus
+
+Cult Mechanicus. Mars-red robes over near-black, brass for confirmations. The colourway that matches the Cogitum-Primus persona itself. *(Screenshot pending.)*
+
+---
+
 ## 🎨 Design
 
-Cogitum uses a warm **Imperial Fists** palette — no blue, no generic AI chrome:
+Cogitum uses a single warm token palette resolved from the active theme. The default Imperial Fists colourway:
 
 | Token | Color | Usage |
 |-------|-------|-------|
-| `GOLD_HI` | `#F5C24A` | Selections, headers, YOU badge |
-| `GOLD` | `#C7A23E` | Agent header, accents |
-| `BRONZE` | `#A8732D` | Borders, tool cards, AI badge |
-| `COPPER` | `#8C6B4F` | Card borders, secondary text |
+| `GOLD_HI` | `#F5C24A` | Primary accent (banner, focus, selection) |
+| `GOLD` | `#D9A23B` | Mid gold — titles, important values |
+| `BRONZE` | `#A8732D` | Tool calls, secondary accents, input borders |
+| `COPPER` | `#8C5A22` | Rules, dividers, tool card details |
+| `GOLD_DIM` | `#7A5A1A` | Subdued gold — frames, meta labels |
+| `RUST` | `#9B3A2A` | Errors / heresy (warmer than pure red) |
+| `OK` | `#9B8B3A` | Confirmations (olive-gold, in-palette) |
+| `BG` | `#0E0E11` | Base canvas |
+| `BG_SOFT` | `#161618` | Panel background |
+| `SURFACE` | `#1C1C1F` | Tool card surface |
 | `TXT` | `#E6E1CF` | Primary text (parchment) |
-| `BG` | `#0E0E11` | Background |
-| `BG_SOFT` | `#1A1816` | Cards, inputs |
-| `RUST` | `#B85C4F` | Errors, danger |
+| `TXT_DIM` | `#9C957D` | Secondary text |
+| `MUTED` | `#5A5648` | Tertiary / scrollback |
+
+Tokens live in [`cogitum/themes.py`](cogitum/themes.py); every widget reads them via [`cogitum/design.py`](cogitum/design.py) so swapping a theme moves the entire TUI. No hardcoded hex anywhere in the app.
 
 ---
 
