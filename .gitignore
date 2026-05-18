@@ -38,3 +38,4 @@ secrets.env
 # Dev artifacts
 *.log
 *.tmp
+prompt.md
