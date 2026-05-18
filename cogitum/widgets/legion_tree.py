@@ -185,23 +185,6 @@ class _NodeCard(Static):
         self.update(out)
 
 
-class _ConnectorRow(Static):
-    """Pure-text horizontal/vertical box-drawing line. Used to visually
-    join L0→L1 and L1→L2 levels."""
-
-    DEFAULT_CSS = """
-    _ConnectorRow {
-        height: 1;
-        width: 100%;
-        text-align: center;
-        color: #A8732D;
-    }
-    """
-
-    def __init__(self, glyphs: str, **kw) -> None:
-        super().__init__(glyphs, **kw)
-
-
 # ─────────────────────────────────────────────────────────────────────────
 # The screen
 # ─────────────────────────────────────────────────────────────────────────
@@ -243,6 +226,10 @@ class LegionTreeScreen(ModalScreen[None]):
         height: auto;
         width: auto;
     }
+
+    /* Spacer rows between depth levels (no connectors — they didn't
+       align cleanly across font widths so we removed them). */
+    .legion-spacer { height: 1; width: 100%; color: #2A2620; }
 
     /* Detail pane */
     #legion-detail {
@@ -406,12 +393,12 @@ class LegionTreeScreen(ModalScreen[None]):
             self._render_all_cards()
             return
 
-        # ── Trunk + branch ────────────────────────────────────────
-        # Vertical drop from L0, then a horizontal branch matching
-        # the number of L1 columns. The branch glyph builds itself
-        # from L1 count: ┌─┴─┬─┴─┐ etc.
-        area.mount(_ConnectorRow("│"))
-        area.mount(_ConnectorRow(_branch_line(len(l1_nodes))))
+        # Spacer between L0 and the L1 row — pure padding, no connectors.
+        # Earlier iteration tried real box-drawing branch lines but they
+        # never aligned cleanly across font widths and Textual's centred
+        # layout, and looked worse than a clean gap. Per user feedback
+        # we removed them entirely.
+        area.mount(Static(" ", classes="legion-spacer"))
 
         # ── L1 row + L2 stacks ────────────────────────────────────
         l1_row = Horizontal(id="legion-l1-row")
@@ -428,14 +415,10 @@ class LegionTreeScreen(ModalScreen[None]):
 
             children = self._run.children_of(l1.id)
             if children:
-                # Trunk drop from L1 + L2 branch sized to children count.
-                col.mount(_ConnectorRow("│"))
-                col.mount(_ConnectorRow(_branch_line(len(children), narrow=True)))
-
+                # Vertical gap between L1 and its L2 children.
+                col.mount(Static(" ", classes="legion-spacer"))
                 stack = Vertical(classes="l2-stack")
                 col.mount(stack)
-                # Lay L2 children horizontally so the branch line
-                # connects properly. Each L2 card is narrower than L1.
                 l2_row = Horizontal()
                 stack.mount(l2_row)
                 for c in children:
@@ -557,56 +540,6 @@ class LegionTreeScreen(ModalScreen[None]):
 # ─────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────
-
-
-def _branch_line(n: int, *, narrow: bool = False) -> str:
-    """Build a horizontal branch glyph that visually feeds N children
-    from one parent above it.
-
-    n=1:   '│'                 (no spread, just a vertical drop)
-    n=2:   '┌─┴─┐'
-    n=3:   '┌──┬──┴──┬──┐'
-    n=N:   ┌ then alternating ─/┬ pattern with the centre as ┴.
-
-    ``narrow=True`` shortens segment width so L2 connector rows fit
-    above L2 cards without being too sparse.
-    """
-    if n <= 0:
-        return ""
-    if n == 1:
-        return "│"
-    seg_w = 4 if narrow else 7
-    seg = "─" * seg_w
-
-    parts: list[str] = ["┌"]
-    centre = (n - 1) / 2
-    for i in range(n - 1):
-        parts.append(seg)
-        # Insert ┴ at the centre (parent join), ┬ elsewhere.
-        if i == int(centre) and (n % 2 == 1):
-            parts.append("┴")
-        elif (i == int(centre) - 1 or i == int(centre)) and (n % 2 == 0) \
-                and parts.count("┴") == 0 and i + 1 == int(centre + 0.5):
-            parts.append("┴")
-        else:
-            parts.append("┬")
-    parts.append(seg)
-    parts.append("┐")
-
-    # If we never inserted ┴ (even-N edge), force one at the middle.
-    line = "".join(parts)
-    if "┴" not in line:
-        # Replace the middle ┬ with ┴.
-        idx = len(line) // 2
-        # Find the closest ┬ to idx.
-        best = min(
-            (i for i, ch in enumerate(line) if ch == "┬"),
-            key=lambda i: abs(i - idx),
-            default=None,
-        )
-        if best is not None:
-            line = line[:best] + "┴" + line[best + 1 :]
-    return line
 
 
 def _kv(out: Text, key: str, value: str) -> None:

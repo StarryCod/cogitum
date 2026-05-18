@@ -98,6 +98,34 @@ class _MockMesh:
 # ─────────────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _enable_legion(_isolated_config):
+    """Legion is gated behind experimental.legion_enabled in settings.toml.
+    Tests need the flag ON.
+
+    Order matters here: the conftest fixture clears sys.modules before
+    yielding cfg, but cogitum.core.builtin_tools captures
+    _LEGION_ENABLED at import time. Sequence:
+      1. conftest clears modules + sets COGITUM_CONFIG_DIR
+      2. our fixture writes settings.toml into the resolved config dir
+      3. clear modules again so the next builtin_tools import re-reads
+         the just-written settings
+    """
+    cfg_root = _isolated_config / "cogitum"
+    cfg_root.mkdir(parents=True, exist_ok=True)
+    (cfg_root / "settings.toml").write_text(
+        "[experimental]\nlegion_enabled = true\n", encoding="utf-8"
+    )
+    # Step 3 — invalidate any cogitum modules that may have been
+    # imported between the conftest setup and now (pytest's fixture
+    # graph may pull in cogitum.* indirectly).
+    import sys
+    for m in list(sys.modules):
+        if m.startswith("cogitum"):
+            sys.modules.pop(m, None)
+    yield
+
+
 @pytest.fixture
 def real_agent():
     from cogitum.core.agent import Agent, AgentConfig

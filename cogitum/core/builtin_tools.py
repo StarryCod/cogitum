@@ -868,9 +868,32 @@ def cogit(action: str, label: str = "", index: int = 0, scope: str = "") -> str:
 # main loop via a sentinel string. The actual orchestration lives in
 # cogitum.core.legion (runtime) and cogitum.core.legion_worker
 # (agent-backed cogitator). See those modules for the lifecycle.
+#
+# Legion is gated behind ``experimental.legion_enabled`` in
+# settings.toml — off by default. Toggle from the Setup wizard's
+# "Experimental" section. Restart required (the flag is read here
+# at import time so the registry stays cheap to query).
 
-@tool(tags=["legion", "delegate"])
-def legion(tasks: str, root_goal: str = "") -> str:
+
+def _legion_enabled() -> bool:
+    """Read the experimental flag once at import.
+
+    Defensive: any failure to read settings means "off" so a broken
+    config never silently exposes the experimental tool to the agent.
+    """
+    try:
+        from .llm.loader import load_settings
+        settings = load_settings() or {}
+        exp = settings.get("experimental") or {}
+        return bool(exp.get("legion_enabled", False))
+    except Exception:
+        return False
+
+
+_LEGION_ENABLED = _legion_enabled()
+
+
+def _legion_impl(tasks: str, root_goal: str = "") -> str:
     """Spawn a parallel team of Cogitators to work on independent subtasks.
 
     Each Cogitator gets the SAME tool catalog the lead Cogitum has,
@@ -910,6 +933,20 @@ def legion(tasks: str, root_goal: str = "") -> str:
     # async machinery and event-queue plumbing for the TUI tree view.
     payload = {"tasks": task_list, "root_goal": root_goal or ""}
     return f"LEGION_RUN:{_json.dumps(payload)}"
+
+
+# Register the legion tool ONLY when the experimental flag is on.
+# When off, the function still exists in this module (for direct
+# imports / tests) but the @tool decorator is skipped, so the
+# REGISTRY never advertises it to the LLM.
+#
+# We pass name="legion" explicitly so the tool advertises as
+# "legion" even though the underlying function is _legion_impl
+# (we needed two names so the decorator path can be conditional).
+if _LEGION_ENABLED:
+    legion = tool(name="legion", tags=["legion", "delegate"])(_legion_impl)
+else:
+    legion = _legion_impl  # not in REGISTRY
 
 
 # ---------------------------------------------------------------------------

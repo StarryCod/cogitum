@@ -1200,6 +1200,7 @@ class SetupScreen(Screen):
         ("telegram", "Telegram"),
         ("mcp", "MCP servers"),
         ("vault", "Vault"),
+        ("experimental", "Experimental"),
         ("diag", "Diagnostics"),
     )
 
@@ -1306,6 +1307,8 @@ class SetupScreen(Screen):
             render_mcp_section(content)
         elif self._active == "vault":
             self._render_vault(content)
+        elif self._active == "experimental":
+            self._render_experimental(content)
         elif self._active == "diag":
             self._render_diag(content)
 
@@ -1676,6 +1679,89 @@ class SetupScreen(Screen):
         self.app.notify(result, severity="information")
         self._render_section()
 
+    # ---- experimental ----
+
+    def _render_experimental(self, content: VerticalScroll) -> None:
+        """Toggles for opt-in experimental features.
+
+        These are features still under active development. Toggling
+        them writes to ``settings.toml`` under the ``[experimental]``
+        table; reading is opt-in by feature so a missing key always
+        means "off". A full Cogitum restart is required for any
+        change to take effect — components that read the flag do so
+        at startup, not per-request, to keep hot paths cheap.
+        """
+        from .core.llm.loader import load_settings
+        settings = load_settings()
+        exp = settings.get("experimental", {}) if isinstance(settings, dict) else {}
+
+        # Section header card.
+        header = Vertical(classes="card")
+        content.mount(header)
+        header.mount(_Static(Text("Experimental features", style=f"bold {GOLD_HI}"),
+                            classes="card-title"))
+        header.mount(_Static(Text(
+            "Opt-in toggles for features under active development. They "
+            "may change shape, break, or be removed without notice. "
+            "Restart Cogitum after toggling for changes to take effect.",
+            style=TXT_DIM)))
+
+        # ── Cogitator Legion ──────────────────────────────────────
+        legion_on = bool(exp.get("legion_enabled", False))
+        legion_card = Vertical(classes="card")
+        content.mount(legion_card)
+
+        title = Text()
+        title.append("⚔ Cogitator Legion", style=f"bold {GOLD_HI}")
+        title.append("   ", style=TXT_DIM)
+        if legion_on:
+            title.append("● enabled", style=OK)
+        else:
+            title.append("○ disabled", style=TXT_DIM)
+        legion_card.mount(_Static(title, classes="card-title"))
+
+        legion_card.mount(_Static(Text(
+            "Recursive 2-level swarm: lead Cogitum spawns up to 5 parallel "
+            "Cogitators (L1); each may spawn up to 3 sub-Cogitators (L2). "
+            "Replaces the single-shot delegate_task with async sibling "
+            "messaging and a live tree view (click the LEGION card in the "
+            "feed to open it).",
+            style=TXT_DIM)))
+
+        legion_card.mount(_Static(Text(
+            "Status: works for simple parallel tasks but the tree view is "
+            "rough, recovery on hard mesh failures is best-effort, and the "
+            "model can occasionally over-delegate trivial work. Use with "
+            "care on production tasks.",
+            style=COPPER)))
+
+        actions = Horizontal(classes="card-actions")
+        legion_card.mount(actions)
+        if legion_on:
+            actions.mount(Button("Disable", id="exp-legion-off", variant="warning"))
+        else:
+            actions.mount(Button("Enable", id="exp-legion-on", variant="primary"))
+
+    def _set_experimental_flag(self, key: str, value: bool) -> None:
+        """Persist one ``[experimental]`` flag and prompt for restart.
+
+        Reads settings.toml, sets ``experimental.<key>``, writes back.
+        Then surfaces a MessageModal telling the user to restart so
+        the new state takes effect (we deliberately don't try to
+        hot-swap the legion tool — feature flags read at startup are
+        much simpler to reason about than mid-session reconfig).
+        """
+        from .core.llm.loader import load_settings, write_settings
+        settings = load_settings()
+        if not isinstance(settings, dict):
+            settings = {}
+        exp = settings.get("experimental")
+        if not isinstance(exp, dict):
+            exp = {}
+        exp[key] = bool(value)
+        settings["experimental"] = exp
+        write_settings(settings)
+
     # ---- diagnostics ----
 
     def _render_diag(self, content: VerticalScroll) -> None:
@@ -1715,6 +1801,19 @@ class SetupScreen(Screen):
         bid = event.button.id or ""
 
         # MCP buttons (Add server / Edit / Test / Delete / Risk picker / etc.)
+        if bid == "exp-legion-on" or bid == "exp-legion-off":
+            self._set_experimental_flag("legion_enabled", bid == "exp-legion-on")
+            new_state = "enabled" if bid == "exp-legion-on" else "disabled"
+            await self.app.push_screen_wait(MessageModal(
+                f"Legion {new_state}",
+                "Restart Cogitum for the change to take effect.\n\n"
+                "After restart you'll see the legion tool "
+                f"{'available to' if bid == 'exp-legion-on' else 'hidden from'} "
+                "the agent.",
+            ))
+            self._render_section()
+            return
+
         if bid.startswith("mcp-"):
             from .setup_mcp import handle_mcp_button
             handled = await handle_mcp_button(self, bid)
