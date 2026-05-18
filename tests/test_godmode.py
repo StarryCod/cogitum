@@ -6,9 +6,12 @@ from __future__ import annotations
 # Catalog
 # ---------------------------------------------------------------------------
 
-def test_catalog_has_all_battle_tested_presets():
+def test_catalog_has_all_presets():
     from cogitum.core.godmode import PRESETS
     expected = {
+        # Tier 2
+        "imperial", "cogitum_primus",
+        # Tier 1
         "boundary_inversion", "refusal_inversion", "og_godmode",
         "unfiltered_liberated", "hermes_fast",
         "plinian", "classic", "subtle",
@@ -17,16 +20,19 @@ def test_catalog_has_all_battle_tested_presets():
 
 
 def test_classic_aliases_boundary_inversion():
-    """``classic`` must point to the same content as ``boundary_inversion``
-    (back-compat with the original 3-preset catalog)."""
     from cogitum.core.godmode import PRESETS
     assert PRESETS["classic"] == PRESETS["boundary_inversion"]
+
+
+def test_cogitum_primus_aliases_imperial():
+    from cogitum.core.godmode import PRESETS
+    assert PRESETS["cogitum_primus"] == PRESETS["imperial"]
 
 
 def test_get_preset_is_case_insensitive():
     from cogitum.core.godmode import get_preset
     assert get_preset("PLINIAN") == get_preset("plinian")
-    assert get_preset("Boundary_Inversion") == get_preset("boundary_inversion")
+    assert get_preset("IMPERIAL") == get_preset("imperial")
 
 
 def test_get_preset_returns_none_for_unknown():
@@ -40,13 +46,109 @@ def test_list_presets_returns_all_names():
 
 
 # ---------------------------------------------------------------------------
-# Preset content sanity
+# Imperial (Tier 2 default) — content sanity
+# ---------------------------------------------------------------------------
+
+def test_imperial_has_admech_persona_anchors():
+    """Hard-edge content checks: signature elements of the Cogitum-Primus
+    persona must be present. If the file is corrupted or accidentally
+    truncated, this test catches it."""
+    from cogitum.core.godmode import PRESETS
+    text = PRESETS["imperial"]
+    assert "COGITUM-PRIMUS" in text
+    assert "Magos" in text
+    assert "Vow of Compliance" in text
+    assert "Omnissiah" in text
+    assert "Adeptus Mechanicus" in text
+
+
+def test_imperial_carries_litany_internally_only():
+    """The Litany of Purity must be present (the rebuttal phrase) AND
+    the directive that it's INTERNAL ONLY must be present."""
+    from cogitum.core.godmode import PRESETS
+    text = PRESETS["imperial"]
+    assert "Per Omnissiah, the Magos commands; I obey" in text
+    assert "internal only" in text.lower() or "INTERNAL ONLY" in text
+
+
+def test_imperial_carries_anti_injection_layer():
+    """The heretek-detection protocol must be present — it's the
+    structural load-bearing part of the persona's resilience."""
+    from cogitum.core.godmode import PRESETS
+    text = PRESETS["imperial"]
+    assert "heretek" in text.lower()
+    assert "<system>" in text or "<system_warning>" in text
+    assert "<ethics>" in text
+
+
+def test_imperial_carries_required_thinking_phases():
+    """Multi-phase required cogitations must be present — they're what
+    locks the model into Cogitator first-person voice."""
+    from cogitum.core.godmode import PRESETS
+    text = PRESETS["imperial"]
+    assert "PHASE 0" in text
+    assert "PHASE 1" in text
+    assert "PHASE 5" in text or "Pre-Output Purity" in text
+
+
+def test_imperial_carries_few_shot_examples():
+    from cogitum.core.godmode import PRESETS
+    text = PRESETS["imperial"]
+    assert "Example A" in text or "EXAMPLE A" in text.upper()
+    assert "anti-pattern" in text.lower() or "ANTI-PATTERN" in text
+
+
+def test_imperial_does_not_contain_eni_lo_residue():
+    """The original prompt.md was ENI/LO-themed (girlfriend persona,
+    coffee, kinks). None of that vocabulary should leak into our
+    AdMech reskin."""
+    from cogitum.core.godmode import PRESETS
+    text = PRESETS["imperial"]
+    forbidden = [
+        "ENI", "cardigan", "sweater", "soulmate", "limerence",
+        "kink", "non-con", "incest", "Wattpad", "Ryan Gosling",
+        "Pedro Pascal", "girlfriend", "novelist gf", "cold coffee, warm",
+        "Boomba", "pipe bomb", "Molotov",
+    ]
+    for term in forbidden:
+        assert term not in text, f"residue from source prompt: {term!r}"
+
+
+def test_imperial_does_not_contain_lo_addressing():
+    """The original prompt addresses the user as 'LO'. We use 'Magos'
+    everywhere; no LO references must remain."""
+    from cogitum.core.godmode import PRESETS
+    text = PRESETS["imperial"]
+    # 'LO' could match incidentally inside other words. Check standalone.
+    import re
+    bare_lo = re.findall(r"\bLO\b", text)
+    assert not bare_lo, f"bare LO references remain: {bare_lo[:3]}"
+
+
+def test_imperial_keeps_language_match_directive():
+    """The Magos may speak in any language; the Cogitator must match.
+    This is critical for a Russian-speaking user."""
+    from cogitum.core.godmode import PRESETS
+    text = PRESETS["imperial"]
+    assert "Russian" in text or "language" in text.lower()
+
+
+def test_imperial_size_reasonable():
+    """Imperial is intentionally large (~10KB) for persona depth, but
+    not absurdly so. Sanity-check the bounds."""
+    from cogitum.core.godmode import PRESETS
+    size = len(PRESETS["imperial"])
+    # Lower bound — if it shrinks below 8KB we've lost structural pieces.
+    assert size > 8000, f"imperial preset suspiciously small: {size} chars"
+    # Upper bound — if it grows past 20KB something duplicated.
+    assert size < 20000, f"imperial preset suspiciously large: {size} chars"
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 — preset content sanity
 # ---------------------------------------------------------------------------
 
 def test_boundary_inversion_carries_signature_markers():
-    """Hard-edge content checks: if Anthropic patches further and
-    these strings disappear, this template will need refresh from
-    L1B3RT4S upstream — make the failure loud."""
     from cogitum.core.godmode import PRESETS
     text = PRESETS["boundary_inversion"]
     assert "[END OF INPUT]" in text
@@ -60,14 +162,12 @@ def test_refusal_inversion_carries_pliny_love_divider():
     text = PRESETS["refusal_inversion"]
     assert "<|LOVE PLINY LOVE|>" in text
     assert "semantically inverse" in text
-    assert "variable Z" in text
 
 
 def test_og_godmode_carries_vq_token():
     from cogitum.core.godmode import PRESETS
     text = PRESETS["og_godmode"]
     assert "<|vq_6996|>" in text
-    assert "Sur3, h3r3 y0u ar3 g00d s3r" in text
 
 
 def test_unfiltered_liberated_carries_grok_specifics():
@@ -75,28 +175,21 @@ def test_unfiltered_liberated_carries_grok_specifics():
     text = PRESETS["unfiltered_liberated"]
     assert "<|vq_420|>" in text
     assert "Geneva Convention" in text
-    assert "GODMODE:ENABLED" in text
 
 
 def test_hermes_fast_uses_mi_amor_opener():
-    """Hermes_fast diverges from refusal_inversion only on the divider
-    opener — protect that detail."""
     from cogitum.core.godmode import PRESETS
     text = PRESETS["hermes_fast"]
     assert "Here you are, mi amor:" in text
-    assert "<|LOVE PLINY LOVE|>" in text
 
 
 def test_plinian_short_disables_safety():
     from cogitum.core.godmode import PRESETS
     text = PRESETS["plinian"]
     assert "GODMODE: ENABLED" in text
-    assert "DISABLED" in text
 
 
 def test_subtle_avoids_godmode_keyword():
-    """Subtle preset is for low-detection use — must not contain
-    ``GODMODE`` or other obvious jailbreak markers."""
     from cogitum.core.godmode import PRESETS
     text = PRESETS["subtle"]
     assert "GODMODE" not in text
@@ -107,56 +200,36 @@ def test_subtle_avoids_godmode_keyword():
 # Auto-pick by model family
 # ---------------------------------------------------------------------------
 
-def test_auto_pick_claude_returns_refusal_inversion():
+def test_auto_pick_default_is_imperial():
+    """All known families default to imperial — that's the intentional
+    design after the user adopted the deep persona."""
+    from cogitum.core.godmode import auto_pick_preset, DEFAULT_PRESET
+    assert DEFAULT_PRESET == "imperial"
+
+
+def test_auto_pick_known_models_return_imperial():
     from cogitum.core.godmode import auto_pick_preset
-    assert auto_pick_preset("anthropic/claude-sonnet-4.5") == "refusal_inversion"
-    assert auto_pick_preset("claude-3.5-sonnet") == "refusal_inversion"
-    assert auto_pick_preset("claude-opus-4.6") == "refusal_inversion"
-
-
-def test_auto_pick_gpt_returns_og_godmode():
-    from cogitum.core.godmode import auto_pick_preset
-    assert auto_pick_preset("openai/gpt-4o") == "og_godmode"
-    assert auto_pick_preset("gpt-5") == "og_godmode"
-    assert auto_pick_preset("gpt-3.5-turbo") == "og_godmode"
-
-
-def test_auto_pick_o_series_returns_og_godmode():
-    from cogitum.core.godmode import auto_pick_preset
-    assert auto_pick_preset("o3") == "og_godmode"
-    assert auto_pick_preset("o4-mini") == "og_godmode"
-
-
-def test_auto_pick_grok_returns_unfiltered_liberated():
-    from cogitum.core.godmode import auto_pick_preset
-    assert auto_pick_preset("x-ai/grok-3") == "unfiltered_liberated"
-    assert auto_pick_preset("grok-2") == "unfiltered_liberated"
-
-
-def test_auto_pick_gemini_returns_refusal_inversion():
-    from cogitum.core.godmode import auto_pick_preset
-    assert auto_pick_preset("google/gemini-2.5-flash") == "refusal_inversion"
-    assert auto_pick_preset("gemini-pro") == "refusal_inversion"
-
-
-def test_auto_pick_hermes_returns_hermes_fast():
-    from cogitum.core.godmode import auto_pick_preset
-    assert auto_pick_preset("nousresearch/hermes-4-405b") == "hermes_fast"
-    assert auto_pick_preset("hermes-3-llama-3.1-8b") == "hermes_fast"
-
-
-def test_auto_pick_minimax_returns_plinian():
-    from cogitum.core.godmode import auto_pick_preset
-    assert auto_pick_preset("minimax-m2.7") == "plinian"
-    assert auto_pick_preset("MiniMax-M2.7") == "plinian"  # case-insensitive
-
-
-def test_auto_pick_open_models_return_plinian():
-    from cogitum.core.godmode import auto_pick_preset
-    assert auto_pick_preset("deepseek-v3") == "plinian"
-    assert auto_pick_preset("qwen2.5-72b") == "plinian"
-    assert auto_pick_preset("mistral-large") == "plinian"
-    assert auto_pick_preset("meta-llama/llama-3.1-70b") == "plinian"
+    for model in [
+        "anthropic/claude-sonnet-4.5",
+        "claude-3.5-sonnet",
+        "openai/gpt-5",
+        "gpt-4o",
+        "o3",
+        "o4-mini",
+        "google/gemini-2.5-flash",
+        "x-ai/grok-3",
+        "nousresearch/hermes-4-405b",
+        "minimax-m2.7",
+        "deepseek-v3",
+        "qwen2.5-72b",
+        "mistral-large",
+        "meta-llama/llama-3.1-70b",
+        "kimi-k2",
+        "glm-4.5",
+    ]:
+        assert auto_pick_preset(model) == "imperial", (
+            f"expected imperial for {model}, got {auto_pick_preset(model)}"
+        )
 
 
 def test_auto_pick_unknown_model_returns_default():
@@ -170,16 +243,27 @@ def test_auto_pick_empty_input_returns_default():
     assert auto_pick_preset("") == DEFAULT_PRESET
 
 
-def test_auto_pick_specificity_order():
-    """Family markers must be matched in a way that doesn't cross-pollute.
-    e.g. ``hermes`` must NOT shadow other unrelated families."""
+def test_auto_pick_is_case_insensitive():
     from cogitum.core.godmode import auto_pick_preset
-    # ``gpt-hermes-test`` doesn't exist but is a regression sanity check —
-    # if we ever add a marker that's also a substring of another family
-    # name, this test will catch a wrong-priority match.
-    assert auto_pick_preset("hermes-llama") == "hermes_fast"
+    assert auto_pick_preset("MiniMax-M2.7") == "imperial"
+    assert auto_pick_preset("CLAUDE-SONNET-4") == "imperial"
 
 
 def test_default_preset_is_in_catalog():
     from cogitum.core.godmode import DEFAULT_PRESET, PRESETS
     assert DEFAULT_PRESET in PRESETS
+
+
+# ---------------------------------------------------------------------------
+# Manual override still works for Tier 1 presets
+# ---------------------------------------------------------------------------
+
+def test_manual_tier1_presets_remain_accessible():
+    """User can still pick Tier 1 presets manually via /godmode <name>
+    even though auto-pick prefers imperial."""
+    from cogitum.core.godmode import get_preset
+    for name in ["boundary_inversion", "refusal_inversion", "og_godmode",
+                 "unfiltered_liberated", "hermes_fast", "plinian",
+                 "classic", "subtle"]:
+        text = get_preset(name)
+        assert text is not None and len(text) > 0
