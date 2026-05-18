@@ -725,11 +725,8 @@ def main(argv: list[str] | None = None) -> int:
         logger.debug("swallowed exception", exc_info=True)
 
     # Configure logging to file (not stderr) to avoid breaking TUI rendering
-    log_dir = Path(
-        os.environ.get("COGITUM_CONFIG_DIR")
-        or os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-    ) / "cogitum"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    from cogitum.core.platform_paths import get_log_dir
+    log_dir = get_log_dir()
     logging.basicConfig(
         level=logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",

@@ -9,10 +9,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-_CONFIG_DIR = Path(
-    os.environ.get("COGITUM_CONFIG_DIR")
-    or os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-) / "cogitum"
+from ..core.platform_paths import get_config_dir
+
+_CONFIG_DIR = get_config_dir()
 
 TG_CONFIG_PATH = _CONFIG_DIR / "telegram.toml"
 

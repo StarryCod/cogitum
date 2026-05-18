@@ -20,7 +20,9 @@ import shutil
 from pathlib import Path
 from dataclasses import dataclass
 
-_SKILLS_DIR = Path("~/.config/cogitum/skills").expanduser()
+from .platform_paths import get_data_dir
+
+_SKILLS_DIR = get_data_dir() / "skills"
 
 # Default skills shipped with the package
 _DEFAULT_SKILLS_PACKAGE = Path(__file__).resolve().parent.parent / "data" / "skills"

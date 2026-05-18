@@ -45,7 +45,9 @@ except ImportError:  # pragma: no cover
     _HAS_PATHSPEC = False
 
 
-_COGIT_ROOT = Path("~/.config/cogitum/cogits").expanduser()
+from .platform_paths import get_data_dir
+
+_COGIT_ROOT = get_data_dir() / "cogits"
 _OBJECTS_DIR = _COGIT_ROOT / "objects"
 _PROJECTS_DIR = _COGIT_ROOT / "projects"
 

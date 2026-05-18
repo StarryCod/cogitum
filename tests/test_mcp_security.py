@@ -61,16 +61,18 @@ def test_resolve_secret_env_missing(monkeypatch):
 
 
 def test_resolve_secret_vault(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    # Override conftest's COGITUM_CONFIG_DIR for this test (vault: scheme
+    # reads from secrets.env in the cogitum config dir).
+    monkeypatch.setenv("COGITUM_CONFIG_DIR", str(tmp_path))
     secrets = tmp_path / "cogitum" / "secrets.env"
-    secrets.parent.mkdir(parents=True)
+    secrets.parent.mkdir(parents=True, exist_ok=True)
     secrets.write_text('MY_KEY="hello"\nOTHER=plain\n', encoding="utf-8")
     assert resolve_secret("vault:MY_KEY") == "hello"
     assert resolve_secret("vault:OTHER") == "plain"
 
 
 def test_resolve_secret_vault_missing(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("COGITUM_CONFIG_DIR", str(tmp_path))
     with pytest.raises(KeyError):
         resolve_secret("vault:NOPE")
 

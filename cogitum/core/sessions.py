@@ -20,7 +20,9 @@ from .events import (
     ToolCallPart, ToolResultPart,
 )
 
-_SESSIONS_DIR = Path("~/.config/cogitum/sessions").expanduser()
+from .platform_paths import get_data_dir
+
+_SESSIONS_DIR = get_data_dir() / "sessions"
 
 
 @dataclass

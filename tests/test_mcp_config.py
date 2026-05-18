@@ -19,12 +19,12 @@ from cogitum.core.mcp.config import (
 
 @pytest.fixture()
 def tmp_cfg(tmp_path, monkeypatch):
-    """Force XDG_CONFIG_HOME to a tmp dir so config_path() points there."""
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    """Force the Cogitum config dir to a tmp dir so config_path() points there."""
+    monkeypatch.setenv("COGITUM_CONFIG_DIR", str(tmp_path))
     return tmp_path / "cogitum" / "mcp.toml"
 
 
-def test_config_path_uses_xdg(tmp_cfg):
+def test_config_path_uses_override(tmp_cfg):
     assert config_path() == tmp_cfg
 
 

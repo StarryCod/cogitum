@@ -23,13 +23,24 @@ logger = logging.getLogger(__name__)
 
 
 def _config_dir() -> Path:
-    return Path(
-        os.environ.get("COGITUM_CONFIG_DIR")
-        or os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-    ) / "cogitum"
+    from ..platform_paths import get_config_dir
+    return get_config_dir()
 
 
-SECRETS_PATH = _config_dir() / "secrets.env"
+def _secrets_path() -> Path:
+    """Resolve secrets.env path lazily — config dir may be redirected
+    by env vars (COGITUM_CONFIG_DIR / XDG_CONFIG_HOME) AFTER this
+    module imports, particularly in test fixtures."""
+    return _config_dir() / "secrets.env"
+
+
+def __getattr__(name: str) -> Path:
+    """Module-level ``SECRETS_PATH`` is computed on every access so that
+    callers (CLI, tests) reading it after env-var changes always get
+    the current value. Equivalent to a lazy module property."""
+    if name == "SECRETS_PATH":
+        return _secrets_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 _LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$")

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-_MEMORY_DIR = Path("~/.config/cogitum/memory").expanduser()
+from .platform_paths import get_data_dir
+
+_MEMORY_DIR = get_data_dir() / "memory"
 _USER_FILE = _MEMORY_DIR / "user.md"
 _MEMORY_FILE = _MEMORY_DIR / "memory.md"
 

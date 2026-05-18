@@ -4,18 +4,28 @@ from __future__ import annotations
 import os
 
 
-def test_save_and_load_secret(tmp_path, monkeypatch):
+def _isolate_secrets_env(tmp_path, monkeypatch):
+    """Point COGITUM_CONFIG_DIR at a tmp dir and reload the module.
+
+    Returns the resolved secrets.env path. ``COGITUM_CONFIG_DIR`` is
+    treated as a *parent* (``/cogitum`` is appended automatically) for
+    backward compat with the historical XDG-style layout, so the
+    secrets file lands at ``tmp_path/cogitum/secrets.env``.
+    """
     monkeypatch.setenv("COGITUM_CONFIG_DIR", str(tmp_path))
-    # Reload module so module-level paths refresh
     import importlib
     import cogitum.core.llm.secrets_env as se
     importlib.reload(se)
+    return se, tmp_path / "cogitum" / "secrets.env"
+
+
+def test_save_and_load_secret(tmp_path, monkeypatch):
+    se, secrets_path = _isolate_secrets_env(tmp_path, monkeypatch)
 
     se.save_secret("MY_KEY", "secret-value-123")
     # File exists with mode 0600
-    p = tmp_path / "cogitum" / "secrets.env"
-    assert p.exists()
-    assert (p.stat().st_mode & 0o777) == 0o600
+    assert secrets_path.exists()
+    assert (secrets_path.stat().st_mode & 0o777) == 0o600
 
     # In-process os.environ updated
     assert os.environ.get("MY_KEY") == "secret-value-123"
@@ -28,17 +38,14 @@ def test_save_and_load_secret(tmp_path, monkeypatch):
 
 
 def test_save_secret_replaces_existing(tmp_path, monkeypatch):
-    monkeypatch.setenv("COGITUM_CONFIG_DIR", str(tmp_path))
-    import importlib
-    import cogitum.core.llm.secrets_env as se
-    importlib.reload(se)
+    se, secrets_path = _isolate_secrets_env(tmp_path, monkeypatch)
 
     se.save_secret("KEY1", "first")
     se.save_secret("KEY1", "second")
     se.save_secret("KEY2", "other")
 
     # Only one KEY1 line remains
-    body = (tmp_path / "cogitum" / "secrets.env").read_text()
+    body = secrets_path.read_text()
     lines_with_key1 = [l for l in body.splitlines()
                        if l.split("=")[0] == "KEY1"]
     assert len(lines_with_key1) == 1

@@ -23,16 +23,51 @@ log = logging.getLogger(__name__)
 # Security: path sandbox
 # ---------------------------------------------------------------------------
 
-# Sensitive paths that should NEVER be read/written by the LLM
-_SENSITIVE_PATHS = {
+# Sensitive paths that should NEVER be read/written by the LLM.
+# Per-platform — POSIX paths on Linux/macOS, registry hives + auth
+# stores on Windows. Path comparisons are case-insensitive on Windows
+# inside _is_sensitive() below.
+
+_SENSITIVE_PATHS_POSIX = {
     "/etc/shadow", "/etc/passwd", "/etc/sudoers",
+}
+
+_SENSITIVE_PATHS_HOME_RELATIVE = {
+    # Match against $HOME-relative path on any platform.
     ".ssh/authorized_keys", ".ssh/id_rsa", ".ssh/id_ed25519",
     ".gnupg", ".aws/credentials", ".config/gcloud",
 }
 
-_SENSITIVE_PREFIXES = (
+_SENSITIVE_PATHS_WINDOWS = {
+    # Auth stores Windows ships with. Forward-slash form for
+    # comparison; we normalise input below.
+    "windows/system32/config/sam",
+    "windows/system32/config/security",
+    "windows/system32/config/system",
+    "windows/system32/lsass.exe",
+}
+
+_SENSITIVE_PREFIXES_POSIX = (
     "/proc/", "/sys/", "/dev/",
 )
+
+_SENSITIVE_PREFIXES_WINDOWS = (
+    # Roots that should never be modified by the LLM.
+    "windows/system32/",
+    "windows/syswow64/",
+    "$recycle.bin/",
+    "system volume information/",
+)
+
+# Build the active sets at import time based on platform.
+import sys as _sys
+
+if _sys.platform == "win32":
+    _SENSITIVE_PATHS = _SENSITIVE_PATHS_WINDOWS | _SENSITIVE_PATHS_HOME_RELATIVE
+    _SENSITIVE_PREFIXES = _SENSITIVE_PREFIXES_WINDOWS
+else:
+    _SENSITIVE_PATHS = _SENSITIVE_PATHS_POSIX | _SENSITIVE_PATHS_HOME_RELATIVE
+    _SENSITIVE_PREFIXES = _SENSITIVE_PREFIXES_POSIX
 
 # Dangerous shell patterns that trigger auto-save
 _DANGEROUS_COMMANDS = (
@@ -166,17 +201,30 @@ def _auto_cogit_save(label: str, scope_path: str | None = None) -> str | None:
 
 
 def _is_path_safe(p: Path) -> tuple[bool, str]:
-    """Check if a path is safe to access. Returns (safe, reason)."""
+    """Check if a path is safe to access. Returns (safe, reason).
+
+    Cross-platform — normalises paths to forward-slash, lower-cases on
+    Windows (NTFS is case-insensitive). Sensitive sets are platform-
+    specific (POSIX system files vs Windows registry hives).
+    """
     resolved = str(p.resolve())
+    # Normalise to forward slashes so the same comparison logic works
+    # for /proc/foo and C:\Windows\System32\config\SAM.
+    needle = resolved.replace("\\", "/")
+    if _sys.platform == "win32":
+        needle = needle.lower()
 
-    # Block /proc, /sys, /dev
+    # Block prefix-rooted areas (/proc/, /sys/, Windows/System32/, ...).
     for prefix in _SENSITIVE_PREFIXES:
-        if resolved.startswith(prefix):
-            return False, f"access denied: {prefix} is restricted"
+        # On Windows, sensitive prefixes don't have a leading slash —
+        # check for the segment anywhere in the path. On POSIX, the
+        # prefix already starts with /, so substring match works too.
+        if prefix in needle:
+            return False, f"access denied: {prefix.rstrip('/')} is restricted"
 
-    # Block known sensitive files
+    # Block specific known files.
     for sensitive in _SENSITIVE_PATHS:
-        if resolved.endswith(sensitive) or f"/{sensitive}" in resolved:
+        if needle.endswith(sensitive) or f"/{sensitive}" in needle:
             return False, "access denied: sensitive file"
 
     return True, ""

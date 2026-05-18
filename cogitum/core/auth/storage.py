@@ -23,10 +23,9 @@ import logging
 log = logging.getLogger(__name__)
 
 
-_CONFIG_DIR = Path(
-    os.environ.get("COGITUM_CONFIG_DIR")
-    or os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-) / "cogitum"
+from ..platform_paths import get_config_dir
+
+_CONFIG_DIR = get_config_dir()
 
 _AUTH_PATH = _CONFIG_DIR / "auth.json"
 

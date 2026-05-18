@@ -36,10 +36,9 @@ logger = logging.getLogger(__name__)
 # Vault paths
 # ---------------------------------------------------------------------------
 
-_DEFAULT_CONFIG_DIR: Final = Path(
-    os.environ.get("COGITUM_CONFIG_DIR")
-    or os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-) / "cogitum"
+from ..platform_paths import get_config_dir
+
+_DEFAULT_CONFIG_DIR: Final = get_config_dir()
 
 _VAULT_PATH: Final = _DEFAULT_CONFIG_DIR / "vault.enc"
 

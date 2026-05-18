@@ -64,9 +64,9 @@ def filter_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
 
 
 def _read_secrets_env() -> dict[str, str]:
-    """Read ~/.config/cogitum/secrets.env into a dict (best-effort)."""
-    base = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-    path = Path(base) / "cogitum" / "secrets.env"
+    """Read secrets.env from the platform config dir into a dict (best-effort)."""
+    from ..platform_paths import get_config_dir
+    path = get_config_dir() / "secrets.env"
     if not path.exists():
         return {}
     try:

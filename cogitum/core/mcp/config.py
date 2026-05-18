@@ -79,11 +79,8 @@ DEFAULT_RISK = "medium"
 
 def config_path() -> Path:
     """Return the path to mcp.toml (does not require it to exist)."""
-    base = os.environ.get(
-        "XDG_CONFIG_HOME",
-        str(Path.home() / ".config"),
-    )
-    return Path(base) / "cogitum" / "mcp.toml"
+    from ..platform_paths import get_config_dir
+    return get_config_dir() / "mcp.toml"
 
 
 # ---------------------------------------------------------------------------

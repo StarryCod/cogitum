@@ -90,19 +90,22 @@
 curl -fsSL https://raw.githubusercontent.com/StarryCod/cogitum/master/scripts/install.sh | bash
 ```
 
-Or via **npm** (fast wrapper — Python backend installs on first run):
+The installer clones the repo to `~/.local/share/cogitum`, creates a venv, installs all extras, and writes `cog` / `cogitum` bash shims to `~/.local/bin` (make sure that directory is on your PATH).
 
-```bash
-npm install -g cogitum
-```
-
-> ⚠️ **Do not use `sudo npm install -g`.** If you need elevated permissions, [fix npm permissions](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally) or use `npx cogitum` instead.
-
-### Windows — Manual install (PowerShell)
+### Windows — One-line install (PowerShell)
 
 ```powershell
-# 1. Ensure Python 3.11+ is installed
+iwr https://raw.githubusercontent.com/StarryCod/cogitum/master/scripts/install.ps1 | iex
+```
+
+The installer clones the repo to `%LOCALAPPDATA%\cogitum`, creates a venv, installs all extras, and writes `cog.cmd` / `cogitum.cmd` shims to `%LOCALAPPDATA%\Microsoft\WindowsApps` (which is on PATH by default on Windows 10/11).
+
+If you prefer to install manually:
+
+```powershell
+# 1. Ensure Python 3.11+ and Git are installed
 python --version
+git --version
 
 # 2. Clone and install
 git clone https://github.com/StarryCod/cogitum.git $env:LOCALAPPDATA\cogitum
@@ -110,12 +113,9 @@ cd $env:LOCALAPPDATA\cogitum
 python -m venv .venv
 .venv\Scripts\pip install -e ".[all]"
 
-# 3. Add to PATH
-# Add $env:LOCALAPPDATA\cogitum\.venv\Scripts to your PATH
-
-# 4. Run
-cog setup   # first-time wizard
-cog         # launch TUI
+# 3. Run
+.venv\Scripts\python -m cogitum.cli setup   # first-time wizard
+.venv\Scripts\python -m cogitum.cli         # launch TUI
 ```
 
 ### From source
@@ -309,16 +309,27 @@ args = ["mcp-server-time", "--local-timezone", "Europe/Moscow"]
 
 ## 💾 Persistence
 
-| Layer | Storage | What survives |
-|-------|---------|---------------|
-| **Sessions** | `~/.config/cogitum/sessions/*.jsonl` | Full conversation history, model per session |
-| **Memory** | `~/.config/cogitum/memory/*.md` | User identity, agent notes |
-| **Skills** | `~/.config/cogitum/skills/**/*.md` | Reusable procedural knowledge |
-| **Checkpoints** | `~/.config/cogitum/cogit/` | Project snapshots (content-addressed) |
-| **Config** | `~/.config/cogitum/providers.toml` | Provider mesh, keys, models |
-| **Secrets** | `~/.config/cogitum/secrets.env` | Plain env secrets |
-| **Vault** | `~/.config/cogitum/vault.enc` | AES-256-GCM encrypted secrets |
-| **Auth** | `~/.config/cogitum/auth.json` | OAuth tokens |
+Cogitum stores its state across two directory roles — a small **config** dir (user-editable TOML/JSON) and a larger **data** dir (sessions, skills, checkpoints). Per platform:
+
+| Role | Linux | macOS | Windows |
+|------|-------|-------|---------|
+| **config** | `$XDG_CONFIG_HOME/cogitum` (default `~/.config/cogitum`) | `~/Library/Application Support/cogitum` | `%APPDATA%\cogitum` |
+| **data** | `$XDG_DATA_HOME/cogitum` (default `~/.local/share/cogitum`) | `~/Library/Application Support/cogitum` | `%LOCALAPPDATA%\cogitum` |
+| **logs** | `$XDG_STATE_HOME/cogitum` (default `~/.local/state/cogitum`) | `~/Library/Logs/cogitum` | `%LOCALAPPDATA%\cogitum\logs` |
+| **cache** | `$XDG_CACHE_HOME/cogitum` (default `~/.cache/cogitum`) | `~/Library/Caches/cogitum` | `%LOCALAPPDATA%\cogitum\cache` |
+
+You can override any of them with `COGITUM_CONFIG_DIR`, `COGITUM_DATA_DIR`, `COGITUM_LOG_DIR`, `COGITUM_CACHE_DIR`.
+
+| Layer | Path within base dir | What survives |
+|-------|----------------------|---------------|
+| **Sessions** | `<data>/sessions/*.jsonl` | Full conversation history, model per session |
+| **Memory** | `<data>/memory/*.md` | User identity, agent notes |
+| **Skills** | `<data>/skills/**/*.md` | Reusable procedural knowledge |
+| **Checkpoints** | `<data>/cogits/` | Project snapshots (content-addressed) |
+| **Config** | `<config>/providers.toml` | Provider mesh, keys, models |
+| **Secrets** | `<config>/secrets.env` | Plain env secrets |
+| **Vault** | `<config>/vault.enc` | AES-256-GCM encrypted secrets |
+| **Auth** | `<config>/auth.json` | OAuth tokens |
 
 ---
 
@@ -427,5 +438,7 @@ MIT — see [LICENSE](LICENSE).
 <div align="center">
 
 **Built with** [Textual](https://textual.textualize.io) · [Rich](https://rich.readthedocs.io) · [httpx](https://www.python-httpx.org)
+
+**For the Emperor!**
 
 </div>

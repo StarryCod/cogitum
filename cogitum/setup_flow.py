@@ -2111,15 +2111,38 @@ class SetupScreen(Screen):
         import os
         import shutil
         import subprocess
-        ed = os.environ.get("EDITOR") or shutil.which("nvim") or shutil.which("vim") or shutil.which("nano")
+        import sys
+
+        # Per-platform editor candidates. On Windows, $EDITOR is rarely
+        # set — fall back to notepad which always exists. On POSIX, try
+        # nvim → vim → nano in order.
+        ed = os.environ.get("EDITOR")
+        if not ed:
+            if sys.platform == "win32":
+                ed = (
+                    shutil.which("nvim")
+                    or shutil.which("code")    # VS Code in PATH (-w to wait)
+                    or shutil.which("notepad")
+                    or "notepad.exe"
+                )
+            else:
+                ed = (
+                    shutil.which("nvim")
+                    or shutil.which("vim")
+                    or shutil.which("nano")
+                )
         if not ed:
             self.app.push_screen(MessageModal(
                 "No editor", "$EDITOR not set; open the file from your shell.", error=True
             ))
             return
+        # VS Code needs -w/--wait to block until the file is closed.
+        cmd = [ed, str(_PROVIDERS_PATH)]
+        if ed.endswith("code") or ed.endswith("code.exe") or ed.endswith("code.cmd"):
+            cmd = [ed, "-w", str(_PROVIDERS_PATH)]
         # We need to suspend the textual app briefly.
         with self.app.suspend():
-            subprocess.call([ed, str(_PROVIDERS_PATH)], timeout=3600)
+            subprocess.call(cmd, timeout=3600)
         self._writer = ConfigWriter()
         self._render_section()
 

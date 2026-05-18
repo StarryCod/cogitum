@@ -15,6 +15,7 @@ import asyncio
 import collections
 import logging
 import signal
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -251,7 +252,8 @@ class CogitumBot:
 
     @staticmethod
     def _offset_path() -> Path:
-        return Path("~/.config/cogitum/tg_offset").expanduser()
+        from ..core.platform_paths import get_data_dir
+        return get_data_dir() / "tg_offset"
 
     def _load_offset(self) -> int:
         try:
@@ -1106,8 +1108,26 @@ async def run_bot(config: TelegramConfig | None = None) -> None:
         t.add_done_callback(shutdown_tasks.discard)
 
     loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _request_stop)
+    # Signal handling differs across platforms:
+    #   POSIX: SIGINT + SIGTERM → loop.add_signal_handler works.
+    #   Windows: loop.add_signal_handler raises NotImplementedError.
+    #            asyncio.ProactorEventLoop on Windows handles Ctrl+C
+    #            naturally as KeyboardInterrupt; SIGTERM does not exist
+    #            on Windows. We register what we can and skip the rest.
+    if sys.platform == "win32":
+        # On Windows we rely on KeyboardInterrupt propagation. The
+        # service stop in `cogitum-tg.service` is Linux-only anyway;
+        # Windows users who want a daemon path use NSSM / Task
+        # Scheduler which sends terminate signals out of band.
+        try:
+            import signal as _sig
+            _sig.signal(_sig.SIGINT, lambda _s, _f: _request_stop())
+        except (ValueError, OSError):
+            # Falls through silently — KeyboardInterrupt still works.
+            pass
+    else:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, _request_stop)
 
     await bot.start()
 
