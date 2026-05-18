@@ -307,7 +307,8 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
         elif backend == "vault":
             out.append("Encrypted with AES-GCM, key derived from a master password.\n", style=TXT_DIM)
             out.append("File: ", style=TXT_DIM)
-            out.append("~/.config/cogitum/vault.enc", style=GOLD)
+            from .core.platform_paths import get_config_dir
+            out.append(str(get_config_dir() / "vault.enc"), style=GOLD)
             out.append("\nYou'll be asked for the password once per session.", style=TXT_DIM)
         elif backend == "keyring":
             try:
@@ -1425,6 +1426,7 @@ class SetupScreen(Screen):
     # ---- subscriptions ----
 
     def _render_subs(self, content: VerticalScroll) -> None:
+        from .core.platform_paths import get_config_dir
         header = Vertical(classes="card")
         content.mount(header)
         header.mount(_Static(Text("Subscriptions (OAuth)", style=f"bold {GOLD_HI}"),
@@ -1432,7 +1434,8 @@ class SetupScreen(Screen):
         header.mount(_Static(Text(
             "Use a Claude Pro/Max or ChatGPT Plus/Pro account instead of an API key. "
             "Cogitum opens your browser, completes the flow, and stores tokens in "
-            "~/.config/cogitum/auth.json (mode 0600).", style=TXT_DIM)))
+            f"{get_config_dir() / 'auth.json'} (mode 0600 on POSIX).",
+            style=TXT_DIM)))
 
         for pid, oauth in OAUTH_REGISTRY.items():
             card = Vertical(classes="card")

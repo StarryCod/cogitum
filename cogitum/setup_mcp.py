@@ -388,9 +388,10 @@ class AddMCPServerModal(ModalScreen[MCPServerConfig | None]):
                     )
 
             # Hint about vault: prefix
+            from .core.platform_paths import get_config_dir
             yield _Static(Text(
-                "  tip: prefix any value with vault:KEY to look it up in "
-                "~/.config/cogitum/secrets.env (no plaintext keys here)",
+                f"  tip: prefix any value with vault:KEY to look it up in "
+                f"{get_config_dir() / 'secrets.env'} (no plaintext keys here)",
                 style=GOLD_DIM,
             ), classes="mcp-form-help")
 
