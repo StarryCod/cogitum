@@ -291,6 +291,7 @@ class ToolCallCard(Static):
 
     # Tools that get special card styling
     _SPECIAL_TOOLS: ClassVar[dict[str, tuple[str, str, str]]] = {
+        "legion": ("⚔", "LEGION", "Dispatching cogitators…"),
         "delegate_task": ("⚔", "DELEGATE", "Spawning sub-agents…"),
         "cogit": ("◆", "COGIT", "Checkpoint…"),
         "memory": ("◈", "MEMORY", "Updating memory…"),
@@ -433,6 +434,16 @@ class ToolCallCard(Static):
         return out
 
     def _get_subtitle(self) -> str:
+        if self._tool_name == "legion":
+            tasks_raw = self._arguments.get("tasks", "")
+            try:
+                import json as _json
+                tasks = (_json.loads(tasks_raw) if isinstance(tasks_raw, str)
+                         else tasks_raw)
+                n = len(tasks) if isinstance(tasks, list) else 0
+            except Exception:
+                n = 0
+            return f"{n} cogitator(s)" if n else "(no tasks)"
         if self._tool_name == "delegate_task":
             mode = self._arguments.get("mode", "workers")
             tasks = self._arguments.get("tasks", [])
@@ -617,6 +628,52 @@ class ToolCallCard(Static):
     def is_pending(self) -> bool:
         """True if this card has not yet received a result."""
         return self._result is None
+
+    def on_click(self, event) -> None:
+        """For tools that own a richer screen, click opens it.
+
+        Currently: legion → LegionTreeScreen with the live tree of
+        cogitators. Other tools fall through and the click is a
+        no-op (default Static behaviour).
+        """
+        if self._tool_name != "legion":
+            return
+        # Find the matching LegionRun. The legion tool stores its
+        # run_id inside the result string ("Legion run-NNNNNN ...").
+        # We could thread it through more cleanly, but parsing the
+        # marker keeps the card stateless and avoids a second message
+        # path through the agent loop.
+        try:
+            from ..core.legion import get_legion
+        except Exception:
+            return
+
+        legion = get_legion()
+        run = None
+        # First, try parsing run id out of the result. Failing that,
+        # fall back to the most recent run on the orchestrator.
+        if self._result:
+            import re
+            m = re.search(r"run-\d{4,}", self._result)
+            if m:
+                run = legion.get_run(m.group(0))
+        if run is None:
+            active = legion.active_runs()
+            if active:
+                run = active[-1]
+            else:
+                runs = list(legion._runs.values())
+                run = runs[-1] if runs else None
+        if run is None:
+            return
+
+        from .legion_tree import LegionTreeScreen
+        try:
+            self.app.push_screen(LegionTreeScreen(run))
+        except Exception:
+            # Screen mount can fail in odd contexts (no app, in tests);
+            # don't crash the feed for a UI-only convenience.
+            pass
 
     def mark_interrupted(self, reason: str = "(interrupted — no result received)") -> None:
         """Force-finalize a pending card with an error state.
