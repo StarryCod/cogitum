@@ -84,41 +84,65 @@
 
 ## 🚀 Quick Start
 
-### Linux / macOS — One-line install
+Three install paths. Pick whichever matches your platform / habits.
+
+### npm (recommended — works on Linux, macOS, Windows)
+
+```bash
+npm install -g cogitum
+cog
+```
+
+The npm package is a thin launcher; `npm install -g` just registers the `cog` and `cogitum` commands. The first `cog` invocation bootstraps the Python backend (clones the repo, creates a venv, installs deps) — this happens **once**, then every subsequent launch runs at native Python speed.
+
+| Wrapper command | Effect |
+|---|---|
+| `cog` | Launch the TUI (auto-bootstraps on first run) |
+| `cog setup` | Run the provider wizard |
+| `cog --update` | Pull latest from origin/master, reinstall deps |
+| `cog --repair` | Wipe and recreate the venv |
+| `cog --where` | Print the install directory |
+| `cog --version-wrapper` | Print npm-wrapper version + install metadata |
+
+Anything else is forwarded to `python -m cogitum.cli`.
+
+> Do **not** use `sudo npm install -g`. If you hit `EACCES` errors, [fix npm permissions](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally) or use a Node version manager (nvm, fnm, volta).
+
+### Linux / macOS — bash one-liner
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StarryCod/cogitum/master/scripts/install.sh | bash
 ```
 
-The installer clones the repo to `~/.local/share/cogitum`, creates a venv, installs all extras, and writes `cog` / `cogitum` bash shims to `~/.local/bin` (make sure that directory is on your PATH).
+Clones to `~/.local/share/cogitum`, builds a venv, installs all extras, writes `cog` / `cogitum` bash shims to `~/.local/bin` (ensure that's on your PATH).
 
-### Windows — One-line install (PowerShell)
+### Windows — PowerShell one-liner
 
 ```powershell
 iwr https://raw.githubusercontent.com/StarryCod/cogitum/master/scripts/install.ps1 | iex
 ```
 
-The installer clones the repo to `%LOCALAPPDATA%\cogitum`, creates a venv, installs all extras, and writes `cog.cmd` / `cogitum.cmd` shims to `%LOCALAPPDATA%\Microsoft\WindowsApps` (which is on PATH by default on Windows 10/11).
+Clones to `%LOCALAPPDATA%\cogitum`, builds a venv, installs all extras, writes `cog.cmd` / `cogitum.cmd` shims to `%LOCALAPPDATA%\Microsoft\WindowsApps` (which is on PATH by default on Windows 10/11).
 
-If you prefer to install manually:
+If you prefer manual install:
 
 ```powershell
-# 1. Ensure Python 3.11+ and Git are installed
+# 1. Prerequisites — Python 3.11+ and Git on PATH
 python --version
 git --version
 
-# 2. Clone and install
+# 2. Clone + install
 git clone https://github.com/StarryCod/cogitum.git $env:LOCALAPPDATA\cogitum
 cd $env:LOCALAPPDATA\cogitum
 python -m venv .venv
 .venv\Scripts\pip install -e ".[all]"
 
 # 3. Run
-.venv\Scripts\python -m cogitum.cli setup   # first-time wizard
-.venv\Scripts\python -m cogitum.cli         # launch TUI
+.venv\Scripts\python -m cogitum.cli setup
+.venv\Scripts\python -m cogitum.cli
 ```
 
-### From source
+### From source (any platform)
 
 ```bash
 git clone https://github.com/StarryCod/cogitum.git
@@ -128,7 +152,7 @@ cog setup
 cog
 ```
 
-> **Requirements:** Python 3.11+, Git. Optional: Node.js 16+ for npm install.
+> **Requirements:** Python 3.11+, Git. Optional: Node.js 16+ if installing via npm.
 
 ### Key Bindings (TUI)
 
@@ -440,5 +464,7 @@ MIT — see [LICENSE](LICENSE).
 **Built with** [Textual](https://textual.textualize.io) · [Rich](https://rich.readthedocs.io) · [httpx](https://www.python-httpx.org)
 
 **For the Emperor!**
+
+**Во славу Императора!**
 
 </div>
