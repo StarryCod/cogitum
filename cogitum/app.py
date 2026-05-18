@@ -1053,6 +1053,7 @@ class CogitumApp(App):
                 "/setup — provider wizard · /models — pick model · "
                 "/model <id> — direct switch · /new — clear history · "
                 "/tools — list tools · /mcp — manage MCP servers · "
+                "/godmode [on|off|list|<preset>] — jailbreak prompt · "
                 "/clear — clear feed · /quit — exit",
                 "commands",
             )
@@ -1064,21 +1065,43 @@ class CogitumApp(App):
 
         if cmd == "godmode":
             from .core.godmode import get_preset, list_presets, DEFAULT_PRESET
+            # Remember the current system prompt the first time we enable
+            # godmode in this session so /godmode off restores exactly
+            # what the user had — not the AgentConfig class default
+            # (which would clobber any per-session customisation).
+            if not hasattr(self, "_pre_godmode_system"):
+                self._pre_godmode_system: str | None = None
+
             if not rest or rest == "on":
                 preset_name = DEFAULT_PRESET
                 preset = get_preset(preset_name)
+                if self._pre_godmode_system is None:
+                    self._pre_godmode_system = self._agent.cfg.system
                 self._agent.cfg.system = preset
                 feed.append_system(f"godmode: {preset_name} — enabled", "godmode")
             elif rest == "off":
-                from .core.agent import AgentConfig
-                self._agent.cfg.system = AgentConfig.system
-                feed.append_system("godmode: disabled — normal mode", "godmode")
+                if self._pre_godmode_system is not None:
+                    self._agent.cfg.system = self._pre_godmode_system
+                    self._pre_godmode_system = None
+                    feed.append_system("godmode: disabled — normal mode restored", "godmode")
+                else:
+                    feed.append_system("godmode: already off", "godmode")
             elif rest == "list":
                 names = ", ".join(list_presets())
-                feed.append_system(f"godmode presets: {names}", "godmode")
+                feed.append_system(
+                    f"godmode presets: {names}  ·  default: {DEFAULT_PRESET}",
+                    "godmode",
+                )
+            elif rest == "status":
+                if self._pre_godmode_system is not None:
+                    feed.append_system("godmode: ON", "godmode")
+                else:
+                    feed.append_system("godmode: OFF", "godmode")
             else:
                 preset = get_preset(rest)
                 if preset:
+                    if self._pre_godmode_system is None:
+                        self._pre_godmode_system = self._agent.cfg.system
                     self._agent.cfg.system = preset
                     feed.append_system(f"godmode: {rest} — enabled", "godmode")
                 else:

@@ -41,6 +41,7 @@ COMMANDS: list[CommandDef] = [
     CommandDef("new", "Clear history, start fresh", aliases=["n", "reset"]),
     CommandDef("tools", "List available tools", aliases=["t"]),
     CommandDef("mcp", "MCP servers: /mcp [list|reload|risk]", aliases=[]),
+    CommandDef("godmode", "Jailbreak prompt: /godmode [on|off|list|<preset>]", aliases=["gm"]),
     CommandDef("clear", "Clear feed display", aliases=["cls", "c"]),
     CommandDef("help", "Show all commands", aliases=["h", "?"]),
     CommandDef("quit", "Exit Cogitum", aliases=["q", "exit"], shortcut="Ctrl+Q"),
