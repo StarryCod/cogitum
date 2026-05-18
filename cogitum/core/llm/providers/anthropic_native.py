@@ -191,7 +191,20 @@ class AnthropicProvider(Provider):
                     return
                 if resp.status_code == 429:
                     text = (await resp.aread()).decode("utf-8", "replace")[:400]
-                    lease.record(LeaseOutcome.RATE_LIMITED, error=text)
+                    # Anthropic sends Retry-After in seconds on 429; honor it.
+                    retry_after_raw = resp.headers.get("retry-after", "").strip()
+                    cooldown_hint = 0.0
+                    if retry_after_raw:
+                        try:
+                            cooldown_hint = float(retry_after_raw)
+                        except ValueError:
+                            cooldown_hint = 0.0
+                        text = f"[Retry-After: {retry_after_raw}] {text}"
+                    lease.record(
+                        LeaseOutcome.RATE_LIMITED,
+                        error=text,
+                        cooldown_hint=cooldown_hint,
+                    )
                     yield StreamChunk(kind=ChunkKind.ERROR, error=f"rate limited: {text}")
                     return
                 if resp.status_code >= 400:

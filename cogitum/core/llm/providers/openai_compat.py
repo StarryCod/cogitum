@@ -179,11 +179,23 @@ class OpenAICompatProvider(Provider):
 
                 if resp.status_code == 429:
                     body_text = (await resp.aread()).decode("utf-8", "replace")[:400]
-                    # Parse Retry-After header if present (omniroute/providers may send it)
-                    retry_after = resp.headers.get("retry-after", "")
-                    if retry_after:
-                        body_text = f"[Retry-After: {retry_after}] {body_text}"
-                    lease.record(LeaseOutcome.RATE_LIMITED, error=body_text)
+                    # Parse Retry-After header — providers serve it
+                    # in two forms: "<seconds>" or "<HTTP-date>". We
+                    # only handle the seconds form here; the date
+                    # form is rare on chat APIs.
+                    retry_after_raw = resp.headers.get("retry-after", "").strip()
+                    cooldown_hint = 0.0
+                    if retry_after_raw:
+                        try:
+                            cooldown_hint = float(retry_after_raw)
+                        except ValueError:
+                            cooldown_hint = 0.0
+                        body_text = f"[Retry-After: {retry_after_raw}] {body_text}"
+                    lease.record(
+                        LeaseOutcome.RATE_LIMITED,
+                        error=body_text,
+                        cooldown_hint=cooldown_hint,
+                    )
                     yield StreamChunk(
                         kind=ChunkKind.ERROR,
                         error=f"rate limited (429): {body_text}",

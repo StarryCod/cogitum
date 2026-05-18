@@ -171,6 +171,12 @@ class KeyLease:
     outcome: LeaseOutcome = LeaseOutcome.ERROR
     tokens_used: int = 0
     error_msg: str = ""
+    # Explicit cooldown override in seconds. Set when the provider's
+    # 429 response carried a Retry-After header — that value is more
+    # accurate than our exponential ladder. Pool reads this on release
+    # and applies it directly (with a +2s safety pad). Zero / None
+    # means "use the ladder".
+    cooldown_hint: float = 0.0
 
     @property
     def secret(self) -> str:
@@ -186,10 +192,13 @@ class KeyLease:
         *,
         tokens: int = 0,
         error: str = "",
+        cooldown_hint: float = 0.0,
     ) -> None:
         self.outcome = outcome
         self.tokens_used = tokens
         self.error_msg = error
+        if cooldown_hint > 0:
+            self.cooldown_hint = cooldown_hint
 
     def release(self) -> None:
         if self.closed:
@@ -337,17 +346,27 @@ class KeyPool:
         if lease.outcome == LeaseOutcome.RATE_LIMITED:
             s.error_streak += 1
             s.status = KeyStatus.RATE_LIMITED
-            # For single-key pools, use minimal cooldown — let agent-level
-            # retry handle the backoff. Don't punish the only key for minutes.
-            if len(self.states) == 1:
-                s.cooldown_until = time.monotonic() + min(_next_cooldown(s.error_streak - 1), 5.0)
+            # Prefer an explicit Retry-After hint from the provider —
+            # it's more accurate than our exponential ladder. Pad +2s
+            # so we don't race the clock and re-hit the same 429
+            # immediately when the cooldown expires. Cap at the ladder
+            # max so a hostile provider can't park our key for hours.
+            if lease.cooldown_hint > 0:
+                cooldown = min(lease.cooldown_hint + 2.0, _COOLDOWN_LADDER_S[-1])
+            elif len(self.states) == 1:
+                # Single-key pool with no hint: use minimal cooldown
+                # so the agent-level retry can do the backoff. Don't
+                # punish the only key for minutes.
+                cooldown = min(_next_cooldown(s.error_streak - 1), 5.0)
             else:
-                s.cooldown_until = time.monotonic() + _next_cooldown(s.error_streak - 1)
+                cooldown = _next_cooldown(s.error_streak - 1)
+            s.cooldown_until = time.monotonic() + cooldown
             s.last_error = lease.error_msg or "rate limited"
             logger.info(
-                "key %s/%s rate-limited (streak=%d, cooldown=%.1fs)",
+                "key %s/%s rate-limited (streak=%d, cooldown=%.1fs%s)",
                 self.provider_id, s.config.id, s.error_streak,
-                s.cooldown_until - time.monotonic(),
+                cooldown,
+                " from Retry-After" if lease.cooldown_hint > 0 else "",
             )
             return
 
