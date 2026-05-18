@@ -2,6 +2,12 @@
 cogitum.gateway.daemon
 ~~~~~~~~~~~~~~~~~~~~~~~
 Systemd user service management for the Telegram gateway.
+
+POSIX-only. On Windows the gateway is run manually
+(``python -m cogitum.gateway.telegram``) or wrapped in NSSM /
+Task Scheduler — there's no equivalent of ``systemctl --user``
+out of the box. All public functions raise ``NotSupportedOnPlatform``
+when called on a non-POSIX system.
 """
 from __future__ import annotations
 
@@ -19,6 +25,21 @@ _SERVICE_DIR = Path.home() / ".config" / "systemd" / "user"
 _SERVICE_PATH = _SERVICE_DIR / f"{_SERVICE_NAME}.service"
 
 
+class NotSupportedOnPlatform(RuntimeError):
+    """Raised when a daemon-control function is called on a platform
+    that doesn't have ``systemctl --user`` (Windows, mostly)."""
+
+
+def _check_supported() -> None:
+    if sys.platform == "win32":
+        raise NotSupportedOnPlatform(
+            "Telegram gateway daemon control is POSIX-only. "
+            "On Windows, run it manually with "
+            "`python -m cogitum.gateway.telegram` or wrap it in "
+            "NSSM / Task Scheduler."
+        )
+
+
 def _systemctl(*args: str, capture: bool = True) -> subprocess.CompletedProcess:
     """Run `systemctl --user <args>` with a bounded timeout.
 
@@ -27,6 +48,7 @@ def _systemctl(*args: str, capture: bool = True) -> subprocess.CompletedProcess:
     conventional 'command timed out' exit code) and an explanatory
     stderr message — callers don't need to special-case TimeoutExpired.
     """
+    _check_supported()
     try:
         return subprocess.run(
             ["systemctl", "--user", *args],
@@ -44,11 +66,21 @@ def _systemctl(*args: str, capture: bool = True) -> subprocess.CompletedProcess:
 
 
 def _python_path() -> str:
-    """Get the Python interpreter that has cogitum installed."""
-    # Prefer the project venv if it exists
-    venv = Path.home() / "Cogitum" / ".venv" / "bin" / "python"
-    if venv.exists():
-        return str(venv)
+    """Get the Python interpreter that has cogitum installed.
+
+    Strategy (in order):
+      1. Honour explicit COGITUM_PYTHON env var (used by users who
+         deliberately split daemon python from CLI python).
+      2. Use sys.executable — that's the same interpreter the user
+         used to invoke `cog tg install`, so cogitum is definitely
+         importable from it. This handles the npm-installed case
+         (~/.local/share/cogitum/.venv/bin/python), the install.sh
+         case, and the manual `pip install -e .` case uniformly.
+    """
+    import os
+    explicit = os.environ.get("COGITUM_PYTHON")
+    if explicit and Path(explicit).exists():
+        return explicit
     return sys.executable
 
 

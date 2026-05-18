@@ -1514,10 +1514,21 @@ class SetupScreen(Screen):
 
     def _render_telegram(self, content: VerticalScroll) -> None:
         from .gateway.tg_config import load_tg_config, TG_CONFIG_PATH
-        from .gateway.daemon import status_service
+        from .gateway.daemon import status_service, NotSupportedOnPlatform
 
         cfg = load_tg_config()
-        status = status_service()
+        try:
+            status = status_service()
+        except NotSupportedOnPlatform as e:
+            # Show a friendly card on Windows instead of crashing the
+            # whole setup wizard. The token / user-id config is still
+            # editable; the user just runs the gateway manually.
+            card = Vertical(classes="card")
+            content.mount(card)
+            card.mount(_Static(Text("Telegram gateway", style=f"bold {GOLD_HI}"),
+                              classes="card-title"))
+            card.mount(_Static(Text(str(e), style=TXT_DIM)))
+            return
 
         # Header card
         card = Vertical(classes="card")

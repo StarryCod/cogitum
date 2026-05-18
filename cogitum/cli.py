@@ -318,11 +318,30 @@ def _open_in_editor(path: Path) -> None:
     import os
     import shutil
     import subprocess
-    editor = os.environ.get("EDITOR") or shutil.which("nvim") or shutil.which("vim") or shutil.which("nano")
+    import sys
+
+    editor = os.environ.get("EDITOR")
+    if not editor:
+        if sys.platform == "win32":
+            editor = (
+                shutil.which("nvim")
+                or shutil.which("code")
+                or shutil.which("notepad")
+                or "notepad.exe"
+            )
+        else:
+            editor = (
+                shutil.which("nvim")
+                or shutil.which("vim")
+                or shutil.which("nano")
+            )
     if not editor:
         print(f"  no $EDITOR; open {path} manually.")
         return
-    subprocess.call([editor, str(path)])
+    cmd = [editor, str(path)]
+    if editor.endswith(("code", "code.exe", "code.cmd")):
+        cmd = [editor, "-w", str(path)]
+    subprocess.call(cmd)
 
 
 def _hr() -> None:
