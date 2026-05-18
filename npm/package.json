@@ -1,22 +1,46 @@
 {
   "name": "cogitum",
-  "version": "0.0.8",
-  "description": "Cogitum — sovereign agentic CLI (Linux/macOS installer wrapper)",
+  "version": "0.1.0",
+  "description": "Cogitum — sovereign agentic CLI. Imperial Fists colorway. Cross-platform npm wrapper.",
   "bin": {
-    "cogit": "bin/cogit",
-    "cog": "bin/cog"
+    "cog": "bin/cog.js",
+    "cogitum": "bin/cogitum.js"
   },
-  "scripts": {},
-  "os": ["linux", "darwin"],
+  "main": "lib/installer.js",
+  "scripts": {
+    "test": "node -e \"require('./lib/installer.js'); console.log('ok')\""
+  },
+  "os": ["linux", "darwin", "win32"],
   "engines": {
     "node": ">=16"
   },
-  "keywords": ["cli", "ai", "agent", "terminal", "llm"],
+  "keywords": [
+    "cli",
+    "ai",
+    "agent",
+    "terminal",
+    "llm",
+    "tui",
+    "anthropic",
+    "openai",
+    "minimax",
+    "warhammer",
+    "imperial-fists"
+  ],
   "author": "OpenReason",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/StarryCod/cogitum.git"
+    "url": "git+https://github.com/StarryCod/cogitum.git"
   },
-  "homepage": "https://github.com/StarryCod/cogitum#readme"
+  "bugs": {
+    "url": "https://github.com/StarryCod/cogitum/issues"
+  },
+  "homepage": "https://github.com/StarryCod/cogitum#readme",
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md",
+    "LICENSE"
+  ]
 }
