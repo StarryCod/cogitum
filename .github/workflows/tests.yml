@@ -1,0 +1,58 @@
+name: tests
+
+on:
+  push:
+    branches: [master, windows]
+  pull_request:
+    branches: [master, windows]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }} / py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Don't cancel siblings on first failure — we want to know
+      # whether a problem is platform-specific or universal.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12"]
+        # Trim the matrix to keep CI minutes reasonable: full coverage
+        # on the platform we develop on (ubuntu) plus a single point
+        # check on Windows + macOS to catch platform regressions.
+        exclude:
+          - os: windows-latest
+            python-version: "3.11"
+          - os: macos-latest
+            python-version: "3.11"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install Cogitum (editable, all extras)
+        # Using the same install path the docs recommend so we exercise
+        # the real dependency surface, not a slim test variant.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[all]"
+          python -m pip install pytest pytest-asyncio
+
+      - name: Show environment
+        run: |
+          python --version
+          pip show cogitum | head -5
+          python -c "import sys; print('platform:', sys.platform)"
+          python -c "from cogitum.core.platform_paths import get_config_dir, get_data_dir, get_log_dir, get_cache_dir; print('config:', get_config_dir()); print('data:', get_data_dir()); print('log:', get_log_dir()); print('cache:', get_cache_dir())"
+
+      - name: Run tests (excluding live browser)
+        # test_browser_live.py spins up Playwright Chromium — too heavy
+        # for default CI. Re-enable on a separate workflow when needed.
+        run: pytest tests/ -q --ignore=tests/test_browser_live.py
