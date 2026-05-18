@@ -165,6 +165,109 @@ class KeyEntryResult:
     label: str = "primary"
 
 
+class MaxTokensModal(ModalScreen[int | None]):
+    """Prompt for a per-provider max_tokens override.
+
+    Returns the new int value (>= 0) or None if the user cancels.
+    Caller writes it to providers.toml via ConfigWriter.set_max_tokens.
+    Empty input or 0 means "use the agent default" — caller should
+    treat that as "clear the override".
+    """
+
+    DEFAULT_CSS = f"""
+    MaxTokensModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
+    #mt-shell {{
+        width: 70; padding: 1 2;
+        background: {BG_SOFT}; border: round {GOLD_DIM};
+    }}
+    #mt-title  {{ color: {GOLD_HI}; text-style: bold; height: 1; margin-bottom: 1; }}
+    #mt-sub    {{ color: {TXT_DIM}; height: auto; margin-bottom: 1; }}
+    #mt-row    {{ height: 4; margin-bottom: 1; }}
+    #mt-row Label {{ width: 18; color: {TXT_DIM}; content-align: left middle; height: 100%; padding: 0 1 0 0; }}
+    #mt-row Input {{
+        width: 1fr; background: {SURFACE}; border: round {RULE};
+        color: {TXT}; height: 3;
+    }}
+    #mt-row Input:focus {{ border: round {BRONZE}; }}
+    #mt-hint {{ color: {GOLD_DIM}; height: auto; margin: 1 0; }}
+    #mt-foot {{ height: 3; align: right middle; }}
+    #mt-foot Button {{ margin-left: 1; min-width: 10; }}
+    """
+
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("escape", "cancel", "cancel"),
+        Binding("ctrl+s", "save", "save"),
+    ]
+
+    def __init__(self, pid: str, current: int) -> None:
+        super().__init__()
+        self._pid = pid
+        self._current = current
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="mt-shell"):
+            yield _Static(
+                Text(f"Max tokens for {self._pid}", style=f"bold {GOLD_HI}"),
+                id="mt-title",
+            )
+            yield _Static(Text(
+                "Override the agent's per-turn max_tokens cap when "
+                "routing through this provider. Leave empty (or 0) to "
+                "fall back to the agent default (32768).",
+                style=TXT_DIM,
+            ), id="mt-sub")
+            with Horizontal(id="mt-row"):
+                yield Label("max_tokens")
+                init = "" if self._current <= 0 else str(self._current)
+                yield Input(
+                    placeholder="32768",
+                    value=init,
+                    id="mt-input",
+                )
+            yield _Static(Text(
+                "Hints: Sonnet 4 → 64000, GPT-5 → 128000, Qwen → 32768, "
+                "DeepSeek-R1 → 8192. Don't set above what your model "
+                "actually supports — the provider will reject the call.",
+                style=GOLD_DIM,
+            ), id="mt-hint")
+            with Horizontal(id="mt-foot"):
+                yield Button("Cancel", id="mt-cancel")
+                yield Button("Save", id="mt-save", variant="primary")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_save(self) -> None:
+        self._save()
+
+    @on(Button.Pressed, "#mt-cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#mt-save")
+    def _save_btn(self) -> None:
+        self._save()
+
+    @on(Input.Submitted, "#mt-input")
+    def _submit(self) -> None:
+        self._save()
+
+    def _save(self) -> None:
+        raw = self.query_one("#mt-input", Input).value.strip()
+        if not raw:
+            self.dismiss(0)  # clear override
+            return
+        try:
+            value = int(raw)
+        except ValueError:
+            # Bounce — leave the modal open with the bad value still
+            # in the input so the user can fix it.
+            return
+        if value < 0:
+            return
+        self.dismiss(value)
+
+
 class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
     """Collect an API key + storage backend choice."""
 
@@ -1407,6 +1510,17 @@ class SetupScreen(Screen):
 
         card.mount(_Static(Text(f"  {raw.get('base_url', '')}", style=TXT_DIM)))
 
+        # Per-provider max_tokens override. Empty / 0 = "use the agent
+        # default". Anything else clamps the request when the mesh
+        # routes through this provider.
+        max_tok_raw = int(raw.get("max_tokens", 0) or 0)
+        if max_tok_raw > 0:
+            mt_line = Text()
+            mt_line.append("  max_tokens: ", style=TXT_DIM)
+            mt_line.append(f"{max_tok_raw:,}", style=GOLD)
+            mt_line.append("  (override)", style=TXT_DIM)
+            card.mount(_Static(mt_line))
+
         # keys (compact: show count only, full details in Manage Keys)
         keys = raw.get("keys") or {}
         # models summary
@@ -1426,6 +1540,7 @@ class SetupScreen(Screen):
             actions.mount(Button(f"Manage keys ({len(keys)})", id=f"prov-keys-{pid}"))
             actions.mount(Button(f"Models ({len(models)})", id=f"prov-models-{pid}"))
             actions.mount(Button("Refresh", id=f"prov-refresh-{pid}"))
+        actions.mount(Button("Max tokens", id=f"prov-maxtok-{pid}"))
         if bool(raw.get("enabled", True)):
             actions.mount(Button("Disable", id=f"prov-disable-{pid}"))
         else:
@@ -1897,6 +2012,17 @@ class SetupScreen(Screen):
         bid = event.button.id or ""
 
         # MCP buttons (Add server / Edit / Test / Delete / Risk picker / etc.)
+        if bid.startswith("prov-maxtok-"):
+            pid = bid.removeprefix("prov-maxtok-")
+            current = int((self._writer.provider(pid) or {}).get("max_tokens", 0) or 0)
+            new_value = await self.app.push_screen_wait(MaxTokensModal(pid, current))
+            if new_value is None:
+                return  # cancelled
+            self._writer.set_max_tokens(pid, int(new_value))
+            self._writer.save()
+            self._render_section()
+            return
+
         if bid.startswith("theme-apply-"):
             theme_id = bid[len("theme-apply-"):]
             await self._apply_theme(theme_id)

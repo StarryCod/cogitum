@@ -157,6 +157,16 @@ class Mesh:
         self, resolved: ResolvedModel, req: StreamRequest
     ) -> AsyncIterator[StreamChunk]:
         provider = resolved.provider
+        # Per-provider max_tokens override. ProviderConfig.max_tokens is
+        # 0 by default → use whatever the agent asked for. A positive
+        # int substitutes in (clamped to req.max_tokens to avoid handing
+        # the provider MORE than the agent expected — provider config
+        # tightens the budget, never loosens it past the agent ceiling).
+        provider_cap = getattr(provider.config, "max_tokens", 0) or 0
+        max_tokens = req.max_tokens
+        if provider_cap > 0:
+            max_tokens = min(provider_cap, req.max_tokens) if req.max_tokens > 0 else provider_cap
+
         cr = CompletionRequest(
             model=resolved.model,
             messages=req.messages,
@@ -165,7 +175,7 @@ class Mesh:
             tool_choice=req.tool_choice,
             temperature=req.temperature,
             top_p=req.top_p,
-            max_tokens=req.max_tokens,
+            max_tokens=max_tokens,
             stop=list(req.stop),
             stream=True,
             reasoning_effort=req.reasoning_effort,

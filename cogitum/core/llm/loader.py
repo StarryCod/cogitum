@@ -171,6 +171,7 @@ def _provider_config_from_dict(pid: str, raw: dict[str, Any]) -> ProviderConfig:
         models=models,
         timeout_s=float(raw.get("timeout_s", 600.0)),
         connect_timeout_s=float(raw.get("connect_timeout_s", 30.0)),
+        max_tokens=int(raw.get("max_tokens", 0)),
         fallback_providers=tuple(raw.get("fallback_providers") or ()),
         routing_strategy=raw.get("routing_strategy"),
         enabled=bool(raw.get("enabled", True)),

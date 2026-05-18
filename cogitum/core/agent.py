@@ -186,7 +186,7 @@ AgentEvent = AgentText | AgentThinking | AgentRetry | AgentToolCall | AgentAppro
 class AgentConfig:
     model: str | None = None          # override mesh default
     max_turns: int = 20               # hard cap on tool-call iterations
-    max_tokens: int = 8192
+    max_tokens: int = 32768
     temperature: float | None = None
     system: str = (
         "You are Cogitum, a sovereign agentic assistant. You run inside a terminal "

@@ -83,6 +83,14 @@ class ProviderConfig:
     # Hard caps applied at provider level (sum across all keys).
     timeout_s: float = 600.0
     connect_timeout_s: float = 30.0
+    # Per-provider override for the agent's max_tokens cap. The agent
+    # uses cfg.max_tokens by default (32K), but some providers either
+    # support more (Claude Sonnet 4 → 64K, GPT-5 → 128K) or impose a
+    # hard ceiling lower than 32K (DeepSeek-R1 caps at 8K). Setting
+    # this to a positive int makes the mesh substitute it into the
+    # outgoing StreamRequest.max_tokens whenever it routes through
+    # this provider. 0 = use agent default.
+    max_tokens: int = 0
     # User-defined fallback chain: if every key/model on this provider
     # fails, mesh tries these provider ids in order.
     fallback_providers: tuple[str, ...] = ()

@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 # Hard caps for sub-cogitator agent loops. Generous but bounded —
 # we don't want a runaway L2 to burn through 50 turns on one node.
 _MAX_TURNS_PER_NODE = 12
-_MAX_TOKENS_PER_TURN = 8192
+_MAX_TOKENS_PER_TURN = 32768
 _TOOL_RESULT_TRUNC = 4000          # tool output beyond this gets a [truncated] tail
 
 

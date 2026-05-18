@@ -47,6 +47,23 @@ class ConfigWriter:
         p = self._provider_table(pid)
         p["enabled"] = enabled
 
+    def set_max_tokens(self, pid: str, max_tokens: int) -> None:
+        """Override the agent's max_tokens cap for this provider.
+
+        Stored as ``[providers.<id>] max_tokens = N`` in providers.toml.
+        ``max_tokens = 0`` (or unset) means "use the agent default";
+        any positive int is applied by the mesh whenever it routes
+        through this provider, clamped to the agent's request cap.
+        """
+        p = self._provider_table(pid)
+        if max_tokens <= 0:
+            # Clean removal — keeps providers.toml uncluttered for users
+            # who didn't bother setting a cap.
+            if "max_tokens" in p:
+                del p["max_tokens"]
+        else:
+            p["max_tokens"] = int(max_tokens)
+
     def set_key(
         self,
         pid: str,
