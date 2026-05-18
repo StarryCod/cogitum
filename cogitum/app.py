@@ -109,6 +109,14 @@ class CogitumApp(App):
         self._bg_tasks.add(bg)
         bg.add_done_callback(self._bg_tasks.discard)
 
+        # Update-check probe. Runs in the background (network call, 4s
+        # timeout, 12h cache), so it never blocks TUI startup. If it
+        # finds a newer version on origin/master, it mounts an
+        # UpdateBanner card in the feed.
+        upd_bg = asyncio.ensure_future(self._check_update_async())
+        self._bg_tasks.add(upd_bg)
+        upd_bg.add_done_callback(self._bg_tasks.discard)
+
         # MCP file watcher: react to external mcp.toml edits (cog mcp ...,
         # hand edits) without requiring a Cogitum restart. The watcher just
         # invokes the same _discover_mcp_tools we already use.
@@ -136,6 +144,37 @@ class CogitumApp(App):
             shutdown_mcp()
         except Exception:
             log.debug("mcp shutdown failed", exc_info=True)
+
+    async def _check_update_async(self) -> None:
+        """Probe origin/master for a newer Cogitum version, mount banner if found.
+
+        Silent on every failure path — TUI startup must not depend on
+        network reachability. The probe itself is bounded by the
+        update_check module (4s timeout, 12h cache).
+        """
+        try:
+            # Let the rest of the UI compose first so the banner doesn't
+            # land between mount-time widgets.
+            await asyncio.sleep(0.5)
+            from .core.update_check import check
+            info = await check()
+        except Exception:
+            return
+
+        if not info.newer or not info.latest:
+            return
+
+        try:
+            from .widgets.feed import UpdateBanner
+            feed = self.query_one("#feed-pane", Feed)
+            feed.append_card(UpdateBanner(
+                current=info.current,
+                latest=info.latest,
+                command=info.upgrade_command(),
+            ))
+        except Exception:
+            # Banner is a UX nicety, never a hard requirement.
+            pass
 
     async def _auto_refresh_models(self) -> None:
         """Run model discovery against all configured providers in background.

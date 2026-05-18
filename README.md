@@ -33,7 +33,7 @@
 | 🧠 **Memory & Skills** | Cross-session memory + **82+ built-in skills** (coding, research, MLOps, red-teaming, smart-home…) injected into every system prompt. |
 | 📦 **Cogit Checkpoints** | One-command project snapshots before destructive edits. Restore, diff, garbage-collect. |
 | 🎯 **Self-Learning Skills** | The agent observes your workflow and **writes its own skills** via the `skills` tool — refining its expertise for your specific projects over time. |
-| 🤖 **Delegation Modes** | Spawn parallel worker agents or expert review boards (`security`, `scale`, `ux`, `frontend`…). |
+| ⚔️ **Cogitator Legion** | Recursive 2-level swarm. The lead Cogitum spawns up to 5 parallel Cogitators (L1); each may further dispatch up to 3 sub-Cogitators (L2). Real-time sibling roster, async message bus, click the dispatch card to open a live tree view. Replaces the old single-shot delegation. |
 | 📡 **Telegram Gateway** | Run the same agent as a personal Telegram bot with streaming, inline keyboards, and media support. |
 | 🔌 **MCP Integration** | Connect external MCP servers (stdio / HTTP) — tools are auto-discovered and registered dynamically. |
 
@@ -247,6 +247,54 @@ This means you can always say *"undo that"* — even if the agent made a mistake
 
 ---
 
+## ⚔️ Cogitator Legion — Recursive Parallel Swarm
+
+When a task naturally splits into independent pieces (refactor + tests + docs, multi-file audit, parallel research), the lead Cogitum dispatches a **Legion** — a parallel team of Cogitators that work simultaneously, talk to each other, and report back to the Magos.
+
+### Hierarchy
+
+```
+            ┌─ L0: lead Cogitum (you talk to it) ─┐
+            │                                      │
+       ┌────┼──── 5 L1 Cogitators (parallel) ──────┼────┐
+       │    │                                      │    │
+       │  ┌─┴─ each may spawn up to 3 L2 sub-Cogitators ─┐
+       │  │                                              │
+       └──L1: alpha   beta   gamma   delta   epsilon ────┘
+                │                                  │
+            ┌───┴───┐                          ┌───┴───┐
+           L2: a.1  a.2                       L2: e.1
+```
+
+- **2 levels max.** L2 cannot spawn L3 — `legion` is removed from their tool schema.
+- **Same toolset.** Every Cogitator has the lead Cogitum's full tool catalog (terminal, file ops, browser, MCP, skills, …).
+- **Async messaging.** Cogitators see a real-time roster of all siblings (id, goal, status, last action) on every turn, plus an inbox of messages they received. Use `legion_message(to, body)` to coordinate or `*` to broadcast.
+- **Live tree view.** Click the LEGION card in the feed to open a full-screen modal: L0 root at the top, L1 row underneath, each L1's L2 children below it, plus a detail pane for the selected node. ↑↓ to navigate.
+
+### When to use it
+
+| Use legion | Don't use legion |
+|-----------|-----------------|
+| Independent subtasks (refactor + tests + docs) | Sequential steps (write file → run it → read result) |
+| Parallel research over different sources | Single-shot questions |
+| Multi-file audit (each L1 handles a chunk) | Tasks that need shared mutable state |
+
+The lead Cogitum decides when to dispatch — you don't have to invoke it explicitly. Just describe the work and it'll split if appropriate.
+
+---
+
+## 🔄 Auto-update Notice
+
+Cogitum probes its master branch in the background on startup (4-second timeout, 12-hour cache). If a newer version is available, you'll see a centered banner card in the feed with the current version, the latest version, and the exact one-liner to upgrade — tailored to how you installed Cogitum:
+
+- npm install → `cog --update`
+- pip install → `pip install -U cogitum`
+- source clone → `cd <repo> && git pull && pip install -e .`
+
+The probe is silent on failure (no network, GitHub down) and never blocks startup. Set `COGITUM_ASCII=1` to force the ASCII glyph fallback if the box-drawing characters look broken on your terminal.
+
+---
+
 ## 🎓 Skill Library — 82+ Built-in Skills
 
 Cogitum ships with **82+ pre-written skills** organized into categories. They are markdown files with YAML frontmatter, automatically injected into the system prompt so the agent knows how to handle specialized tasks:
@@ -270,7 +318,8 @@ Cogitum ships with **82+ pre-written skills** organized into categories. They ar
 
 ### Advanced
 - `cogit` — Content-addressable project checkpoints. Save, list, restore, diff, cleanup.
-- `delegate_task` — Parallel sub-agents: **workers** (up to 10 tasks) or **experts** (security, scale, ux, frontend, optimization review boards).
+- `legion` — Spawn a parallel team of Cogitators (max 5 L1 + 3 L2 per L1). Each gets the same tool catalog, plus async sibling messaging (`legion_message`). Click the dispatch card in the feed to open a live tree view of the swarm.
+- `delegate_task` — *(legacy)* Parallel sub-agents: **workers** (up to 10 tasks) or **experts** (security, scale, ux, frontend, optimization review boards). Will be removed in a future release; prefer `legion`.
 - `send_media` — Telegram-only: send photos/documents from agent results.
 - `mcp_*` — Dynamically registered tools from connected MCP servers.
 

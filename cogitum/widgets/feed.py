@@ -31,6 +31,7 @@ from ..design import (
     GOLD_DIM,
     GOLD_HI,
     MUTED,
+    OK,
     RUST,
     TXT,
     TXT_DIM,
@@ -723,6 +724,49 @@ class SystemLine(Static):
         out.append(f"··· {text}")
         if meta:
             out.append(f"   ({meta})", style=MUTED)
+        return out
+
+
+# ── Update banner ─────────────────────────────────────────────────────────
+#
+# Centered card shown once per session when the version-check probe
+# finds a newer version on origin/master. Same visual register as
+# the "Successful copied!" / "Press Ctrl+Q to exit" affordances —
+# golden round border, terse copy, one upgrade command pre-written
+# for the user's install method (npm / pip / source).
+
+class UpdateBanner(Static):
+    """Cogitum-styled update notice. Appended to the feed at startup
+    iff `update_check.check()` returns a newer master version."""
+
+    DEFAULT_CLASSES = "feed-entry feed-update-banner"
+    DEFAULT_CSS = """
+    UpdateBanner {
+        margin: 1 4;
+        padding: 1 2;
+        background: #161618;
+        border: round #F5C24A;
+        color: #E6E1CF;
+        text-align: center;
+        height: auto;
+    }
+    """
+
+    def __init__(self, current: str, latest: str, command: str, **kw) -> None:
+        super().__init__(self._build(current, latest, command), **kw)
+
+    @staticmethod
+    def _build(current: str, latest: str, command: str) -> Text:
+        out = Text()
+        out.append("⚔ A NEW VERSION OF COGITUM IS AVAILABLE\n", style=f"bold {GOLD_HI}")
+        out.append("\ncurrent:  ", style=TXT_DIM)
+        out.append(current, style=TXT)
+        out.append("    →    ", style=GOLD_DIM)
+        out.append("latest:  ", style=TXT_DIM)
+        out.append(latest, style=f"bold {OK}")
+        out.append("\n\nrun:  ", style=TXT_DIM)
+        out.append(command, style=f"bold {GOLD}")
+        out.append("\n", style=TXT_DIM)
         return out
 
 
