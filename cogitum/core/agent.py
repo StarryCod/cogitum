@@ -408,6 +408,17 @@ class Agent:
         self.cfg = config or AgentConfig()
         self._active_tool_tasks: list[asyncio.Task] = []
 
+        # Wire the Legion worker once per Agent instance. The worker
+        # callable closes over this agent's mesh + registry so every
+        # cogitator in a swarm uses the same provider pool and tool
+        # set as the lead agent. Idempotent — re-registration on a
+        # second Agent simply overwrites the previous worker.
+        from .legion import get_legion
+        from .legion_worker import make_legion_worker
+        get_legion().register_worker(
+            make_legion_worker(mesh=self.mesh, registry=self.registry)
+        )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -633,8 +644,15 @@ class Agent:
                         content = str(result)
                         is_error = content.startswith("ERROR:")
 
-                        # Handle delegate_task async execution
-                        if content.startswith("DELEGATE_WORKERS:"):
+                        # Handle async-dispatched tool sentinels.
+                        # legion is the only one going forward; the
+                        # DELEGATE_* sentinels are kept ONLY because some
+                        # third-party MCP tools or legacy skills may still
+                        # emit them — new code should not.
+                        if content.startswith("LEGION_RUN:"):
+                            content = await self._run_legion(content[11:])
+                            is_error = content.startswith("ERROR:")
+                        elif content.startswith("DELEGATE_WORKERS:"):
                             content = await self._run_delegate_workers(content[17:])
                             is_error = False
                         elif content.startswith("DELEGATE_EXPERTS:"):
@@ -980,6 +998,50 @@ class Agent:
                 f"DO NOT repeat the same call with the same args. "
                 f"Either fix the arguments or try a different approach."
             )
+
+    # ------------------------------------------------------------------
+    # Legion (recursive 2-level swarm) — supersedes delegate_task
+    # ------------------------------------------------------------------
+
+    async def _run_legion(self, payload_json: str) -> str:
+        """Drive a Legion run dispatched by the LLM.
+
+        The legion tool returns the sentinel ``LEGION_RUN:<json>`` to
+        the agent loop; we strip the prefix and dispatch through the
+        global Legion orchestrator. Returns the aggregated summary
+        (string) that gets fed back into L0's context as the tool
+        result.
+        """
+        import json
+        from .legion import get_legion
+
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            return f"ERROR: invalid legion payload: {e}"
+
+        tasks = payload.get("tasks") or []
+        if not isinstance(tasks, list) or not tasks:
+            return "ERROR: legion tasks must be a non-empty list"
+
+        root_goal = payload.get("root_goal", "")
+
+        try:
+            run = await get_legion().start_run(
+                root_goal=root_goal,
+                tasks=tasks,
+            )
+        except (ValueError, RuntimeError) as e:
+            return f"ERROR: {e}"
+
+        n_l1 = len(run.l1_nodes())
+        n_done = sum(1 for n in run.nodes.values() if n.status.value == "done")
+        header = (
+            f"Legion {run.run_id} complete: "
+            f"{n_done}/{len(run.nodes)} nodes succeeded "
+            f"({n_l1} L1 cogitators)\n"
+        )
+        return header + "\n" + run.summary
 
     # ------------------------------------------------------------------
     # Delegate task execution

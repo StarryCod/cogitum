@@ -861,7 +861,59 @@ def cogit(action: str, label: str = "", index: int = 0, scope: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Delegate Task
+# Legion — recursive 2-level swarm. Supersedes the old delegate_task.
+# ---------------------------------------------------------------------------
+#
+# The tool itself is a thin facade that hands control to the Agent's
+# main loop via a sentinel string. The actual orchestration lives in
+# cogitum.core.legion (runtime) and cogitum.core.legion_worker
+# (agent-backed cogitator). See those modules for the lifecycle.
+
+@tool(tags=["legion", "delegate"])
+def legion(tasks: str, root_goal: str = "") -> str:
+    """Spawn a parallel team of Cogitators to work on independent subtasks.
+
+    Each Cogitator gets the SAME tool catalog the lead Cogitum has,
+    plus async sibling messaging. L1 Cogitators may further delegate
+    to up to 3 L2 sub-Cogitators (max depth = 2 — L2 cannot recurse).
+
+    Use this for genuinely independent work that benefits from
+    parallelism: refactor + tests + docs in one shot, multi-file
+    audit, parallel research over different sources, etc.
+
+    DON'T use it when the steps are sequential (write file → run it →
+    read result) — a single-actor loop is faster there.
+
+    Args:
+        tasks: JSON array of {id?, goal, context?} dicts.
+               Maximum 5 L1 cogitators per call. Each "goal" must be
+               a self-contained instruction; the cogitator does not
+               see your conversation history, only its goal+context.
+        root_goal: Short summary of the overall objective. Shown in
+                   the legion tree UI as the root node title; not
+                   passed to cogitators.
+
+    Returns:
+        Aggregated summary listing every L1 node's status and output.
+    """
+    import json as _json
+
+    try:
+        task_list = _json.loads(tasks) if isinstance(tasks, str) else tasks
+    except _json.JSONDecodeError as e:
+        return f"ERROR: invalid JSON in tasks: {e}"
+
+    if not isinstance(task_list, list) or not task_list:
+        return "ERROR: tasks must be a non-empty array"
+
+    # Defer execution to the agent loop's _run_legion() — it has the
+    # async machinery and event-queue plumbing for the TUI tree view.
+    payload = {"tasks": task_list, "root_goal": root_goal or ""}
+    return f"LEGION_RUN:{_json.dumps(payload)}"
+
+
+# ---------------------------------------------------------------------------
+# Delegate Task — kept temporarily for backward compat; legion is preferred.
 # ---------------------------------------------------------------------------
 
 @tool(tags=["delegate"])
