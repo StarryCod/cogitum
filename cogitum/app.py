@@ -1210,24 +1210,79 @@ class CogitumApp(App):
         self._session_msg_count = 0
 
     def _resume_session(self, session_id: str) -> None:
-        """Load a session from disk."""
+        """Load a session from disk and faithfully reconstruct the feed.
+
+        Earlier versions skipped ToolCallParts and tool-role messages
+        entirely, so resumed sessions looked like a stripped chat —
+        all the agent's tool work disappeared from the visible feed.
+        Now we replay every part: user bubbles, assistant text +
+        thinking, tool-call cards (with their results filled in from
+        the matching tool-role message), and any errors that were
+        captured.
+        """
+        from .core.events import (
+            ImagePart, TextPart, ThinkingPart,
+            ToolCallPart, ToolResultPart,
+        )
+
         store = get_store()
         messages = store.load_session(session_id)
         meta = store.get_meta(session_id)
         self._history = messages
         self._session_id = session_id
         self._session_msg_count = len(messages)
-        # Rebuild feed with loaded messages
         feed = self.query_one("#feed-pane", Feed)
         feed.clear()
+
+        # First pass: collect tool results so we can attach them to
+        # their matching tool-call cards inline. Without this the
+        # cards would render as 'pending' forever in the replayed feed.
+        results_by_id: dict[str, ToolResultPart] = {}
+        for msg in messages:
+            if msg.role == "tool":
+                for part in msg.parts:
+                    if isinstance(part, ToolResultPart):
+                        results_by_id[part.tool_call_id] = part
+
+        # Second pass: render the conversation.
         for msg in messages:
             if msg.role == "user":
                 feed.append_user(msg.text)
-            elif msg.role == "assistant":
-                if msg.text:
-                    feed.append_agent(msg.text, meta="restored")
-            elif msg.role == "tool":
-                pass  # skip tool results in restored view
+                continue
+            if msg.role == "assistant":
+                # Walk parts in order so tool calls land in the right
+                # spot relative to surrounding text.
+                pending_text: list[str] = []
+                for part in msg.parts:
+                    if isinstance(part, TextPart):
+                        if part.text:
+                            pending_text.append(part.text)
+                    elif isinstance(part, ThinkingPart):
+                        # Thinking blocks get folded into the agent
+                        # block style. They render compactly and are
+                        # collapsible.
+                        if part.text:
+                            pending_text.append(part.text)
+                    elif isinstance(part, ToolCallPart):
+                        # Flush buffered text before the tool card.
+                        if pending_text:
+                            feed.append_agent("".join(pending_text), meta="restored")
+                            pending_text = []
+                        card = feed.append_tool_call(
+                            part.name, part.arguments, call_id=part.id,
+                            preparing=False,
+                        )
+                        result = results_by_id.get(part.id)
+                        if result is not None:
+                            card.set_result(result.content, error=result.is_error)
+                # Any text after the last tool call.
+                if pending_text:
+                    feed.append_agent("".join(pending_text), meta="restored")
+                continue
+            # Tool-role messages are already merged into the cards
+            # above via results_by_id; nothing more to render here.
+            # System / error roles fall through silently for now.
+
         title = meta.title if meta else session_id
         feed.append_system(f"resumed: {title} ({len(messages)} messages)", "resume")
 
