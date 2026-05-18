@@ -733,8 +733,61 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _windows_init() -> None:
+    """Configure the Windows console for UTF-8 + ANSI before any
+    output happens.
+
+    Default cmd.exe / older PowerShell ship with codepage 866 (RU) or
+    437 (US) — both murder the box-drawing chars (─│╭╯) Cogitum's
+    TUI relies on. This raises both stdin and stdout to CP65001
+    (UTF-8) and enables VT100 escape processing on the output handle
+    so Textual's ANSI sequences render as colours, not as literal
+    ``\x1b[31m`` text.
+
+    No-op on non-Windows platforms. Best-effort: any ctypes call that
+    fails is silently ignored — the TUI will fall back to ASCII
+    glyphs via design.py and Textual's standard renderer.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        # 1. Force UTF-8 codepage on both halves of the console.
+        #    65001 == CP_UTF8.
+        kernel32.SetConsoleCP(65001)
+        kernel32.SetConsoleOutputCP(65001)
+        # 2. Enable virtual terminal processing on the OUTPUT handle.
+        #    STD_OUTPUT_HANDLE = -11; ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x4.
+        STD_OUTPUT_HANDLE = -11
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        ENABLE_PROCESSED_OUTPUT = 0x0001
+        h = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(h, ctypes.byref(mode)):
+            new_mode = mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT
+            kernel32.SetConsoleMode(h, new_mode)
+        # 3. Re-encode stdout/stderr as UTF-8 if they're still on ASCII.
+        #    Python honours PYTHONIOENCODING but at this point sys.stdout
+        #    is already wrapped — reconfigure() is the surgical fix.
+        for stream in (sys.stdout, sys.stderr, sys.stdin):
+            try:
+                stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+            except (AttributeError, OSError):
+                pass
+    except Exception:
+        # Any failure here is recoverable — design.py falls back to
+        # ASCII glyphs, Textual handles colorless output gracefully.
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
-    # Load persisted secrets from ~/.config/cogitum/secrets.env BEFORE
+    # Windows console must be UTF-8 + VT-aware BEFORE Textual loads,
+    # otherwise box-drawing chars and ANSI escapes get printed as
+    # literal mojibake. No-op everywhere else.
+    _windows_init()
+
+    # Load persisted secrets from the cogitum config dir BEFORE
     # any provider/credential resolution. Real-environment variables win
     # by default (override=False), so user's .bashrc keys still take priority.
     try:
