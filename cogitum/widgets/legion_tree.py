@@ -71,7 +71,7 @@ from ..core.legion import (
 )
 from ..design import (
     BG, BG_SOFT, BRONZE, COPPER, GOLD, GOLD_DIM, GOLD_HI,
-    MUTED, OK, RULE, RUST, SURFACE, TXT, TXT_DIM,
+    MUTED, OK, RULE, RUST, SURFACE, SURFACE_DIM, TXT, TXT_DIM,
 )
 
 
@@ -113,34 +113,34 @@ class _NodeCard(Static):
     All three accept the same update_from(run, selected_id) refresh.
     """
 
-    DEFAULT_CSS = """
-    _NodeCard.l0 {
+    DEFAULT_CSS = f"""
+    _NodeCard.l0 {{
         width: 56;
         height: 5;
         padding: 0 2;
-        background: #161618;
-        border: round #F5C24A;
-        color: #E6E1CF;
-    }
-    _NodeCard.l1 {
+        background: {BG_SOFT};
+        border: round {GOLD_HI};
+        color: {TXT};
+    }}
+    _NodeCard.l1 {{
         width: 30;
         height: 6;
         padding: 0 1;
-        background: #161618;
-        border: round #A8732D;
-        color: #E6E1CF;
-    }
-    _NodeCard.l2 {
+        background: {BG_SOFT};
+        border: round {BRONZE};
+        color: {TXT};
+    }}
+    _NodeCard.l2 {{
         width: 22;
         height: 5;
         padding: 0 1;
-        background: #1A1A1D;
-        border: round #5A5648;
-        color: #C8C2A8;
-    }
-    _NodeCard.selected {
-        border: heavy #F5C24A;
-    }
+        background: {SURFACE_DIM};
+        border: round {MUTED};
+        color: {TXT_DIM};
+    }}
+    _NodeCard.selected {{
+        border: heavy {GOLD_HI};
+    }}
     """
 
     def __init__(self, node_id: str, depth: int, **kw) -> None:
@@ -193,56 +193,56 @@ class _NodeCard(Static):
 class LegionTreeScreen(ModalScreen[None]):
     """Full-screen modal: live tree + detail pane for a Legion run."""
 
-    DEFAULT_CSS = """
-    LegionTreeScreen { background: #0E0E11; }
-    #legion-shell { width: 100%; height: 100%; padding: 1 2; }
+    DEFAULT_CSS = f"""
+    LegionTreeScreen {{ background: {BG}; }}
+    #legion-shell {{ width: 100%; height: 100%; padding: 1 2; }}
 
     /* Header strip */
-    #legion-title  { color: #F5C24A; text-style: bold; height: 1; }
-    #legion-status { color: #9C957D; height: 1; padding-bottom: 1; }
+    #legion-title  {{ color: {GOLD_HI}; text-style: bold; height: 1; }}
+    #legion-status {{ color: {TXT_DIM}; height: 1; padding-bottom: 1; }}
 
     /* Tree section */
-    #legion-tree-area { height: auto; }
+    #legion-tree-area {{ height: auto; }}
 
-    #legion-l0-row { height: auto; align: center middle; padding: 1 0; }
+    #legion-l0-row {{ height: auto; align: center middle; padding: 1 0; }}
 
     /* L1 row: each L1 + its L2 stack lives in a vertical column,
        columns spread horizontally and centered as a group. */
-    #legion-l1-row {
+    #legion-l1-row {{
         height: auto;
         layout: horizontal;
         align: center top;
-    }
-    .l1-column {
+    }}
+    .l1-column {{
         layout: vertical;
         align: center top;
         padding: 0 1;
         height: auto;
         width: auto;
-    }
-    .l2-stack {
+    }}
+    .l2-stack {{
         layout: vertical;
         align: center top;
         height: auto;
         width: auto;
-    }
+    }}
 
     /* Spacer rows between depth levels (no connectors — they didn't
        align cleanly across font widths so we removed them). */
-    .legion-spacer { height: 1; width: 100%; color: #2A2620; }
+    .legion-spacer {{ height: 1; width: 100%; color: {RULE}; }}
 
     /* Detail pane */
-    #legion-detail {
+    #legion-detail {{
         height: 1fr;
-        background: #161618;
-        border: round #2A2620;
+        background: {BG_SOFT};
+        border: round {RULE};
         padding: 1 2;
         margin-top: 1;
-    }
-    #legion-detail-title { color: #F5C24A; text-style: bold; height: 1; }
-    #legion-detail-body { color: #E6E1CF; padding-top: 1; }
+    }}
+    #legion-detail-title {{ color: {GOLD_HI}; text-style: bold; height: 1; }}
+    #legion-detail-body {{ color: {TXT}; padding-top: 1; }}
 
-    #legion-foot { height: 1; padding-top: 1; color: #7A5A1A; }
+    #legion-foot {{ height: 1; padding-top: 1; color: {GOLD_DIM}; }}
     """
 
     BINDINGS: ClassVar[list[Binding]] = [

@@ -33,22 +33,34 @@ _THEME = get_active_theme()
 
 GOLD_HI    = _THEME["GOLD_HI"]
 GOLD       = _THEME["GOLD"]
+GOLD_BRIGHT= _THEME["GOLD_BRIGHT"]
 BRONZE     = _THEME["BRONZE"]
 COPPER     = _THEME["COPPER"]
 GOLD_DIM   = _THEME["GOLD_DIM"]
 RUST       = _THEME["RUST"]
+RUST_HI    = _THEME["RUST_HI"]
 OK         = _THEME["OK"]
 OLIVE      = _THEME["OLIVE"]
 
-BG         = _THEME["BG"]
-BG_SOFT    = _THEME["BG_SOFT"]
-SURFACE    = _THEME["SURFACE"]
-SURFACE_HI = _THEME["SURFACE_HI"]
-RULE       = _THEME["RULE"]
+BG            = _THEME["BG"]
+BG_SOFT       = _THEME["BG_SOFT"]
+SURFACE       = _THEME["SURFACE"]
+SURFACE_DIM   = _THEME["SURFACE_DIM"]
+SURFACE_HI    = _THEME["SURFACE_HI"]
+RULE          = _THEME["RULE"]
+OUTLINE_DIM   = _THEME["OUTLINE_DIM"]
+HOVER_BG      = _THEME["HOVER_BG"]
+DANGER_BG     = _THEME["DANGER_BG"]
+DANGER_BORDER = _THEME["DANGER_BORDER"]
 
 TXT        = _THEME["TXT"]
+TXT_BRIGHT = _THEME["TXT_BRIGHT"]
 TXT_DIM    = _THEME["TXT_DIM"]
+TXT_FAINT  = _THEME["TXT_FAINT"]
 MUTED      = _THEME["MUTED"]
+
+LABEL      = _THEME["LABEL"]
+FORM_HELP  = _THEME["FORM_HELP"]
 
 
 # ── Unicode capability detection ────────────────────────────────────────────

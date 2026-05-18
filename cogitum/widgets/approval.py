@@ -19,7 +19,16 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
 
-from ..design import GOLD, GOLD_HI, BRONZE, COPPER, TXT_DIM, RUST
+from ..design import (
+    GOLD,
+    GOLD_HI,
+    GOLD_DIM,
+    BRONZE,
+    COPPER,
+    TXT_DIM,
+    RUST,
+    SURFACE,
+)
 import logging
 
 log = logging.getLogger(__name__)
@@ -53,33 +62,33 @@ class ApprovalWidget(Widget, can_focus=True):
     User picks: Sanction / Forbid with arrow keys + Enter, or [Y]/[N].
     """
 
-    DEFAULT_CSS = """
-    ApprovalWidget {
+    DEFAULT_CSS = f"""
+    ApprovalWidget {{
         height: auto;
         margin: 1 1;
         padding: 1 2;
-        border: tall #A8732D;
-        background: #14110C;
-    }
-    ApprovalWidget.danger {
-        border: tall #9B3A2A;
-        background: #1A0E0C;
-    }
-    ApprovalWidget:focus {
-        border: tall #F5C24A;
-    }
-    ApprovalWidget #approval-header {
+        border: tall {BRONZE};
+        background: {SURFACE};
+    }}
+    ApprovalWidget.danger {{
+        border: tall {RUST};
+        background: {SURFACE};
+    }}
+    ApprovalWidget:focus {{
+        border: tall {GOLD_HI};
+    }}
+    ApprovalWidget #approval-header {{
         height: auto;
         margin-bottom: 1;
-    }
-    ApprovalWidget #approval-options {
+    }}
+    ApprovalWidget #approval-options {{
         height: auto;
-    }
-    ApprovalWidget #approval-hint {
+    }}
+    ApprovalWidget #approval-hint {{
         height: 1;
-        color: #7A5A1A;
+        color: {GOLD_DIM};
         margin-top: 1;
-    }
+    }}
     """
 
     # ── Messages ──────────────────────────────────────────────────────────────

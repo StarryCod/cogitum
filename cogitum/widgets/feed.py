@@ -740,16 +740,16 @@ class UpdateBanner(Static):
     iff `update_check.check()` returns a newer master version."""
 
     DEFAULT_CLASSES = "feed-entry feed-update-banner"
-    DEFAULT_CSS = """
-    UpdateBanner {
+    DEFAULT_CSS = f"""
+    UpdateBanner {{
         margin: 1 4;
         padding: 1 2;
-        background: #161618;
-        border: round #F5C24A;
-        color: #E6E1CF;
+        background: {BG_SOFT};
+        border: round {GOLD_HI};
+        color: {TXT};
         text-align: center;
         height: auto;
-    }
+    }}
     """
 
     def __init__(self, current: str, latest: str, command: str, **kw) -> None:

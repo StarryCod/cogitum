@@ -29,33 +29,64 @@ from typing import Mapping
 # Token names every theme must define. Keep in sync with the constants
 # exported from :mod:`cogitum.design`.
 TOKEN_NAMES: tuple[str, ...] = (
-    "GOLD_HI", "GOLD", "BRONZE", "COPPER", "GOLD_DIM",
-    "RUST", "OK", "OLIVE",
-    "BG", "BG_SOFT", "SURFACE", "SURFACE_HI", "RULE",
-    "TXT", "TXT_DIM", "MUTED",
+    # Accents
+    "GOLD_HI", "GOLD", "GOLD_BRIGHT", "BRONZE", "COPPER", "GOLD_DIM",
+    "RUST", "RUST_HI", "OK", "OLIVE",
+    # Surfaces
+    "BG", "BG_SOFT", "SURFACE", "SURFACE_DIM", "SURFACE_HI", "RULE",
+    "OUTLINE_DIM", "HOVER_BG", "DANGER_BG", "DANGER_BORDER",
+    # Text
+    "TXT", "TXT_BRIGHT", "TXT_DIM", "TXT_FAINT", "MUTED",
+    # Form / labels
+    "LABEL", "FORM_HELP",
 )
+
+
+def _extend_theme(base: dict[str, str], **extras: str) -> dict[str, str]:
+    """Merge a base palette with a small set of extension tokens.
+
+    Used to attach ``GOLD_BRIGHT`` / ``HOVER_BG`` / etc. to each theme
+    without duplicating every existing token in every dict.
+    """
+    out = dict(base)
+    out.update(extras)
+    return out
 
 
 # ─── Imperial Fists (default) ───────────────────────────────────────────────
 # Bright sons of Dorn. Gold/bronze/copper on charcoal, parchment text.
 # This is Cogitum's original colourway — warm, high-contrast, ceremonial.
 IMPERIAL_FISTS = {
-    "GOLD_HI":    "#F5C24A",
-    "GOLD":       "#D9A23B",
-    "BRONZE":     "#A8732D",
-    "COPPER":     "#8C5A22",
-    "GOLD_DIM":   "#7A5A1A",
-    "RUST":       "#9B3A2A",
-    "OK":         "#9B8B3A",
-    "OLIVE":      "#5C5430",
-    "BG":         "#0E0E11",
-    "BG_SOFT":    "#161618",
-    "SURFACE":    "#1C1C1F",
-    "SURFACE_HI": "#22221F",
-    "RULE":       "#2A2620",
+    "GOLD_HI":     "#F5C24A",
+    "GOLD":        "#D9A23B",
+    "GOLD_BRIGHT": "#FFD96A",   # hover highlight, brighter than GOLD_HI
+    "BRONZE":      "#A8732D",
+    "COPPER":      "#8C5A22",
+    "GOLD_DIM":    "#7A5A1A",
+    "RUST":        "#9B3A2A",
+    "RUST_HI":     "#CF5A3A",   # hover state for danger buttons
+    "OK":          "#9B8B3A",
+    "OLIVE":       "#5C5430",
+
+    "BG":            "#0E0E11",
+    "BG_SOFT":       "#161618",
+    "SURFACE":       "#1C1C1F",
+    "SURFACE_DIM":   "#1A1A1D",  # legion L2 cards (slightly cooler than SURFACE)
+    "SURFACE_HI":    "#22221F",
+    "RULE":          "#2A2620",
+    "OUTLINE_DIM":   "#3D3728",  # button default border (warm dark)
+    "HOVER_BG":      "#2A2218",  # default/primary hover background
+    "DANGER_BG":     "#251515",  # danger hover bg (red-tinged dark)
+    "DANGER_BORDER": "#5A2A1A",  # danger button border (dark rust)
+
     "TXT":        "#E6E1CF",
+    "TXT_BRIGHT": "#E6E1CF",
     "TXT_DIM":    "#9C957D",
+    "TXT_FAINT":  "#6B6560",   # session-picker faint
     "MUTED":      "#5A5648",
+
+    "LABEL":      "#C2A45A",   # form labels (between GOLD and BRONZE)
+    "FORM_HELP":  "#6E6450",   # form help text (between TXT_DIM and MUTED)
 }
 
 
@@ -180,13 +211,51 @@ BLACK_TEMPLARS = {
 
 # ─── Registry ───────────────────────────────────────────────────────────────
 
+def _autofill(palette: dict[str, str]) -> dict[str, str]:
+    """Fill in extension tokens for themes that don't define them.
+
+    The Imperial Fists palette spells out every TOKEN_NAMES entry
+    explicitly. The other five themes were added before the extended
+    token set existed, so this helper maps each missing extension
+    token to a sensible existing colour from the same theme — keeping
+    every theme self-contained without duplicating 10 lines of
+    boilerplate per palette.
+
+    Mapping:
+      GOLD_BRIGHT   ← GOLD_HI    (hover takes the primary accent)
+      RUST_HI       ← RUST       (hover takes the same red)
+      SURFACE_DIM   ← SURFACE    (legion L2 cards reuse main surface)
+      OUTLINE_DIM   ← RULE       (button borders use the divider tint)
+      HOVER_BG      ← SURFACE_HI (hover lifts to the active-surface tint)
+      DANGER_BG     ← SURFACE    (red-tinged variant collapses to surface)
+      DANGER_BORDER ← RUST       (danger border uses the error red)
+      TXT_BRIGHT    ← TXT        (no separate brighter text by default)
+      TXT_FAINT     ← MUTED      (faintest text reuses MUTED)
+      LABEL         ← GOLD       (form labels match mid-accent)
+      FORM_HELP     ← TXT_DIM    (form help reuses secondary text)
+    """
+    out = dict(palette)
+    out.setdefault("GOLD_BRIGHT",   palette["GOLD_HI"])
+    out.setdefault("RUST_HI",       palette["RUST"])
+    out.setdefault("SURFACE_DIM",   palette["SURFACE"])
+    out.setdefault("OUTLINE_DIM",   palette["RULE"])
+    out.setdefault("HOVER_BG",      palette["SURFACE_HI"])
+    out.setdefault("DANGER_BG",     palette["SURFACE"])
+    out.setdefault("DANGER_BORDER", palette["RUST"])
+    out.setdefault("TXT_BRIGHT",    palette["TXT"])
+    out.setdefault("TXT_FAINT",     palette["MUTED"])
+    out.setdefault("LABEL",         palette["GOLD"])
+    out.setdefault("FORM_HELP",     palette["TXT_DIM"])
+    return out
+
+
 THEMES: dict[str, dict[str, str]] = {
-    "imperial_fists":     IMPERIAL_FISTS,
-    "salamanders":        SALAMANDERS,
-    "iron_warriors":      IRON_WARRIORS,
-    "death_korps":        DEATH_KORPS,
-    "adeptus_mechanicus": ADEPTUS_MECHANICUS,
-    "black_templars":     BLACK_TEMPLARS,
+    "imperial_fists":     _autofill(IMPERIAL_FISTS),
+    "salamanders":        _autofill(SALAMANDERS),
+    "iron_warriors":      _autofill(IRON_WARRIORS),
+    "death_korps":        _autofill(DEATH_KORPS),
+    "adeptus_mechanicus": _autofill(ADEPTUS_MECHANICUS),
+    "black_templars":     _autofill(BLACK_TEMPLARS),
 }
 
 

@@ -21,7 +21,10 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static, TextArea
 
-from ..design import GOLD, GOLD_DIM, GOLD_HI, MUTED, TXT, TXT_DIM, BRONZE
+from ..design import (
+    BG_SOFT, BRONZE, GOLD, GOLD_DIM, GOLD_HI,
+    MUTED, RULE, SURFACE, TXT, TXT_DIM,
+)
 
 
 # ── Command definitions ──────────────────────────────────────────────────────
@@ -74,19 +77,19 @@ def _filter_commands(query: str) -> list[CommandDef]:
 # ── Dropdown menu ────────────────────────────────────────────────────────────
 
 class CommandMenu(Static):
-    DEFAULT_CSS = """
-    CommandMenu {
+    DEFAULT_CSS = f"""
+    CommandMenu {{
         display: none;
         width: 100%;
         max-height: 12;
         height: auto;
-        background: #161618;
-        border: round #2A2620;
+        background: {BG_SOFT};
+        border: round {RULE};
         padding: 0 1;
-    }
-    CommandMenu.visible {
+    }}
+    CommandMenu.visible {{
         display: block;
-    }
+    }}
     """
 
     selected_index: reactive[int] = reactive(0)
@@ -211,39 +214,43 @@ class ComposerArea(TextArea):
 class Composer(Widget):
     """Multi-line input with slash-command autocomplete + history + paste."""
 
-    DEFAULT_CSS = """
-    Composer {
+    # Theme-aware: hex literals are interpolated from cogitum.design
+    # at class load. Restart Cogitum after changing the active theme
+    # in the Setup wizard for the new colours to take effect — TCSS
+    # bakes at App class definition time.
+    DEFAULT_CSS = f"""
+    Composer {{
         height: auto;
         max-height: 20;
         width: 100%;
         layout: vertical;
-    }
-    ComposerArea {
+    }}
+    ComposerArea {{
         height: auto;
         min-height: 3;
         max-height: 7;
-        background: #1A1816;
-        color: #E6E1CF;
-        border: tall #A8732D;
+        background: {SURFACE};
+        color: {TXT};
+        border: tall {BRONZE};
         padding: 0 1;
-    }
-    ComposerArea:focus {
-        background: #1A1816;
-        border: tall #F5C24A;
-    }
-    ComposerArea > .text-area--cursor-line {
-        background: #1A1816;
-    }
-    #paste-indicator {
+    }}
+    ComposerArea:focus {{
+        background: {SURFACE};
+        border: tall {GOLD_HI};
+    }}
+    ComposerArea > .text-area--cursor-line {{
+        background: {SURFACE};
+    }}
+    #paste-indicator {{
         display: none;
         height: 1;
         padding: 0 1;
-        color: #A8732D;
-        background: #1A1610;
-    }
-    #paste-indicator.visible {
+        color: {BRONZE};
+        background: {BG_SOFT};
+    }}
+    #paste-indicator.visible {{
         display: block;
-    }
+    }}
     """
 
     COMPONENT_CLASSES: ClassVar[set[str]] = set()

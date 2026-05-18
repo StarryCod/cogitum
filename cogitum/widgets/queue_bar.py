@@ -9,25 +9,25 @@ from __future__ import annotations
 from rich.text import Text
 from textual.widget import Widget
 
-from ..design import GOLD, GOLD_DIM, MUTED, TXT_DIM
+from ..design import BG_SOFT, GOLD, GOLD_DIM, MUTED, TXT_DIM, RULE
 
 
 class QueueBar(Widget):
     """Pinned bar showing queued messages above composer."""
 
-    DEFAULT_CSS = """
-    QueueBar {
+    DEFAULT_CSS = f"""
+    QueueBar {{
         height: auto;
         max-height: 5;
         width: 100%;
-        background: #161410;
-        border-top: tall #2A2620;
+        background: {BG_SOFT};
+        border-top: tall {RULE};
         padding: 0 2;
         display: none;
-    }
-    QueueBar.has-items {
+    }}
+    QueueBar.has-items {{
         display: block;
-    }
+    }}
     """
 
     def __init__(self, **kw) -> None:

@@ -58,6 +58,11 @@ from .design import (
     RUST,
     TXT,
     TXT_DIM,
+    BG,
+    BG_SOFT,
+    SURFACE,
+    SURFACE_HI,
+    RULE,
 )
 import logging
 
@@ -78,15 +83,15 @@ class _Static(Static):
 # ---------------------------------------------------------------------------
 
 class MessageModal(ModalScreen[None]):
-    DEFAULT_CSS = """
-    MessageModal { align: center middle; background: rgba(0,0,0,0.55); }
-    #msg-shell {
+    DEFAULT_CSS = f"""
+    MessageModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
+    #msg-shell {{
         width: 60; padding: 1 2;
-        background: #161618; border: round #7A5A1A;
-    }
-    #msg-title { color: #F5C24A; text-style: bold; }
-    #msg-body  { color: #E6E1CF; padding: 1 0; }
-    #msg-foot  { height: 3; align: right middle; }
+        background: {BG_SOFT}; border: round {GOLD_DIM};
+    }}
+    #msg-title {{ color: {GOLD_HI}; text-style: bold; }}
+    #msg-body  {{ color: {TXT}; padding: 1 0; }}
+    #msg-foot  {{ height: 3; align: right middle; }}
     """
     BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "dismiss", "close"), Binding("enter", "dismiss", "close")]
 
@@ -113,13 +118,13 @@ class MessageModal(ModalScreen[None]):
 
 
 class ConfirmModal(ModalScreen[bool]):
-    DEFAULT_CSS = """
-    ConfirmModal { align: center middle; background: rgba(0,0,0,0.55); }
-    #conf-shell { width: 64; padding: 1 2; background: #161618; border: round #A8732D; }
-    #conf-title { color: #F5C24A; text-style: bold; }
-    #conf-body  { color: #E6E1CF; padding: 1 0; }
-    #conf-foot  { height: 3; align: right middle; }
-    #conf-foot Button { margin-left: 1; }
+    DEFAULT_CSS = f"""
+    ConfirmModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
+    #conf-shell {{ width: 64; padding: 1 2; background: {BG_SOFT}; border: round {BRONZE}; }}
+    #conf-title {{ color: {GOLD_HI}; text-style: bold; }}
+    #conf-body  {{ color: {TXT}; padding: 1 0; }}
+    #conf-foot  {{ height: 3; align: right middle; }}
+    #conf-foot Button {{ margin-left: 1; }}
     """
     BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "no", "cancel")]
 
@@ -163,32 +168,32 @@ class KeyEntryResult:
 class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
     """Collect an API key + storage backend choice."""
 
-    DEFAULT_CSS = """
-    KeyEntryModal { align: center middle; background: rgba(0,0,0,0.55); }
-    #key-shell {
+    DEFAULT_CSS = f"""
+    KeyEntryModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
+    #key-shell {{
         width: 78; padding: 1 2;
-        background: #161618; border: round #7A5A1A;
-    }
-    #key-title  { color: #F5C24A; text-style: bold; height: 1; margin-bottom: 1; }
-    #key-sub    { color: #9C957D; height: 1; margin-bottom: 1; }
-    .krow       { height: 4; margin-bottom: 0; }
-    .krow Label { width: 18; color: #9C957D; content-align: left middle; height: 100%; padding: 0 1 0 0; }
-    .krow Input {
-        width: 1fr; background: #1C1C1F; border: round #2A2620;
-        color: #E6E1CF; height: 3;
-    }
-    .krow Input:focus { border: round #A8732D; }
-    #backend-section { height: auto; margin: 1 0; }
-    #backend-label { color: #9C957D; height: 1; margin-bottom: 1; }
-    .be-option {
+        background: {BG_SOFT}; border: round {GOLD_DIM};
+    }}
+    #key-title  {{ color: {GOLD_HI}; text-style: bold; height: 1; margin-bottom: 1; }}
+    #key-sub    {{ color: {TXT_DIM}; height: 1; margin-bottom: 1; }}
+    .krow       {{ height: 4; margin-bottom: 0; }}
+    .krow Label {{ width: 18; color: {TXT_DIM}; content-align: left middle; height: 100%; padding: 0 1 0 0; }}
+    .krow Input {{
+        width: 1fr; background: {SURFACE}; border: round {RULE};
+        color: {TXT}; height: 3;
+    }}
+    .krow Input:focus {{ border: round {BRONZE}; }}
+    #backend-section {{ height: auto; margin: 1 0; }}
+    #backend-label {{ color: {TXT_DIM}; height: 1; margin-bottom: 1; }}
+    .be-option {{
         height: 2; padding: 0 1; margin-bottom: 0;
-        color: #9C957D;
-    }
-    .be-option:hover { background: #1C1C1F; }
-    .be-option.selected { color: #F5C24A; background: #1A1610; }
-    #key-hint { color: #7A5A1A; height: auto; margin: 1 0; }
-    #key-foot { height: 3; align: right middle; margin-top: 1; }
-    #key-foot Button { margin-left: 1; min-width: 10; }
+        color: {TXT_DIM};
+    }}
+    .be-option:hover {{ background: {SURFACE}; }}
+    .be-option.selected {{ color: {GOLD_HI}; background: {BG_SOFT}; }}
+    #key-hint {{ color: {GOLD_DIM}; height: auto; margin: 1 0; }}
+    #key-foot {{ height: 3; align: right middle; margin-top: 1; }}
+    #key-foot Button {{ margin-left: 1; min-width: 10; }}
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
@@ -510,22 +515,22 @@ class AddProviderModal(ModalScreen[ProviderPreset | str | None]):
         None           — user cancelled
     """
 
-    DEFAULT_CSS = """
-    AddProviderModal { align: center middle; background: rgba(0,0,0,0.55); }
-    #ap-shell {
+    DEFAULT_CSS = f"""
+    AddProviderModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
+    #ap-shell {{
         width: 84; height: 32; padding: 1 2;
-        background: #161618; border: round #7A5A1A;
-    }
-    #ap-title { color: #F5C24A; text-style: bold; height: 1; }
-    #ap-sub   { color: #9C957D; height: 1; padding-bottom: 1; }
-    #ap-list  {
-        height: 1fr; background: #0E0E11; border: round #2A2620;
+        background: {BG_SOFT}; border: round {GOLD_DIM};
+    }}
+    #ap-title {{ color: {GOLD_HI}; text-style: bold; height: 1; }}
+    #ap-sub   {{ color: {TXT_DIM}; height: 1; padding-bottom: 1; }}
+    #ap-list  {{
+        height: 1fr; background: {BG}; border: round {RULE};
         padding: 0 1;
-    }
+    }}
     #ap-list > ListItem.--highlight,
-    #ap-list > ListItem:hover { background: #261E10; }
-    #ap-foot { height: 3; align: right middle; margin-top: 1; }
-    #ap-foot Button { margin-left: 1; min-width: 12; }
+    #ap-list > ListItem:hover {{ background: {RULE}; }}
+    #ap-foot {{ height: 3; align: right middle; margin-top: 1; }}
+    #ap-foot Button {{ margin-left: 1; min-width: 12; }}
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
@@ -607,18 +612,18 @@ class AddProviderModal(ModalScreen[ProviderPreset | str | None]):
 class CustomProviderModal(ModalScreen[ProviderPreset | None]):
     """Free-form provider definition — id, name, base_url, format, auth."""
 
-    DEFAULT_CSS = """
-    CustomProviderModal { align: center middle; background: rgba(0,0,0,0.55); }
-    #cp-shell { width: 78; padding: 1 2; background: #161618; border: round #7A5A1A; }
-    #cp-title { color: #F5C24A; text-style: bold; height: 1; margin-bottom: 1; }
-    .cprow { height: 4; margin-bottom: 0; }
-    .cprow Label { width: 16; color: #9C957D; content-align: left middle; height: 100%; padding: 0 1 0 0; }
-    .cprow Input {
-        width: 1fr; background: #1C1C1F; border: round #2A2620; color: #E6E1CF; height: 3;
-    }
-    .cprow Input:focus { border: round #A8732D; }
-    #cp-foot { height: 3; align: right middle; margin-top: 1; }
-    #cp-foot Button { margin-left: 1; min-width: 12; }
+    DEFAULT_CSS = f"""
+    CustomProviderModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
+    #cp-shell {{ width: 78; padding: 1 2; background: {BG_SOFT}; border: round {GOLD_DIM}; }}
+    #cp-title {{ color: {GOLD_HI}; text-style: bold; height: 1; margin-bottom: 1; }}
+    .cprow {{ height: 4; margin-bottom: 0; }}
+    .cprow Label {{ width: 16; color: {TXT_DIM}; content-align: left middle; height: 100%; padding: 0 1 0 0; }}
+    .cprow Input {{
+        width: 1fr; background: {SURFACE}; border: round {RULE}; color: {TXT}; height: 3;
+    }}
+    .cprow Input:focus {{ border: round {BRONZE}; }}
+    #cp-foot {{ height: 3; align: right middle; margin-top: 1; }}
+    #cp-foot Button {{ margin-left: 1; min-width: 12; }}
     """
 
     BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "cancel", "cancel")]
@@ -684,22 +689,22 @@ class KeyManagerModal(ModalScreen[str]):
         "add"        — user wants to add a new key (caller should chain add-key flow)
     """
 
-    DEFAULT_CSS = """
-    KeyManagerModal { align: center middle; background: rgba(0,0,0,0.55); }
-    #km-shell {
+    DEFAULT_CSS = f"""
+    KeyManagerModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
+    #km-shell {{
         width: 88; height: 32; padding: 1 2;
-        background: #161618; border: round #7A5A1A;
-    }
-    #km-title { color: #F5C24A; text-style: bold; height: 1; }
-    #km-sub   { color: #9C957D; height: 1; padding-bottom: 1; }
-    #km-list  {
-        height: 1fr; background: #0E0E11; border: round #2A2620;
+        background: {BG_SOFT}; border: round {GOLD_DIM};
+    }}
+    #km-title {{ color: {GOLD_HI}; text-style: bold; height: 1; }}
+    #km-sub   {{ color: {TXT_DIM}; height: 1; padding-bottom: 1; }}
+    #km-list  {{
+        height: 1fr; background: {BG}; border: round {RULE};
         padding: 0 1;
-    }
+    }}
     #km-list > ListItem.--highlight,
-    #km-list > ListItem:hover { background: #261E10; }
-    #km-foot { height: 3; align: right middle; margin-top: 1; }
-    #km-foot Button { margin-left: 1; min-width: 12; }
+    #km-list > ListItem:hover {{ background: {RULE}; }}
+    #km-foot {{ height: 3; align: right middle; margin-top: 1; }}
+    #km-foot Button {{ margin-left: 1; min-width: 12; }}
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
@@ -820,29 +825,29 @@ class KeyManagerModal(ModalScreen[str]):
 class ManageModelsModal(ModalScreen[bool]):
     """Show all models for a provider, allow removing or adding manually."""
 
-    DEFAULT_CSS = """
-    ManageModelsModal { align: center middle; background: rgba(0,0,0,0.55); }
-    #mm-shell {
+    DEFAULT_CSS = f"""
+    ManageModelsModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
+    #mm-shell {{
         width: 96; height: 36; padding: 1 2;
-        background: #161618; border: round #7A5A1A;
-    }
-    #mm-title { color: #F5C24A; text-style: bold; height: 1; }
-    #mm-sub   { color: #9C957D; height: 1; padding-bottom: 1; }
-    #mm-list  {
-        height: 1fr; background: #0E0E11; border: round #2A2620;
+        background: {BG_SOFT}; border: round {GOLD_DIM};
+    }}
+    #mm-title {{ color: {GOLD_HI}; text-style: bold; height: 1; }}
+    #mm-sub   {{ color: {TXT_DIM}; height: 1; padding-bottom: 1; }}
+    #mm-list  {{
+        height: 1fr; background: {BG}; border: round {RULE};
         padding: 0 1;
-    }
+    }}
     #mm-list > ListItem.--highlight,
-    #mm-list > ListItem:hover { background: #261E10; }
-    #mm-add-row { height: 3; margin-top: 1; }
-    #mm-add-row Input {
-        background: #1C1C1F; border: round #2A2620; color: #E6E1CF;
+    #mm-list > ListItem:hover {{ background: {RULE}; }}
+    #mm-add-row {{ height: 3; margin-top: 1; }}
+    #mm-add-row Input {{
+        background: {SURFACE}; border: round {RULE}; color: {TXT};
         height: 3; width: 1fr;
-    }
-    #mm-add-row Input:focus { border: round #A8732D; }
-    #mm-add-row Button { margin-left: 1; min-width: 10; height: 3; }
-    #mm-foot { height: 3; align: right middle; margin-top: 1; }
-    #mm-foot Button { margin-left: 1; min-width: 10; height: 3; }
+    }}
+    #mm-add-row Input:focus {{ border: round {BRONZE}; }}
+    #mm-add-row Button {{ margin-left: 1; min-width: 10; height: 3; }}
+    #mm-foot {{ height: 3; align: right middle; margin-top: 1; }}
+    #mm-foot Button {{ margin-left: 1; min-width: 10; height: 3; }}
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
@@ -1006,27 +1011,27 @@ def _infer_caps(mid: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 class OAuthLoginModal(ModalScreen[OAuthCredentials | None]):
-    DEFAULT_CSS = """
-    OAuthLoginModal { align: center middle; background: rgba(0,0,0,0.55); }
-    #oa-shell { width: 86; padding: 1 2; background: #161618; border: round #7A5A1A; }
-    #oa-title { color: #F5C24A; text-style: bold; height: 1; }
-    #oa-sub { color: #9C957D; padding-bottom: 1; }
-    #oa-url {
-        background: #0E0E11; border: round #2A2620; color: #D9A23B;
+    DEFAULT_CSS = f"""
+    OAuthLoginModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
+    #oa-shell {{ width: 86; padding: 1 2; background: {BG_SOFT}; border: round {GOLD_DIM}; }}
+    #oa-title {{ color: {GOLD_HI}; text-style: bold; height: 1; }}
+    #oa-sub {{ color: {TXT_DIM}; padding-bottom: 1; }}
+    #oa-url {{
+        background: {BG}; border: round {RULE}; color: {GOLD};
         padding: 0 1; height: 3;
-    }
-    #oa-instructions { color: #9C957D; padding: 1 0; }
-    #oa-progress {
-        background: #0E0E11; border: round #2A2620; color: #A8732D;
+    }}
+    #oa-instructions {{ color: {TXT_DIM}; padding: 1 0; }}
+    #oa-progress {{
+        background: {BG}; border: round {RULE}; color: {BRONZE};
         padding: 0 1; height: 1fr; min-height: 4;
-    }
-    #oa-paste {
-        background: #1C1C1F; border: round #2A2620; color: #E6E1CF;
+    }}
+    #oa-paste {{
+        background: {SURFACE}; border: round {RULE}; color: {TXT};
         padding: 0 1; height: 3; margin-top: 1;
-    }
-    #oa-paste:focus { border: round #A8732D; }
-    #oa-foot { height: 3; align: right middle; padding-top: 1; }
-    #oa-foot Button { margin-left: 1; }
+    }}
+    #oa-paste:focus {{ border: round {BRONZE}; }}
+    #oa-foot {{ height: 3; align: right middle; padding-top: 1; }}
+    #oa-foot Button {{ margin-left: 1; }}
     """
 
     BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "cancel", "cancel")]
@@ -1138,51 +1143,51 @@ class OAuthLoginModal(ModalScreen[OAuthCredentials | None]):
 class SetupScreen(Screen):
     """Main wizard — sections rail + content pane."""
 
-    DEFAULT_CSS = """
-    SetupScreen {
-        background: #0E0E11;
+    DEFAULT_CSS = f"""
+    SetupScreen {{
+        background: {BG};
         layout: vertical;
-    }
-    #setup-banner {
-        height: 4; padding: 1 2; background: #0E0E11; color: #F5C24A;
+    }}
+    #setup-banner {{
+        height: 4; padding: 1 2; background: {BG}; color: {GOLD_HI};
         text-style: bold;
-    }
-    #setup-tagline { color: #7A5A1A; }
-    #setup-main {
+    }}
+    #setup-tagline {{ color: {GOLD_DIM}; }}
+    #setup-main {{
         layout: horizontal; height: 1fr;
-    }
-    #setup-rail {
+    }}
+    #setup-rail {{
         width: 28; min-width: 24;
-        background: #161618; border-right: vkey #2A2620;
+        background: {BG_SOFT}; border-right: vkey {RULE};
         padding: 1 1;
-    }
-    #setup-rail > .rail-item {
+    }}
+    #setup-rail > .rail-item {{
         height: 3; padding: 1 1;
-        color: #9C957D;
-    }
-    #setup-rail > .rail-item.active {
-        background: #261E10; color: #F5C24A; text-style: bold;
-    }
-    #setup-content {
+        color: {TXT_DIM};
+    }}
+    #setup-rail > .rail-item.active {{
+        background: {RULE}; color: {GOLD_HI}; text-style: bold;
+    }}
+    #setup-content {{
         width: 1fr;
         padding: 1 2;
-        background: #0E0E11;
+        background: {BG};
         overflow-y: auto;
-    }
-    #setup-foot {
+    }}
+    #setup-foot {{
         height: 1;
-        background: #0E0E11;
-        color: #7A5A1A; padding: 0 2;
-    }
-    .card {
-        background: #161618; border: round #2A2620;
+        background: {BG};
+        color: {GOLD_DIM}; padding: 0 2;
+    }}
+    .card {{
+        background: {BG_SOFT}; border: round {RULE};
         padding: 1 2; margin-bottom: 1;
-    }
-    .card-title {
-        color: #F5C24A; text-style: bold; padding-bottom: 1;
-    }
-    .card-actions { height: 3; align: left middle; margin-top: 1; }
-    .card-actions Button { margin-right: 1; min-width: 10; }
+    }}
+    .card-title {{
+        color: {GOLD_HI}; text-style: bold; padding-bottom: 1;
+    }}
+    .card-actions {{ height: 3; align: left middle; margin-top: 1; }}
+    .card-actions Button {{ margin-right: 1; min-width: 10; }}
     """
 
     BINDINGS: ClassVar[list[Binding]] = [

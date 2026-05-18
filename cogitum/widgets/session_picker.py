@@ -17,7 +17,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from ..core.sessions import SessionMeta, get_store
-from ..design import BRONZE, GOLD, GOLD_HI, MUTED, TXT, TXT_DIM
+from ..design import BRONZE, GOLD, GOLD_HI, MUTED, TXT, TXT_DIM, TXT_FAINT, BG, SURFACE
 
 
 class SessionItem(Static):
@@ -50,76 +50,76 @@ class SessionItem(Static):
 class SessionPicker(ModalScreen):
     """Modal screen for browsing/searching sessions with preview."""
 
-    DEFAULT_CSS = """
-    SessionPicker {
+    DEFAULT_CSS = f"""
+    SessionPicker {{
         align: center middle;
-    }
-    #session-picker-box {
+    }}
+    #session-picker-box {{
         width: 90;
         height: 28;
-        background: #0E0E11;
-        border: round #A8732D;
+        background: {BG};
+        border: round {BRONZE};
         padding: 1 2;
-    }
-    #session-header {
+    }}
+    #session-header {{
         width: 100%;
         height: 1;
         margin-bottom: 1;
-    }
-    #session-search {
+    }}
+    #session-search {{
         width: 100%;
         margin-bottom: 1;
-        background: #1A1816;
-        color: #E6E1CF;
-        border: tall #A8732D;
-    }
-    #session-search:focus {
-        border: tall #F5C24A;
-    }
-    #session-content {
+        background: {SURFACE};
+        color: {TXT};
+        border: tall {BRONZE};
+    }}
+    #session-search:focus {{
+        border: tall {GOLD_HI};
+    }}
+    #session-content {{
         height: 1fr;
         width: 100%;
-    }
-    #session-list-pane {
+    }}
+    #session-list-pane {{
         width: 40;
         height: 100%;
         overflow-y: auto;
-    }
-    #session-preview-pane {
+    }}
+    #session-preview-pane {{
         width: 1fr;
         height: 100%;
-        border-left: tall #A8732D;
+        border-left: tall {BRONZE};
         padding: 0 1;
         overflow-y: auto;
-    }
-    #session-empty {
-        color: #6B6560;
+    }}
+    #session-empty {{
+        color: {TXT_FAINT};
         text-align: center;
         padding: 2;
-    }
-    #preview-header {
-        color: #F5C24A;
+    }}
+    #preview-header {{
+        color: {GOLD_HI};
         text-style: bold;
         height: 1;
         margin-bottom: 1;
-    }
-    #preview-body {
-        color: #E6E1CF;
+    }}
+    #preview-body {{
+        color: {TXT};
         height: auto;
-    }
-    .preview-role-user {
-        color: #F5C24A;
-    }
-    .preview-role-assistant {
-        color: #A8732D;
-    }
-    .preview-role-system {
-        color: #6B6560;
-    }
-    SessionItem {
+    }}
+    .preview-role-user {{
+        color: {GOLD_HI};
+    }}
+    .preview-role-assistant {{
+        color: {BRONZE};
+    }}
+    .preview-role-system {{
+        color: {TXT_FAINT};
+    }}
+    SessionItem {{
         height: 1;
         width: 100%;
-    }
+    }}
     """
 
     @dataclass

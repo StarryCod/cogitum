@@ -54,6 +54,9 @@ from .design import (
     RUST,
     TXT,
     TXT_DIM,
+    BG_SOFT,
+    LABEL,
+    FORM_HELP,
 )
 
 
@@ -286,29 +289,29 @@ class AddMCPServerModal(ModalScreen[MCPServerConfig | None]):
     Result: validated MCPServerConfig or None on cancel.
     """
 
-    DEFAULT_CSS = """
-    AddMCPServerModal {
+    DEFAULT_CSS = f"""
+    AddMCPServerModal {{
         align: center middle;
-    }
-    AddMCPServerModal > Vertical {
+    }}
+    AddMCPServerModal > Vertical {{
         width: 80%;
         max-width: 90;
         padding: 1 2;
-        background: #161618;
-        border: round #6E5024;
-    }
-    .mcp-form-row {
+        background: {BG_SOFT};
+        border: round {BRONZE};
+    }}
+    .mcp-form-row {{
         height: auto;
         margin-bottom: 1;
-    }
-    .mcp-form-label {
+    }}
+    .mcp-form-label {{
         width: 18;
-        color: #C2A45A;
-    }
-    .mcp-form-help {
-        color: #6E6450;
+        color: {LABEL};
+    }}
+    .mcp-form-help {{
+        color: {FORM_HELP};
         margin-top: 0;
-    }
+    }}
     """
 
     def __init__(self, existing: MCPServerConfig | None = None) -> None:

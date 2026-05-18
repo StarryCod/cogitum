@@ -43,6 +43,10 @@ from ..design import (
     RUST,
     TXT,
     TXT_DIM,
+    BG,
+    BG_SOFT,
+    SURFACE,
+    RULE,
 )
 
 
@@ -139,91 +143,91 @@ def _human_k(n: int) -> str:
 class ModelPicker(ModalScreen[ResolvedModel | None]):
     """Modal screen presenting all mesh models, with fuzzy filter and detail pane."""
 
-    DEFAULT_CSS = """
-    ModelPicker {
+    DEFAULT_CSS = f"""
+    ModelPicker {{
         align: center middle;
         background: rgba(0, 0, 0, 0.55);
-    }
-    #picker-shell {
+    }}
+    #picker-shell {{
         width: 84%;
         max-width: 130;
         height: 80%;
-        background: #161618;
-        border: round #7A5A1A;
+        background: {BG_SOFT};
+        border: round {GOLD_DIM};
         padding: 1 2;
         overflow-y: auto;
         scrollbar-size-vertical: 1;
-        scrollbar-color: #161618;
-        scrollbar-background: #161618;
-        scrollbar-background-active: #161618;
-        scrollbar-background-hover: #161618;
-        scrollbar-color-active: #161618;
-        scrollbar-color-hover: #161618;
-    }
-    #picker-title {
+        scrollbar-color: {BG_SOFT};
+        scrollbar-background: {BG_SOFT};
+        scrollbar-background-active: {BG_SOFT};
+        scrollbar-background-hover: {BG_SOFT};
+        scrollbar-color-active: {BG_SOFT};
+        scrollbar-color-hover: {BG_SOFT};
+    }}
+    #picker-title {{
         height: 1;
-        color: #F5C24A;
+        color: {GOLD_HI};
         text-style: bold;
-    }
-    #picker-search {
+    }}
+    #picker-search {{
         height: 3;
-        background: #1C1C1F;
-        border: round #2A2620;
-        color: #E6E1CF;
+        background: {SURFACE};
+        border: round {RULE};
+        color: {TXT};
         padding: 0 1;
         margin: 1 0 1 0;
-    }
-    #picker-search:focus {
-        border: round #A8732D;
-    }
-    #picker-body {
+    }}
+    #picker-search:focus {{
+        border: round {BRONZE};
+    }}
+    #picker-body {{
         height: 1fr;
-    }
-    #picker-list {
+    }}
+    #picker-list {{
         width: 2fr;
-        background: #0E0E11;
-        border: round #2A2620;
+        background: {BG};
+        border: round {RULE};
         padding: 0 1;
         scrollbar-size-vertical: 1;
-        scrollbar-color: #0E0E11;
-        scrollbar-background: #0E0E11;
-        scrollbar-background-active: #0E0E11;
-        scrollbar-background-hover: #0E0E11;
-        scrollbar-color-active: #0E0E11;
-        scrollbar-color-hover: #0E0E11;
-    }
+        scrollbar-color: {BG};
+        scrollbar-background: {BG};
+        scrollbar-background-active: {BG};
+        scrollbar-background-hover: {BG};
+        scrollbar-color-active: {BG};
+        scrollbar-color-hover: {BG};
+    }}
     #picker-list > ListItem.--highlight,
-    #picker-list > ListItem:hover {
-        background: #261E10;
-    }
-    #picker-detail-scroll {
+    #picker-list > ListItem:hover {{
+        background: {RULE};
+    }}
+    #picker-detail-scroll {{
         width: 1fr;
         min-width: 32;
-        background: #1C1C1F;
-        border: round #2A2620;
+        background: {SURFACE};
+        border: round {RULE};
         padding: 1 2;
         margin-left: 1;
         overflow-y: auto;
         scrollbar-size-vertical: 1;
-        scrollbar-color: #1C1C1F;
-        scrollbar-background: #1C1C1F;
-        scrollbar-color-active: #1C1C1F;
-        scrollbar-color-hover: #1C1C1F;
-        scrollbar-background-active: #1C1C1F;
-        scrollbar-background-hover: #1C1C1F;
-    }
-    #picker-detail {
+        scrollbar-color: {SURFACE};
+        scrollbar-background: {SURFACE};
+        scrollbar-color-active: {SURFACE};
+        scrollbar-color-hover: {SURFACE};
+        scrollbar-background-active: {SURFACE};
+        scrollbar-background-hover: {SURFACE};
+    }}
+    #picker-detail {{
         height: auto;
-    }
-    #picker-filters {
+    }}
+    #picker-filters {{
         height: 1;
         margin-top: 1;
-        color: #9C957D;
-    }
-    #picker-status {
+        color: {TXT_DIM};
+    }}
+    #picker-status {{
         height: 1;
-        color: #7A5A1A;
-    }
+        color: {GOLD_DIM};
+    }}
     """
 
     BINDINGS: ClassVar[list[Binding]] = [

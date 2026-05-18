@@ -25,32 +25,37 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 
+from ..design import (
+    BRONZE, DANGER_BG, DANGER_BORDER, GOLD_BRIGHT, GOLD_HI,
+    HOVER_BG, OUTLINE_DIM, RUST, RUST_HI, SURFACE_HI,
+)
+
 
 # ── палитра ──────────────────────────────────────────────────────────────────
 _STYLES: dict[str, dict[str, str]] = {
     "default": {
-        "fg":           "#A8732D",
-        "fg_hover":     "#F5C24A",
-        "bg":           "#1F1B14",
-        "bg_hover":     "#2A2218",
-        "border":       "#3D3728",
-        "border_hover": "#A8732D",
+        "fg":           BRONZE,
+        "fg_hover":     GOLD_HI,
+        "bg":           SURFACE_HI,
+        "bg_hover":     HOVER_BG,
+        "border":       OUTLINE_DIM,
+        "border_hover": BRONZE,
     },
     "primary": {
-        "fg":           "#F5C24A",
-        "fg_hover":     "#FFD96A",
-        "bg":           "#1F1B14",
-        "bg_hover":     "#2A2218",
-        "border":       "#A8732D",
-        "border_hover": "#F5C24A",
+        "fg":           GOLD_HI,
+        "fg_hover":     GOLD_BRIGHT,
+        "bg":           SURFACE_HI,
+        "bg_hover":     HOVER_BG,
+        "border":       BRONZE,
+        "border_hover": GOLD_HI,
     },
     "danger": {
-        "fg":           "#9B3A2A",
-        "fg_hover":     "#CF5A3A",
-        "bg":           "#1F1B14",
-        "bg_hover":     "#251515",
-        "border":       "#5A2A1A",
-        "border_hover": "#9B3A2A",
+        "fg":           RUST,
+        "fg_hover":     RUST_HI,
+        "bg":           SURFACE_HI,
+        "bg_hover":     DANGER_BG,
+        "border":       DANGER_BORDER,
+        "border_hover": RUST,
     },
 }
 
@@ -58,26 +63,26 @@ _STYLES: dict[str, dict[str, str]] = {
 class CogButton(Widget):
     """Кастомная кнопка Imperial Fists — текст всегда по центру."""
 
-    DEFAULT_CSS = """
-    CogButton {
+    DEFAULT_CSS = f"""
+    CogButton {{
         height: 3;
         width: auto;
         min-width: 14;
         padding: 1 2;
         margin-right: 1;
-        background: #1F1B14;
-        border: tall #3D3728;
+        background: {SURFACE_HI};
+        border: tall {OUTLINE_DIM};
         content-align: center middle;
-        color: #A8732D;
-    }
-    CogButton:hover {
-        background: #2A2218;
-        border: tall #A8732D;
-        color: #F5C24A;
-    }
-    CogButton:focus {
-        border: tall #F5C24A;
-    }
+        color: {BRONZE};
+    }}
+    CogButton:hover {{
+        background: {HOVER_BG};
+        border: tall {BRONZE};
+        color: {GOLD_HI};
+    }}
+    CogButton:focus {{
+        border: tall {GOLD_HI};
+    }}
     """
 
     COMPONENT_CLASSES: ClassVar[set[str]] = set()
