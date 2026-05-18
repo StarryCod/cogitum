@@ -313,19 +313,32 @@ def make_legion_worker(
     *,
     mesh: "Mesh",
     registry: "ToolRegistry",
-    model: str | None = None,
+    model: str | Callable[[], str] | None = None,
     base_system_extra: str = "",
 ) -> Callable:
     """Build the worker callable that Legion will dispatch.
 
     ``mesh``, ``registry`` are captured by closure so the runtime
-    layer doesn't have to know about them. ``model`` defaults to
-    whatever the mesh decides; pass an explicit string to pin (rare —
-    usually the lead Cogitum's own model is fine).
+    layer doesn't have to know about them.
+
+    ``model`` may be:
+      * a static string (pin every cogitator to that model);
+      * a zero-arg callable that returns the current model id (used
+        when the lead agent's model can change mid-session via
+        /model — the worker reads the live value on every turn);
+      * None (let the mesh pick its default).
 
     Returns a coroutine matching :class:`cogitum.core.legion.WorkerCallable`.
     """
     from .llm.mesh import StreamRequest
+
+    def _resolve_model() -> str:
+        if callable(model):
+            try:
+                return (model() or "").strip()
+            except Exception:
+                return ""
+        return (model or "").strip()
 
     async def _worker(
         node: LegionNode,
@@ -353,7 +366,7 @@ def make_legion_worker(
 
             req = StreamRequest(
                 messages=history,
-                model=(model or "").strip() or "",
+                model=_resolve_model(),
                 system=system,
                 tools=tools_schema,
                 max_tokens=_MAX_TOKENS_PER_TURN,
@@ -361,7 +374,7 @@ def make_legion_worker(
 
             text_parts: list[str] = []
             tool_calls: list[ToolCallPart] = []
-            errored = False
+            stream_error: str = ""
 
             async for chunk in mesh.stream(req):
                 if chunk.kind == ChunkKind.TEXT and chunk.text:
@@ -376,8 +389,19 @@ def make_legion_worker(
                         arguments=chunk.tool_call_args or {},
                     ))
                 elif chunk.kind == ChunkKind.ERROR and chunk.error:
-                    errored = True
-                    text_parts.append(f"\n[stream error: {chunk.error}]")
+                    # Capture the FIRST stream error per turn — that's
+                    # almost always the cause; later errors are usually
+                    # downstream symptoms (timeout cleanup, etc.).
+                    if not stream_error:
+                        stream_error = chunk.error
+
+            # Hard mesh failure on a turn that produced nothing
+            # otherwise → raise so the runtime marks the node FAILED
+            # with a real error, instead of returning the error text
+            # as a "done" output (which was misleading: status=done +
+            # output="[stream error: ...]").
+            if stream_error and not tool_calls and not "".join(text_parts).strip():
+                raise RuntimeError(f"mesh stream failed: {stream_error}")
 
             text = "".join(text_parts).strip()
             if text:
@@ -412,11 +436,6 @@ def make_legion_worker(
                 for tc, res in zip(tool_calls, results)
             ]
             history.append(Message(role="tool", parts=tool_result_parts))
-
-            if errored and not text:
-                # Hard mesh failure on a turn that produced nothing —
-                # don't loop forever, surface the error upward.
-                break
 
         return last_text or "(cogitator produced no output)"
 

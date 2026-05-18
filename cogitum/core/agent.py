@@ -413,10 +413,20 @@ class Agent:
         # cogitator in a swarm uses the same provider pool and tool
         # set as the lead agent. Idempotent — re-registration on a
         # second Agent simply overwrites the previous worker.
+        #
+        # Model is passed as a *callback* so cogitators always pick
+        # up whatever model the lead is currently on — including
+        # /model switches mid-session. (Capturing cfg.model as a
+        # static string at __init__ would lock the swarm to the
+        # startup model.)
         from .legion import get_legion
         from .legion_worker import make_legion_worker
         get_legion().register_worker(
-            make_legion_worker(mesh=self.mesh, registry=self.registry)
+            make_legion_worker(
+                mesh=self.mesh,
+                registry=self.registry,
+                model=lambda: self.cfg.model or "",
+            )
         )
 
     # ------------------------------------------------------------------
