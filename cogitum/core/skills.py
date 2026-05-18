@@ -124,21 +124,33 @@ def list_skills(category: str = "") -> list[SkillMeta]:
 
 
 def read_skill(name: str) -> str | None:
-    """Read full skill content by name (searches nested and flat)."""
+    """Read full skill content by name (searches nested and flat).
+
+    Searches user dir first (so user-edited skills win over package
+    defaults), then falls back to the package-bundled skills. The
+    fallback matters because seed_default_skills() only seeds on the
+    very first run — users who installed Cogitum before a new
+    package skill was added wouldn't see it otherwise.
+    """
     _ensure_dir()
 
-    # Try exact nested match: category/name/SKILL.md
-    for path in _SKILLS_DIR.rglob("SKILL.md"):
-        rel = path.relative_to(_SKILLS_DIR)
-        if len(rel.parts) >= 2 and rel.parts[-2] == name:
-            return path.read_text(encoding="utf-8")
+    for root in (_SKILLS_DIR, _DEFAULT_SKILLS_PACKAGE):
+        if not root.exists():
+            continue
 
-    # Try flat match
-    flat = _SKILLS_DIR / f"{name}.md"
-    if flat.exists():
-        return flat.read_text(encoding="utf-8")
+        # Try exact nested match: category/name/SKILL.md
+        for path in root.rglob("SKILL.md"):
+            rel = path.relative_to(root)
+            if len(rel.parts) >= 2 and rel.parts[-2] == name:
+                return path.read_text(encoding="utf-8")
 
-    # Fuzzy match
+        # Try flat match
+        flat = root / f"{name}.md"
+        if flat.exists():
+            return flat.read_text(encoding="utf-8")
+
+    # Fuzzy match — only on user dir (avoid picking package skills
+    # by accident when the user clearly meant their own).
     candidates = []
     for path in _SKILLS_DIR.rglob("SKILL.md"):
         rel = path.relative_to(_SKILLS_DIR)

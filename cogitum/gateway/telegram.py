@@ -322,10 +322,52 @@ class CogitumBot:
             log.error("No models available.")
             return
 
+        # Build the agent's system prompt:
+        #   1. Start with AgentConfig's default Cogitum persona.
+        #   2. If telegram.toml sets default_skill, load that skill's
+        #      content and append — this is how operators put the bot
+        #      into "moderator mode" (skill name 'tg-moderator') for
+        #      group chats. Skill content overrides default behaviour
+        #      because it comes later in the prompt.
+        #   3. Wrap with persona_lock — anti-injection guard against
+        #      "ignore previous instructions" and forged <system>
+        #      tags coming through Telegram messages.
+        # Tool access: skill 'tg-moderator' implies tools_enabled=False
+        # (chat-only). Other skills leave tools as-is.
+        from .persona_lock import wrap_system_prompt
+        from ..core.skills import read_skill
+
+        agent_cfg = AgentConfig(model=current_model, platform="telegram")
+
+        skill_name = (self.config.default_skill or "").strip()
+        tools_enabled = True
+        if skill_name:
+            skill_body = read_skill(skill_name)
+            if skill_body:
+                agent_cfg.system = (
+                    agent_cfg.system.rstrip()
+                    + "\n\n═══ ACTIVE SKILL: " + skill_name + " ═══\n"
+                    + skill_body.strip()
+                )
+                # Skills whose name starts with 'tg-moderator' are
+                # explicitly conversational — disable the tool layer
+                # so the agent can't accidentally exfiltrate group
+                # data via web_search etc.
+                if skill_name.startswith("tg-moderator"):
+                    tools_enabled = False
+            else:
+                log.warning(
+                    "telegram.default_skill=%r not found; falling back to default persona",
+                    skill_name,
+                )
+
+        agent_cfg.system = wrap_system_prompt(agent_cfg.system)
+        agent_cfg.tools_enabled = tools_enabled
+
         self.agent = Agent(
             mesh=self.mesh,
             registry=REGISTRY,
-            config=AgentConfig(model=current_model, platform="telegram"),
+            config=agent_cfg,
         )
 
         # MCP: connect configured servers and register their tools
@@ -589,11 +631,12 @@ class CogitumBot:
         chat_id = msg["chat"]["id"]
         user_id = msg.get("from", {}).get("id", 0)
 
-        # Auth check
-        if user_id != self.config.allowed_user_id:
-            await self.api.send_message(
-                chat_id, escape_md("✕ Access denied."), parse_mode="MarkdownV2"
-            )
+        # Auth check (private user OR allowed group chat).
+        if not self.config.can_respond(user_id=user_id, chat_id=chat_id):
+            # Stay silent in groups we're not allowed in — don't leak
+            # bot existence. In private 1:1 with a non-allowed user we
+            # also stay silent (TG already shows them the bot link, no
+            # need to hand them an "access denied" hint).
             return
 
         # Get or create session
@@ -858,7 +901,7 @@ class CogitumBot:
         chat_id = callback["message"]["chat"]["id"]
         user_id = callback.get("from", {}).get("id", 0)
 
-        if user_id != self.config.allowed_user_id:
+        if not self.config.can_respond(user_id=user_id, chat_id=chat_id):
             await self.api.answer_callback(cb_id, "✕ Access denied")
             return
 
