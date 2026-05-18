@@ -78,13 +78,15 @@ class UpdateInfo:
     install_method: str
 
     def upgrade_command(self) -> str:
-        """Recommend a one-liner to upgrade based on install_method."""
-        if self.install_method == "npm":
-            return "cog --update"          # npm wrapper handles git pull + reinstall
-        if self.install_method == "pip":
-            return "pip install -U cogitum"
-        # source / unknown: assume the user cloned the repo
-        return "cd <cogitum repo> && git pull && pip install -e ."
+        """One canonical upgrade command — invokes Cogitum's own update flow.
+
+        ``cogitum update`` (or ``cog update``) opens a Textual screen that
+        compares the local pyproject.toml version against origin/master,
+        runs ``git pull --ff-only`` in the install root, streams the
+        output, and asks for a Cogitum restart on success. See
+        :mod:`cogitum.update_flow` for the implementation.
+        """
+        return "cogitum update"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -144,19 +146,22 @@ def is_newer(latest: str, current: str) -> bool:
 def detect_install_method() -> str:
     """Best-effort guess at how the user's Cogitum got installed.
 
-    Returns one of: ``"npm"``, ``"pip"``, ``"source"``.
+    Returns one of: ``"npm"``, ``"source"``.
+
+    Cogitum is distributed via npm (the ``cog`` launcher pulls master
+    on first run) and via source clones. There is no PyPI release.
+    'source' is anything that looks like a local dev checkout — the
+    package's ``__file__`` doesn't sit under any of the npm wrapper's
+    well-known install dirs.
 
     Heuristics, in order of confidence:
       1. ``COGITUM_HOME`` env var → set by the npm launcher.
-      2. The Cogitum package's ``__file__`` lives under
-         ``.local/share/cogitum`` (POSIX) or ``LOCALAPPDATA/cogitum``
-         (Windows) — that's where the npm wrapper clones.
-      3. ``cogitum.dist-info`` exists and was created from a wheel
-         (no editable install marker) → pip from PyPI / similar.
-      4. Otherwise: assume source (editable / `pip install -e .`).
+      2. The Cogitum package's ``__file__`` lives under one of the
+         npm wrapper's install roots (``.local/share/cogitum`` on
+         POSIX, ``AppData\\Local\\cogitum`` on Windows).
+      3. Otherwise: source clone (the upgrade path is `git pull`).
     """
     import os
-    import sys
 
     if os.environ.get("COGITUM_HOME"):
         return "npm"
@@ -173,22 +178,7 @@ def detect_install_method() -> str:
     if any(m in pkg_str for m in npm_markers):
         return "npm"
 
-    # Look for an editable-install marker. setuptools writes a .pth
-    # file pointing at the source dir; pip's editable installs leave
-    # a ``__editable__`` shim or a direct_url.json with editable=True.
-    try:
-        from importlib.metadata import distribution
-        dist = distribution("cogitum")
-        files = dist.files or []
-        for f in files:
-            name = str(f)
-            if "direct_url.json" in name:
-                content = json.loads(dist.read_text(name) or "{}")
-                if (content.get("dir_info") or {}).get("editable"):
-                    return "source"
-        return "pip"
-    except Exception:
-        return "source"
+    return "source"
 
 
 # ─────────────────────────────────────────────────────────────────────────

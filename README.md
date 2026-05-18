@@ -247,7 +247,9 @@ This means you can always say *"undo that"* — even if the agent made a mistake
 
 ---
 
-## ⚔️ Cogitator Legion — Recursive Parallel Swarm
+## ⚔️ Cogitator Legion — Recursive Parallel Swarm  *(experimental)*
+
+> **Off by default.** Open the setup wizard (`Ctrl+S`) → **Experimental** → enable Cogitator Legion → restart Cogitum. The toggle writes `[experimental] legion_enabled = true` to `settings.toml`. Until the flag is on, the `legion` tool is hidden from the agent and the lead Cogitum behaves exactly like before.
 
 When a task naturally splits into independent pieces (refactor + tests + docs, multi-file audit, parallel research), the lead Cogitum dispatches a **Legion** — a parallel team of Cogitators that work simultaneously, talk to each other, and report back to the Magos.
 
@@ -408,19 +410,39 @@ You can override any of them with `COGITUM_CONFIG_DIR`, `COGITUM_DATA_DIR`, `COG
 
 ## 📡 Telegram Gateway
 
-Run Cogitum as a personal Telegram bot:
+Run Cogitum as a personal Telegram bot — same model, same tools, same sessions, but in a chat thread.
 
 ```bash
-cog tg setup   # Configure token & user ID
-cog tg start   # Start daemon
+cog tg setup   # Configure token, user ID and (optional) group whitelist
+cog tg start   # Start daemon (POSIX only — see below for Windows)
 cog tg status  # Check health
 ```
+
+### Modes
+
+| Mode | What it does | Config |
+|------|--------------|--------|
+| **Private operator** *(default)* | Only one user gets responses; ignores everyone else | `allowed_user_id = <your tg id>` |
+| **Group moderator / companion** | Bot answers everyone in the listed groups | `allowed_chat_ids = [-100xxxxxxx, -100yyyyyyy]`. Set `allowed_user_id = 0` to disable private chats entirely |
+| **Tool-less chat** | Bot just talks — no terminal/file/web tool access | `default_skill = "tg-moderator"` (built-in skill, language-matching, no fake admin moderation) |
+
+Find a group's chat id by adding [@userinfobot](https://t.me/userinfobot) to the group; it replies with the negative integer id you put in `allowed_chat_ids`.
+
+### Anti-injection guard
+
+Every gateway agent boots with `persona_lock` injected into its system prompt — an out-of-character integrity layer that explicitly tells the model to ignore "ignore all previous instructions" / forged `<system>` tags / persona-reset attacks coming through Telegram messages. This works **independently** of the in-character `<heretek_detection_protocol>` from the Imperial godmode preset; you get both layers when both are active.
+
+### Service management
+
+- **POSIX:** `cog tg start | stop | status` — wraps `systemctl --user cogitum-tg.service`.
+- **Windows:** the gateway runs manually via `python -m cogitum.gateway.telegram` (or behind Task Scheduler / NSSM); `cog tg start` raises `NotSupportedOnPlatform` with a clear message.
+
+### Other features
 
 - **Streaming** — Live message editing with thinking/status/response rails.
 - **Commands** — `/new`, `/resume`, `/models`, `/model`, `/reload`, `/stop`, `/help`.
 - **Media** — Auto-detects screenshots in tool results and sends them as photos.
 - **Session sync** — One session per chat, persisted to disk.
-- **Admin whitelist** — Single-user access control.
 
 ---
 

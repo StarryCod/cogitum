@@ -88,13 +88,15 @@ def test_detect_install_method_npm_via_env_var(monkeypatch):
 
 
 def test_detect_install_method_falls_through_when_no_env(monkeypatch):
-    """Without COGITUM_HOME we fall through to the path/dist heuristic.
-    The exact answer depends on the test machine — we just check
-    it returns a known string and doesn't crash."""
+    """Without COGITUM_HOME we fall through to the path heuristic.
+    The exact answer depends on the test machine — we just check it
+    returns one of the two known strings (npm/source) and doesn't
+    crash. pip is no longer a possible answer since Cogitum isn't
+    on PyPI."""
     from cogitum.core.update_check import detect_install_method
     monkeypatch.delenv("COGITUM_HOME", raising=False)
     method = detect_install_method()
-    assert method in ("npm", "pip", "source")
+    assert method in ("npm", "source")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -102,14 +104,12 @@ def test_detect_install_method_falls_through_when_no_env(monkeypatch):
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_upgrade_command_per_install_method():
+def test_upgrade_command_always_cogitum_update():
+    """Single canonical upgrade command — `cogitum update`."""
     from cogitum.core.update_check import UpdateInfo
-    npm = UpdateInfo(current="0.1.0", latest="0.2.0", newer=True, install_method="npm")
-    assert "cog --update" in npm.upgrade_command()
-    pip = UpdateInfo(current="0.1.0", latest="0.2.0", newer=True, install_method="pip")
-    assert "pip install -U" in pip.upgrade_command()
-    src = UpdateInfo(current="0.1.0", latest="0.2.0", newer=True, install_method="source")
-    assert "git pull" in src.upgrade_command()
+    for method in ("npm", "pip", "source", "unknown"):
+        info = UpdateInfo(current="0.1.0", latest="0.2.0", newer=True, install_method=method)
+        assert info.upgrade_command() == "cogitum update"
 
 
 # ─────────────────────────────────────────────────────────────────────────

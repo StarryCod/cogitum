@@ -655,6 +655,19 @@ def _tg_command(args: argparse.Namespace) -> int:
 # TUI launcher (default)
 # ---------------------------------------------------------------------------
 
+def _update_command(args: argparse.Namespace) -> int:
+    """Run the self-update flow.
+
+    Defers to ``cogitum.update_flow.run`` which owns both the
+    update logic AND a small Textual progress screen. Keeping it
+    out of cli.py prevents Textual from being imported on every
+    command (`cog --help`, `cog providers list`, …) where it adds
+    perceptible startup latency.
+    """
+    from .update_flow import run as run_update_flow
+    return run_update_flow()
+
+
 def _tui_command(args: argparse.Namespace) -> int:
     seed_default_skills()
     from .app import CogitumApp
@@ -729,6 +742,13 @@ def build_parser() -> argparse.ArgumentParser:
     # MCP servers
     from .cli_mcp import add_mcp_subparser
     add_mcp_subparser(sub)
+
+    # Self-update (compares local pyproject version against
+    # origin/master, runs git pull or npm reinstall, asks for restart)
+    sub.add_parser(
+        "update",
+        help="check for a newer version and upgrade Cogitum",
+    ).set_defaults(func=_update_command)
 
     return p
 
