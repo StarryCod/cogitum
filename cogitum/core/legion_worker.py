@@ -346,6 +346,17 @@ def make_legion_worker(
         send_message: Callable[[str, str], None],
         spawn_l2: Callable[[list[dict]], Awaitable[list[str]]] | None,
     ) -> str:
+        # Pull retry primitives from the main agent loop so the lead
+        # Cogitum and its cogitators behave identically when keys go
+        # cold. Same backoff ladder, same Retry-After parsing, same
+        # "all keys unavailable" recognition.
+        from .agent import (
+            _MAX_RETRIES,
+            _is_retryable_error,
+            _parse_recovery_delay,
+            _jittered_backoff,
+        )
+
         can_recurse = spawn_l2 is not None
         tools_schema = _tools_schema_for(registry, node, can_recurse=can_recurse)
 
@@ -364,6 +375,21 @@ def make_legion_worker(
                       node_id=node.id, status=node.status.value,
                       last_action=node.last_action)
 
+            # Stream with retry — same lifecycle the lead agent uses
+            # in _stream_with_retry. Differences from the lead loop:
+            #   * No queue → the per-attempt status update goes
+            #     through node.last_action + node_status events so the
+            #     tree view shows "retry 2/8 in 6.5s" without needing
+            #     a parallel event channel.
+            #   * Tool call deltas already became TOOL_CALL_DONE chunks
+            #     by the time they reach us (mesh accumulates), so the
+            #     "has_yielded_content" check just needs TEXT/THINKING/
+            #     TOOL_CALL_DONE.
+            text_parts: list[str] = []
+            tool_calls: list[ToolCallPart] = []
+            stream_error: str = ""
+            has_yielded_content = False
+
             req = StreamRequest(
                 messages=history,
                 model=_resolve_model(),
@@ -372,28 +398,76 @@ def make_legion_worker(
                 max_tokens=_MAX_TOKENS_PER_TURN,
             )
 
-            text_parts: list[str] = []
-            tool_calls: list[ToolCallPart] = []
-            stream_error: str = ""
+            for attempt in range(_MAX_RETRIES + 1):
+                got_error_chunk = False
+                attempt_error = ""
+                # On retry attempts the previous one may have buffered
+                # partial text — but we only got here because nothing
+                # was yielded yet (the inner break enforces it), so
+                # the buffers are still safe to reuse.
+                try:
+                    async for chunk in mesh.stream(req):
+                        if chunk.kind == ChunkKind.ERROR and chunk.error:
+                            attempt_error = chunk.error
+                            fake = RuntimeError(attempt_error)
+                            # Retryable AND no real content yet → break
+                            # to outer loop and retry.
+                            if (not has_yielded_content
+                                    and _is_retryable_error(fake)
+                                    and attempt < _MAX_RETRIES):
+                                got_error_chunk = True
+                                break
+                            stream_error = attempt_error
+                            continue
+                        if chunk.kind == ChunkKind.TEXT and chunk.text:
+                            text_parts.append(chunk.text)
+                            run._emit("node_token", node_id=node.id, delta=chunk.text)
+                            has_yielded_content = True
+                        elif chunk.kind == ChunkKind.TOOL_CALL_DONE:
+                            tool_calls.append(ToolCallPart(
+                                id=chunk.tool_call_id or f"tc-{turn}-{len(tool_calls)}",
+                                name=chunk.tool_call_name or "",
+                                arguments=chunk.tool_call_args or {},
+                            ))
+                            has_yielded_content = True
+                    if not got_error_chunk:
+                        break  # inner stream consumed cleanly → exit retry loop
+                except Exception as exc:
+                    attempt_error = str(exc)
+                    if has_yielded_content:
+                        # Already streamed real tokens — surface and
+                        # stop, same rule as the lead agent.
+                        stream_error = attempt_error
+                        break
+                    if (attempt >= _MAX_RETRIES
+                            or not _is_retryable_error(exc)):
+                        stream_error = attempt_error
+                        break
+                    got_error_chunk = True
 
-            async for chunk in mesh.stream(req):
-                if chunk.kind == ChunkKind.TEXT and chunk.text:
-                    text_parts.append(chunk.text)
-                    # Stream tokens to TUI subscribers — let the tree
-                    # view show live progress for the active node.
-                    run._emit("node_token", node_id=node.id, delta=chunk.text)
-                elif chunk.kind == ChunkKind.TOOL_CALL_DONE:
-                    tool_calls.append(ToolCallPart(
-                        id=chunk.tool_call_id or f"tc-{turn}-{len(tool_calls)}",
-                        name=chunk.tool_call_name or "",
-                        arguments=chunk.tool_call_args or {},
-                    ))
-                elif chunk.kind == ChunkKind.ERROR and chunk.error:
-                    # Capture the FIRST stream error per turn — that's
-                    # almost always the cause; later errors are usually
-                    # downstream symptoms (timeout cleanup, etc.).
-                    if not stream_error:
-                        stream_error = chunk.error
+                # Reached here = retryable error and we still have
+                # attempts. Compute the wait, surface a status update
+                # so the tree view shows what's going on, sleep.
+                fake_exc = RuntimeError(attempt_error)
+                recovery = _parse_recovery_delay(fake_exc)
+                delay = recovery if recovery is not None else _jittered_backoff(attempt + 1)
+                short_err = attempt_error.split("\n", 1)[0][:60]
+                node.last_action = (
+                    f"retry {attempt + 1}/{_MAX_RETRIES} in {delay:.1f}s — {short_err}"
+                )
+                run._emit("node_status",
+                          node_id=node.id, status=node.status.value,
+                          last_action=node.last_action)
+                logger.info("legion %s retry %d/%d in %.1fs: %s",
+                            node.id, attempt + 1, _MAX_RETRIES,
+                            delay, short_err)
+                # Sleep in 0.5s slices so cancellation stays responsive.
+                slept = 0.0
+                while slept < delay:
+                    step = min(0.5, delay - slept)
+                    await asyncio.sleep(step)
+                    slept += step
+                # Loop back for the next attempt.
 
             # Hard mesh failure on a turn that produced nothing
             # otherwise → raise so the runtime marks the node FAILED
