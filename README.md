@@ -2,13 +2,14 @@
 
 # ⚔️ COGITUM
 
-**Sovereign agentic CLI — forge, delegate, persist.**  
-*Imperial Fists colorway. Built for engineers who think in terminals.*
+**Sovereign agentic CLI — forge, delegate, persist.**
 
-[![Python](https://img.shields.io/badge/python-3.11%2B-FFD43B?logo=python&logoColor=black)](https://python.org)
-[![Textual](https://img.shields.io/badge/TUI-Textual-8A2BE2)](https://textual.textualize.io)
-[![License](https://img.shields.io/badge/license-MIT-A8732D)](LICENSE)
-[![Status](https://img.shields.io/badge/status-Preview-F5C24A)](https://github.com/OpenReason/cogitum)
+[![npm downloads](https://img.shields.io/npm/dw/cogitum?color=%23F5C24A&label=npm%20downloads&style=flat-square)](https://www.npmjs.com/package/cogitum)
+[![GitHub stars](https://img.shields.io/github/stars/StarryCod/cogitum?style=flat-square&color=%23F5C24A)](https://github.com/StarryCod/cogitum/stargazers)
+[![License: MIT](https://img.shields.io/badge/license-MIT-E6E1CF?style=flat-square)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-A8732D?style=flat-square)](https://python.org)
+
+*Imperial Fists colorway. Built for engineers who think in terminals.*
 
 </div>
 
@@ -582,6 +583,18 @@ Cogitum uses a single warm token palette resolved from the active theme. The def
 | `MUTED` | `#5A5648` | Tertiary / scrollback |
 
 Tokens live in [`cogitum/themes.py`](cogitum/themes.py); every widget reads them via [`cogitum/design.py`](cogitum/design.py) so swapping a theme moves the entire TUI. No hardcoded hex anywhere in the app.
+
+---
+
+## ⭐ Star History
+
+<a href="https://star-history.com/#StarryCod/cogitum&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=StarryCod/cogitum&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=StarryCod/cogitum&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=StarryCod/cogitum&type=Date" width="600" />
+ </picture>
+</a>
 
 ---
 
