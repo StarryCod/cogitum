@@ -1310,6 +1310,7 @@ class SetupScreen(Screen):
         ("vault", "Vault"),
         ("themes", "Themes"),
         ("experimental", "Experimental"),
+        ("other", "Other"),
         ("diag", "Diagnostics"),
     )
 
@@ -1395,13 +1396,33 @@ class SetupScreen(Screen):
     # --- section dispatch ---------------------------------------------
 
     def _render_section(self) -> None:
-        # Always re-read config from disk so models/keys/providers reflect
-        # the latest state after Save (auto-discovery, manual edits, etc.).
+        """Re-render the active rail section.
+
+        Performance / correctness notes:
+          • ``remove_children()`` returns an ``AwaitRemove`` that completes
+            on the next event-loop tick. If we mount the new content
+            *before* awaiting it, the AwaitRemove will eventually run and
+            wipe the freshly mounted widgets — that's the "контент не
+            грузится" bug. The fix is to remove children **synchronously**
+            via ``content.children``; tomlkit-style detach gives the
+            renderer immediate write access.
+          • The previous ``self.app.refresh()`` call after the remove
+            triggered a full-app re-render on every navigation, which is
+            wasteful when only one panel changed. Dropped — the per-mount
+            refresh that Textual schedules is sufficient.
+          • ``ConfigWriter()`` is now cheap thanks to the parse cache in
+            ``cogitum.core.llm.config_writer`` (mtime + deepcopy), so we
+            can re-instantiate per render without reintroducing the 4s
+            tomlkit reparse stall.
+        """
         self._writer = ConfigWriter()
         content = self.query_one("#setup-content", VerticalScroll)
-        content.remove_children()
-        # Force DOM cleanup before re-mounting
-        self.app.refresh()
+        # Sync detach so the new mount() calls below don't race the
+        # awaitable returned by remove_children(). The AwaitRemove path
+        # was the bug behind 'wizard contents stop loading after a few
+        # navigations' — it removed the new mounts on the next tick.
+        for child in list(content.children):
+            child.remove()
 
         if self._active == "providers":
             self._render_providers(content)
@@ -1420,6 +1441,8 @@ class SetupScreen(Screen):
             self._render_themes(content)
         elif self._active == "experimental":
             self._render_experimental(content)
+        elif self._active == "other":
+            self._render_other(content)
         elif self._active == "diag":
             self._render_diag(content)
 
@@ -1649,9 +1672,12 @@ class SetupScreen(Screen):
         try:
             status = status_service()
         except NotSupportedOnPlatform as e:
-            # Show a friendly card on Windows instead of crashing the
-            # whole setup wizard. The token / user-id config is still
-            # editable; the user just runs the gateway manually.
+            # Both POSIX (systemctl) and Windows (detached process +
+            # HKCU\\Run) backends are now implemented in
+            # ``cogitum.gateway.daemon``. This path is reached only on
+            # exotic environments where neither backend works (e.g. a
+            # sandboxed test runner without %APPDATA%). Show a friendly
+            # card instead of crashing the wizard.
             card = Vertical(classes="card")
             content.mount(card)
             card.mount(_Static(Text("Telegram gateway", style=f"bold {GOLD_HI}"),
@@ -1674,7 +1700,25 @@ class SetupScreen(Screen):
         status_card.mount(_Static(Text("Status", style=f"bold {GOLD}"), classes="card-title"))
 
         active_text = status.get("active", "unknown")
-        is_running = "running" in active_text.lower() or "active" in active_text.lower()
+        # IMPORTANT: 'inactive (dead)' contains the substring 'active', so
+        # a naive ``'active' in active_text.lower()`` would mark a stopped
+        # daemon as running — that's the "Stop пишет ✓ но статус не
+        # меняется" bug.
+        #
+        # Detection: anything explicitly inactive / dead / stopped / stale
+        # / deactivating wins (negative path takes priority). Otherwise
+        # treat 'active', 'running', 'activating' as live so the UI shows
+        # the green-state during startup too.
+        active_lower = active_text.lower()
+        negative_keywords = (
+            "inactive", "deactivat", "stopped", "stale", "dead", "failed",
+        )
+        if any(kw in active_lower for kw in negative_keywords):
+            is_running = False
+        else:
+            is_running = any(
+                kw in active_lower for kw in ("active", "running", "activating")
+            )
         status_style = OK if is_running else MUTED
         status_card.mount(_Static(Text(f"  Daemon: {active_text}", style=status_style)))
         status_card.mount(_Static(Text(f"  Enabled: {status.get('enabled', '?')}", style=TXT_DIM)))
@@ -1782,17 +1826,54 @@ class SetupScreen(Screen):
         self._render_section()
 
     @on(Button.Pressed, "#tg-stop")
-    def _tg_stop(self, event: Button.Pressed) -> None:
-        from .gateway.daemon import stop_service
+    @work(exclusive=True)
+    async def _tg_stop(self, event: Button.Pressed) -> None:
+        """Stop the daemon and wait for systemd to confirm the new state.
+
+        Without the polling loop here, the wizard re-rendered immediately
+        after issuing ``systemctl stop`` and read back the still-active
+        status (systemd hadn't finished tearing down the unit yet). The
+        user saw "Daemon: active (running)" right after clicking Stop,
+        even though the daemon was already in the deactivating phase.
+        Now we poll status() up to 8s, re-rendering as soon as it flips
+        to inactive — matches the TimeoutStopSec=10 in the unit file.
+        """
+        from .gateway.daemon import stop_service, status_service
         result = stop_service()
         self.app.notify(result, severity="information")
+        # Give systemd up to ~8s to flush the unit. Polling cadence picks
+        # up the state change as soon as it happens — usually <1s now
+        # that the bot's stop() handler cancels the long-poll directly.
+        for _ in range(40):
+            try:
+                s = status_service()
+            except Exception:
+                break
+            active_lower = s.get("active", "").lower()
+            if any(kw in active_lower for kw in (
+                "inactive", "stopped", "stale", "dead", "failed",
+            )):
+                break
+            await asyncio.sleep(0.2)
         self._render_section()
 
     @on(Button.Pressed, "#tg-restart")
-    def _tg_restart(self, event: Button.Pressed) -> None:
-        from .gateway.daemon import restart_service
+    @work(exclusive=True)
+    async def _tg_restart(self, event: Button.Pressed) -> None:
+        from .gateway.daemon import restart_service, status_service
         result = restart_service()
         self.app.notify(result, severity="information")
+        # Wait for the unit to finish the restart and come back active.
+        for _ in range(40):
+            try:
+                s = status_service()
+            except Exception:
+                break
+            active_lower = s.get("active", "").lower()
+            if "running" in active_lower or active_lower.startswith("active"):
+                if not any(kw in active_lower for kw in ("inactive", "deactivat")):
+                    break
+            await asyncio.sleep(0.2)
         self._render_section()
 
     @on(Button.Pressed, "#tg-enable")
@@ -1973,6 +2054,80 @@ class SetupScreen(Screen):
         settings["experimental"] = exp
         write_settings(settings)
 
+    # ---- other / preferences ----
+
+    def _render_other(self, content: VerticalScroll) -> None:
+        """Miscellaneous user preferences that don't fit other sections.
+
+        Currently houses the retry-confirm modal toggle. The flag lives
+        under ``[other]`` in settings.toml (separate namespace from
+        ``[experimental]`` because these are stable settings, not
+        feature flags). Defaults are read fresh per render so toggling
+        takes effect on the very next agent attempt.
+        """
+        from .core.llm.loader import load_settings
+        settings = load_settings()
+        other = settings.get("other", {}) if isinstance(settings, dict) else {}
+
+        header = Vertical(classes="card")
+        content.mount(header)
+        header.mount(_Static(Text("Other", style=f"bold {GOLD_HI}"),
+                            classes="card-title"))
+        header.mount(_Static(Text(
+            "Stable user preferences that don't belong to any one feature.",
+            style=TXT_DIM)))
+
+        # ── Retry-confirm modal ──────────────────────────────────────
+        confirm_on = bool(other.get("retry_confirm_enabled", False))
+        card = Vertical(classes="card")
+        content.mount(card)
+
+        title = Text()
+        title.append("⏸ Retry confirmation modal", style=f"bold {GOLD_HI}")
+        title.append("   ", style=TXT_DIM)
+        if confirm_on:
+            title.append("● enabled", style=OK)
+        else:
+            title.append("○ disabled (default)", style=TXT_DIM)
+        card.mount(_Static(title, classes="card-title"))
+
+        card.mount(_Static(Text(
+            "When ON: after 3 silent retries the agent pops a modal asking "
+            "whether to keep waiting or abort. Auto-continues in 5s if you "
+            "ignore it. Reappears on every subsequent failure so you can "
+            "abort at any time.",
+            style=TXT_DIM)))
+        card.mount(_Static(Text(
+            "When OFF (default): retries silently up to 10 times, then "
+            "surfaces a regular error in the feed — same behaviour Cogitum "
+            "had before the modal was added. Picks this when the modal "
+            "feels intrusive (e.g. flaky network with frequent transient "
+            "blips).",
+            style=TXT_DIM)))
+
+        actions = Horizontal(classes="card-actions")
+        card.mount(actions)
+        if confirm_on:
+            actions.mount(Button("Disable", id="other-retry-confirm-off",
+                                 variant="warning"))
+        else:
+            actions.mount(Button("Enable", id="other-retry-confirm-on",
+                                 variant="primary"))
+
+    def _set_other_flag(self, key: str, value: bool) -> None:
+        """Persist one ``[other]`` flag. Stable namespace — no restart
+        required, the agent reads ``settings.other`` per turn."""
+        from .core.llm.loader import load_settings, write_settings
+        settings = load_settings()
+        if not isinstance(settings, dict):
+            settings = {}
+        other = settings.get("other")
+        if not isinstance(other, dict):
+            other = {}
+        other[key] = bool(value)
+        settings["other"] = other
+        write_settings(settings)
+
     # ---- diagnostics ----
 
     def _render_diag(self, content: VerticalScroll) -> None:
@@ -1980,15 +2135,43 @@ class SetupScreen(Screen):
         content.mount(card)
         card.mount(_Static(Text("Diagnostics", style=f"bold {GOLD_HI}"),
                           classes="card-title"))
-        try:
-            mesh = load_mesh()
-        except Exception as e:
-            card.mount(_Static(Text(f"mesh load failed: {e}", style=RUST)))
-            return
+
+        # Use the live mesh from the app so request/token counters reflect
+        # actual usage. ``load_mesh()`` here would build a *fresh* Mesh
+        # with brand-new KeyPool instances whose counters are always
+        # zero — that's the "Diagnostics не показывает сколько
+        # израсходовано" bug. The TUI's ``CogitumApp.mesh`` is the same
+        # mesh every agent turn leases keys from, so its snapshot tracks
+        # real traffic. Falls back to a fresh load_mesh() when running
+        # the wizard outside the app (e.g. during tests).
+        mesh = getattr(self.app, "mesh", None)
+        if mesh is None:
+            try:
+                mesh = load_mesh()
+            except Exception as e:
+                card.mount(_Static(Text(f"mesh load failed: {e}", style=RUST)))
+                return
 
         if not mesh.providers:
             card.mount(_Static(Text("No active providers.", style=COPPER)))
             return
+
+        # Top-line summary so the user sees totals at a glance.
+        total_req = 0
+        total_tok = 0
+        for p in mesh.providers.values():
+            for s in p.pool.snapshot():
+                total_req += int(s.get("total_requests", 0) or 0)
+                total_tok += int(s.get("total_tokens", 0) or 0)
+        summary = Text()
+        summary.append(f"  Σ requests: {total_req:,}", style=GOLD_HI)
+        summary.append("   ", style=TXT_DIM)
+        summary.append(f"Σ tokens: {total_tok:,}", style=GOLD_HI)
+        summary.append("   ", style=TXT_DIM)
+        summary.append(
+            "(live counters — reset when Cogitum restarts)", style=TXT_DIM,
+        )
+        card.mount(_Static(summary))
 
         for p in mesh.providers.values():
             block = Vertical(classes="card")
@@ -2001,7 +2184,10 @@ class SetupScreen(Screen):
                 line = Text()
                 line.append(f"  · key={s['id']:<14}", style=GOLD)
                 line.append(f"status={s['status']:<14}", style=BRONZE)
-                line.append(f"req={s['total_requests']:<5} tok={s['total_tokens']}", style=TXT_DIM)
+                line.append(
+                    f"req={s['total_requests']:<5} tok={s['total_tokens']}",
+                    style=TXT_DIM,
+                )
                 block.mount(_Static(line))
 
     # --- buttons -------------------------------------------------------
@@ -2038,6 +2224,18 @@ class SetupScreen(Screen):
                 f"{'available to' if bid == 'exp-legion-on' else 'hidden from'} "
                 "the agent.",
             ))
+            self._render_section()
+            return
+
+        if bid in ("other-retry-confirm-on", "other-retry-confirm-off"):
+            # No restart prompt — agent reads ``[other]`` per turn so the
+            # new value is live on the next attempt. Just toast + redraw.
+            on = bid.endswith("-on")
+            self._set_other_flag("retry_confirm_enabled", on)
+            self.app.notify(
+                f"Retry confirmation modal {'enabled' if on else 'disabled'}",
+                severity="information",
+            )
             self._render_section()
             return
 
@@ -2422,15 +2620,19 @@ class SetupScreen(Screen):
                     target, name="ChatGPT Plus/Pro", format="openai_compat",
                     base_url="https://api.openai.com/v1", auth="bearer", enabled=True,
                 )
-                # Subscription tokens can't access /v1/models (403), add defaults
+                # Subscription tokens can't access /v1/models (403), add defaults.
+                # GPT-5.5 family added 2026-05; older 4.1 / o3 entries kept so
+                # users on Pro Legacy still see something familiar in /models.
                 _codex_models = [
+                    ("gpt-5.5", "GPT-5.5", ["text", "vision", "reasoning", "tools"], 400000, 128000),
+                    ("gpt-5.5-mini", "GPT-5.5 mini", ["text", "vision", "reasoning", "tools"], 400000, 64000),
+                    ("gpt-5.5-nano", "GPT-5.5 nano", ["text", "tools"], 256000, 32000),
                     ("gpt-5", "GPT-5", ["text", "vision", "reasoning", "tools"], 256000, 64000),
                     ("gpt-5-mini", "GPT-5 mini", ["text", "vision", "tools"], 256000, 32000),
                     ("o3", "o3", ["text", "reasoning", "tools"], 200000, 100000),
                     ("o4-mini", "o4-mini", ["text", "reasoning", "tools"], 200000, 65536),
                     ("gpt-4.1", "GPT-4.1", ["text", "vision", "tools"], 1048576, 32768),
                     ("gpt-4.1-mini", "GPT-4.1 mini", ["text", "vision", "tools"], 1048576, 32768),
-                    ("gpt-4.1-nano", "GPT-4.1 nano", ["text", "tools"], 1048576, 32768),
                 ]
                 for mid, display, caps, ctx, max_out in _codex_models:
                     self._writer.add_model(target, mid,

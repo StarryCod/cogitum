@@ -100,7 +100,10 @@ async def test_prunes_stale_preset_models(tmp_path, stub_secrets):
 
 
 @pytest.mark.asyncio
-async def test_skips_oauth_and_disabled(tmp_path, stub_secrets):
+async def test_seeds_oauth_subscription_models(tmp_path, stub_secrets):
+    """OAuth providers can't hit /v1/models, so refresh seeds catalogue
+    entries (e.g. GPT-5.5 family) into providers.toml on every run.
+    """
     from cogitum.core.llm.config_writer import ConfigWriter
     from cogitum.core.llm import refresh as R
 
@@ -109,6 +112,59 @@ async def test_skips_oauth_and_disabled(tmp_path, stub_secrets):
     w.add_provider("openai-codex", name="codex", format="openai_compat",
                    base_url="https://x/v1", auth="bearer")
     w.set_key("openai-codex", "subscription", "oauth:openai-codex")
+    w.save()
+
+    def factory(*a, **k):
+        return ConfigWriter(path=cfg_path)
+
+    with patch.object(R, "ConfigWriter", side_effect=factory):
+        res = await R.refresh_all_providers(timeout=2.0)
+
+    assert res["openai-codex"]["status"] == "ok"
+    assert "oauth subscription" in res["openai-codex"]["message"].lower()
+    assert "seeded" in res["openai-codex"]["message"].lower()
+
+    # Verify GPT-5.5 entries actually landed in the TOML.
+    final = ConfigWriter(path=cfg_path)
+    models = set((final.provider("openai-codex").get("models") or {}).keys())
+    assert "gpt-5.5" in models
+    assert "gpt-5.5-mini" in models
+    assert "gpt-5" in models  # legacy still kept
+
+
+@pytest.mark.asyncio
+async def test_oauth_seed_idempotent_after_full_catalogue(tmp_path, stub_secrets):
+    """Second refresh on a fully-seeded oauth provider adds nothing."""
+    from cogitum.core.llm.config_writer import ConfigWriter
+    from cogitum.core.llm import refresh as R
+
+    cfg_path = tmp_path / "providers.toml"
+    w = ConfigWriter(path=cfg_path)
+    w.add_provider("openai-codex", name="codex", format="openai_compat",
+                   base_url="https://x/v1", auth="bearer")
+    w.set_key("openai-codex", "subscription", "oauth:openai-codex")
+    w.save()
+
+    def factory(*a, **k):
+        return ConfigWriter(path=cfg_path)
+
+    with patch.object(R, "ConfigWriter", side_effect=factory):
+        await R.refresh_all_providers(timeout=2.0)
+        res2 = await R.refresh_all_providers(timeout=2.0)
+
+    # Second pass: no new seed, status falls back to skipped.
+    assert res2["openai-codex"]["status"] == "skipped"
+    assert res2["openai-codex"]["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_skips_disabled(tmp_path, stub_secrets):
+    """Disabled providers are skipped regardless of secret_ref scheme."""
+    from cogitum.core.llm.config_writer import ConfigWriter
+    from cogitum.core.llm import refresh as R
+
+    cfg_path = tmp_path / "providers.toml"
+    w = ConfigWriter(path=cfg_path)
     w.add_provider("off", name="off", format="openai_compat",
                    base_url="https://y/v1", auth="bearer")
     w.set_key("off", "primary", "plain:x")
@@ -121,7 +177,5 @@ async def test_skips_oauth_and_disabled(tmp_path, stub_secrets):
     with patch.object(R, "ConfigWriter", side_effect=factory):
         res = await R.refresh_all_providers(timeout=2.0)
 
-    assert res["openai-codex"]["status"] == "skipped"
-    assert "oauth" in res["openai-codex"]["message"].lower()
     assert res["off"]["status"] == "skipped"
     assert "disabled" in res["off"]["message"].lower()

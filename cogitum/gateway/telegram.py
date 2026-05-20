@@ -30,6 +30,7 @@ from cogitum.core.agent import (
     AgentDone,
     AgentError,
     AgentRetry,
+    AgentRetryConfirm,
     AgentText,
     AgentThinking,
     AgentToolCall,
@@ -230,6 +231,11 @@ class CogitumBot:
         self._running = False
         self._offset = self._load_offset()
         self._mcp_watcher_task: asyncio.Task | None = None
+        # Track the polling task so stop() can cancel it directly.
+        # Without this, ``self._running = False`` only takes effect AFTER
+        # the next ``get_updates(timeout=30)`` returns (≈30s in the worst
+        # case), which is why "stop пишет ✓ но бот всё ещё работает".
+        self._poll_task: asyncio.Task | None = None
         # Dedup ring for callback_query IDs. Telegram retries unanswered
         # callbacks for ~15s, so a stale handler crash can otherwise cause
         # the same approval click to fire 2-3 times. We remember the last
@@ -445,7 +451,11 @@ class CogitumBot:
         )
 
         try:
-            await self._poll_loop()
+            self._poll_task = asyncio.create_task(self._poll_loop())
+            await self._poll_task
+        except asyncio.CancelledError:
+            # stop() cancelled the poll loop — clean shutdown, not an error.
+            pass
         finally:
             await self.api.close()
             if self.mesh:
@@ -463,9 +473,32 @@ class CogitumBot:
                 log.debug("mcp shutdown failed", exc_info=True)
 
     async def stop(self) -> None:
+        """Stop the gateway promptly.
+
+        Strategy:
+          1. Flag ``_running = False`` so the poll loop won't restart.
+          2. Cancel the poll task directly — this aborts the in-flight
+             ``get_updates(timeout=30)`` instantly instead of waiting up
+             to 30s for the long-poll to return naturally. Without this,
+             the daemon ``stop`` looked instantaneous in the TUI but the
+             actual process kept running until Telegram replied.
+          3. Cancel any in-flight session handlers so users don't see
+             half-sent responses after stop.
+          4. Close the httpx client as a belt-and-suspenders fallback —
+             if get_updates somehow survived cancellation, this kills
+             the underlying socket.
+        """
         self._running = False
+        if self._poll_task is not None and not self._poll_task.done():
+            self._poll_task.cancel()
         for session in self.sessions.values():
             session.cancel()
+        # Closing the API client breaks any HTTP request that was still
+        # mid-flight when cancellation arrived.
+        try:
+            await self.api.close()
+        except Exception:
+            log.debug("api close during stop", exc_info=True)
 
     # ── Mesh reload ──────────────────────────────────────────────────────────
 
@@ -1092,6 +1125,35 @@ class CogitumBot:
 
                 elif isinstance(event, AgentRetry):
                     pass  # silent retry
+
+                elif isinstance(event, AgentRetryConfirm):
+                    # No modal in Telegram — just send a status
+                    # message so the user knows we're stuck. Agent
+                    # keeps retrying on its own; user can /stop to
+                    # abort.
+                    permanent = event.error_class == "quota"
+                    if permanent:
+                        await self.api.send_message(
+                            chat_id,
+                            "✕ *Quota exceeded*\n\n"
+                            + escape_md(event.error_message)
+                            + "\n\n"
+                            + escape_md(
+                                "Top up the API account or switch provider, "
+                                "then try again. Send /stop to abort the "
+                                "current request."
+                            ),
+                        )
+                    else:
+                        await self.api.send_message(
+                            chat_id,
+                            f"▲ *Retry {event.attempt}/{event.max_attempts}* "
+                            + escape_md(f"({event.error_class})")
+                            + "\n\n"
+                            + escape_md(event.error_message[:200])
+                            + "\n\n"
+                            + escape_md("Send /stop to abort."),
+                        )
 
                 elif isinstance(event, AgentDone):
                     break

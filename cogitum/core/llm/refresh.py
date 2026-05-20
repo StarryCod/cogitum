@@ -3,6 +3,14 @@
 Hits each provider's /v1/models endpoint in parallel, refreshes the
 config with discovered model metadata. Used at startup of TUI and TG
 gateway so the model picker always shows current models.
+
+Subscription providers (``secret_ref`` starts with ``oauth:``) can't
+hit ``/v1/models`` — Anthropic Pro / ChatGPT Plus tokens get 403 from
+that endpoint. For them we keep an in-code "subscription model
+catalogue" and seed any newly-released models the user's local
+providers.toml is missing on every refresh. New GPT-5.5 family added
+2026-05; entries auto-seed even if the user added Codex back when the
+default list still capped at GPT-5.
 """
 from __future__ import annotations
 
@@ -16,6 +24,76 @@ from .discovery import discover_models, resolve_secret_ref
 logger = logging.getLogger(__name__)
 
 
+# Subscription-only model catalogue — keyed by oauth provider id.
+# These can't be discovered via ``/v1/models`` (subscription tokens get
+# 403 there), so we maintain an authoritative list in-code and seed any
+# missing entries on every refresh. Tuple shape mirrors the wizard's
+# ``setup_flow.py``::``_codex_models`` so future updates only need to
+# change one place — keep both lists in sync.
+_SUBSCRIPTION_CATALOGUE: dict[str, list[tuple[str, str, list[str], int, int]]] = {
+    "openai-codex": [
+        # GPT-5.5 family (added 2026-05) — top-tier subscription models
+        ("gpt-5.5", "GPT-5.5",
+         ["text", "vision", "reasoning", "tools"], 400_000, 128_000),
+        ("gpt-5.5-mini", "GPT-5.5 mini",
+         ["text", "vision", "reasoning", "tools"], 400_000, 64_000),
+        ("gpt-5.5-nano", "GPT-5.5 nano",
+         ["text", "tools"], 256_000, 32_000),
+        # GPT-5 family — still active for legacy Pro accounts
+        ("gpt-5", "GPT-5",
+         ["text", "vision", "reasoning", "tools"], 256_000, 64_000),
+        ("gpt-5-mini", "GPT-5 mini",
+         ["text", "vision", "tools"], 256_000, 32_000),
+        # Reasoning + 4.x kept for users who pinned them
+        ("o3", "o3",
+         ["text", "reasoning", "tools"], 200_000, 100_000),
+        ("o4-mini", "o4-mini",
+         ["text", "reasoning", "tools"], 200_000, 65_536),
+        ("gpt-4.1", "GPT-4.1",
+         ["text", "vision", "tools"], 1_048_576, 32_768),
+        ("gpt-4.1-mini", "GPT-4.1 mini",
+         ["text", "vision", "tools"], 1_048_576, 32_768),
+    ],
+    "anthropic": [
+        ("claude-opus-4-5", "Claude Opus 4.5 (Pro)",
+         ["text", "vision", "reasoning", "tools", "caching"], 200_000, 32_000),
+        ("claude-sonnet-4-5", "Claude Sonnet 4.5 (Pro)",
+         ["text", "vision", "reasoning", "tools", "caching"], 200_000, 16_000),
+        ("claude-haiku-3-5", "Claude Haiku 3.5 (Pro)",
+         ["text", "vision", "tools", "caching"], 200_000, 8_192),
+    ],
+}
+
+
+def _seed_subscription_models(
+    writer: ConfigWriter, pid: str, raw: dict[str, Any],
+) -> int:
+    """Add any catalogue entries the provider doesn't already have.
+
+    Returns the number of models added. Never removes anything — this
+    is purely additive so the user's manual edits survive. Pruning
+    requires a live ``/v1/models`` response which we can't get for
+    subscription tokens.
+    """
+    catalogue = _SUBSCRIPTION_CATALOGUE.get(pid)
+    if not catalogue:
+        return 0
+    existing = raw.get("models") or {}
+    added = 0
+    for mid, display, caps, ctx, max_out in catalogue:
+        if mid in existing:
+            continue
+        writer.add_model(
+            pid, mid,
+            display=display,
+            capabilities=list(caps),
+            context_window=ctx,
+            max_output_tokens=max_out,
+        )
+        added += 1
+    return added
+
+
 async def refresh_all_providers(
     *,
     timeout: float = 8.0,
@@ -26,6 +104,11 @@ async def refresh_all_providers(
     Network calls run in parallel (fast). The TOML write phase runs
     sequentially against a single shared ConfigWriter to avoid race
     conditions where parallel writers would clobber each other's edits.
+
+    Subscription providers (``oauth:``) skip the network call but still
+    auto-seed any newly-released catalogue entries (e.g. GPT-5.5)
+    they're missing — so users on old providers.toml pick up new
+    models on next refresh without manually re-running the wizard.
     """
     writer = ConfigWriter()
     providers = writer.providers()
@@ -34,6 +117,7 @@ async def refresh_all_providers(
 
     results: dict[str, dict[str, Any]] = {}
     discoverable: list[tuple[str, str, str]] = []  # (pid, base_url, secret_ref)
+    any_changed = False
 
     for pid, raw in providers.items():
         if not raw.get("enabled", True):
@@ -54,8 +138,19 @@ async def refresh_all_providers(
             continue
 
         if secret_ref.startswith("oauth:"):
-            results[pid] = {"status": "skipped", "count": 0,
-                           "message": "oauth subscription"}
+            # Subscription tokens — auto-seed catalogue entries.
+            seeded = _seed_subscription_models(writer, pid, raw)
+            if seeded:
+                any_changed = True
+            existing_count = len(raw.get("models") or {})
+            msg = f"oauth subscription · {existing_count + seeded} models"
+            if seeded:
+                msg += f" (seeded +{seeded})"
+            results[pid] = {
+                "status": "ok" if seeded else "skipped",
+                "count": seeded,
+                "message": msg,
+            }
             continue
 
         if raw.get("format") == "anthropic_native":
@@ -85,7 +180,6 @@ async def refresh_all_providers(
     fetched = await asyncio.gather(*fetch_tasks, return_exceptions=False)
 
     # Phase 2: serialised TOML edits against the shared writer
-    any_changed = False
     for pid, status, models, message in fetched:
         if status != "ok":
             results[pid] = {"status": status, "count": 0, "message": message}
@@ -133,6 +227,7 @@ async def refresh_all_providers(
         results[pid] = {
             "status": "ok",
             "count": added,
+            "pruned": pruned,
             "message": " · ".join(msg_parts),
         }
 
@@ -178,3 +273,6 @@ async def _fetch_one(
         return pid, "error", [], "endpoint returned 0 models"
 
     return pid, "ok", models, ""
+
+
+__all__ = ["refresh_all_providers", "_SUBSCRIPTION_CATALOGUE"]

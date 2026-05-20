@@ -42,11 +42,59 @@ log = logging.getLogger(__name__)
 import random as _random
 
 _MAX_RETRIES = 8
+_MAX_RETRIES_NO_MODAL = 10  # used when the retry-confirm modal is disabled
 _CONTEXT_FILL_THRESHOLD = 0.80  # compact at 80% context usage
+
+# After this many consecutive failed attempts, escalate to a user-visible
+# confirmation modal IF the modal is enabled in settings (Setup → Other).
+# Below this we silently retry — short transient blips shouldn't pop a
+# modal in the user's face. Three attempts is the sweet spot.
+_RETRY_CONFIRM_THRESHOLD = 3
+# Seconds the modal waits for the user before auto-continuing. The
+# agent waits *unbounded* for the modal's decision — only the modal
+# owns this timer so the two timers can't race.
+_RETRY_CONFIRM_TIMEOUT = 5.0
+
+
+def _retry_confirm_enabled() -> bool:
+    """Read the user's preference fresh each call.
+
+    Default OFF — modal is opt-in. Reads ``[other] retry_confirm_enabled``
+    from settings.toml; missing or non-bool means off.
+    """
+    try:
+        from .llm.loader import load_settings
+        settings = load_settings() or {}
+        other = settings.get("other") or {}
+        return bool(other.get("retry_confirm_enabled", False))
+    except Exception:
+        return False
 
 _RETRYABLE_STATUS_RE = re.compile(r"\b(429|5\d{2})\b")
 _RECOVERY_TIME_RE = re.compile(r"next recovery in\s+(\d+[.,]?\d*)\s*s?", re.IGNORECASE)
-_RETRY_AFTER_RE = re.compile(r"\[Retry-After:\s*(\d+[.,]?\d*)\]")
+_RETRY_AFTER_RE = re.compile(r"\[Retry-After:\s*([^\]]+)\]")
+# Anthropic / generic "try again in 12s" / "retry in 1m 30s" / "wait 2 minutes".
+_HUMAN_WAIT_RE = re.compile(
+    r"(?:try again|retry|wait|available|reset(?:s)?(?:\s+in)?)"
+    r"\s+(?:in\s+)?(\d+[.,]?\d*)\s*(ms|s(?:ec(?:ond)?s?)?|m(?:in(?:ute)?s?)?|h(?:our)?s?)\b",
+    re.IGNORECASE,
+)
+# Token-bucket "X requests per minute" hints — e.g. Cerebras 429 body.
+_RPM_HINT_RE = re.compile(
+    r"(\d+)\s*(?:requests|req|rpm).{0,30}?(minute|hour|second|day)",
+    re.IGNORECASE,
+)
+
+
+# Error classes — different categories deserve different wait strategies.
+class _ErrorClass:
+    RATE_LIMIT = "rate_limit"      # 429, "rate limit" — wait per Retry-After (transient)
+    QUOTA_EXCEEDED = "quota"       # billing / insufficient_quota — won't clear without user action
+    OVERLOADED = "overloaded"      # 529 / "overloaded_error" — short wait, not user fault
+    SERVER = "server"              # 500/502/503/504 — medium backoff
+    NETWORK = "network"            # connection / timeout / EOF — short backoff, fast-retry
+    POOL_EXHAUSTED = "pool"        # all keys cooling — respect pool's recovery hint
+    UNKNOWN = "unknown"            # anything else retryable
 
 
 def _jittered_backoff(attempt: int, base_delay: float = 3.0, max_delay: float = 60.0) -> float:
@@ -57,50 +105,209 @@ def _jittered_backoff(attempt: int, base_delay: float = 3.0, max_delay: float = 
     return delay + jitter
 
 
+def _classify_error(exc: BaseException) -> str:
+    """Categorize an exception/error string for retry strategy selection.
+
+    Order matters — checks for the most specific signals first so a
+    generic 'connection reset' inside a 429 body still classifies as
+    RATE_LIMIT (the right wait curve).
+    """
+    msg = str(exc)
+    msg_l = msg.lower()
+
+    # Pool/keypool exhaustion — mesh-level
+    if "keys unavailable" in msg_l or "no key available" in msg_l:
+        return _ErrorClass.POOL_EXHAUSTED
+
+    # Permanent billing / quota errors. Distinguished from rate limit
+    # because they will NOT clear by waiting — the user has to top up
+    # their account, fix billing, or switch provider. Surfacing this as
+    # a separate class lets the agent show a confirmation modal instead
+    # of silently retrying for 5 minutes.
+    if (
+        "insufficient_quota" in msg_l
+        or "exceeded your current quota" in msg_l
+        or "check your plan and billing" in msg_l
+        or "billing_hard_limit" in msg_l
+        or "billing not active" in msg_l
+        or "you exceeded your current quota" in msg_l
+    ):
+        return _ErrorClass.QUOTA_EXCEEDED
+
+    # Anthropic 'overloaded_error' / 529 — recovers in seconds typically.
+    if "overloaded" in msg_l or "\b529\b" in msg or "529" in msg:
+        return _ErrorClass.OVERLOADED
+
+    # Rate limit (most common premium-API failure mode)
+    if _RETRYABLE_STATUS_RE.search(msg) and "429" in msg:
+        return _ErrorClass.RATE_LIMIT
+    if "rate limit" in msg_l or "rate_limit" in msg_l \
+            or "too many requests" in msg_l:
+        return _ErrorClass.RATE_LIMIT
+
+    # 5xx (excluding 529 above)
+    if re.search(r"\b5\d{2}\b", msg):
+        return _ErrorClass.SERVER
+
+    # Network / transport
+    network_keywords = (
+        "timeout", "timed out", "connection", "connect",
+        "reset by peer", "eof", "broken pipe",
+        "network", "remote end closed", "unreachable",
+        "no route to host", "name or service not known",
+    )
+    if any(kw in msg_l for kw in network_keywords):
+        return _ErrorClass.NETWORK
+
+    return _ErrorClass.UNKNOWN
+
+
 def _is_retryable_error(exc: BaseException) -> bool:
     """Determine if an error is transient and worth retrying."""
-    msg = str(exc).lower()
-    # Rate limit or server errors (429, 5xx)
-    if _RETRYABLE_STATUS_RE.search(str(exc)):
-        return True
-    # All keys unavailable in pool (mesh/keypool cooldown)
-    if "keys unavailable" in msg or "recovery" in msg:
-        return True
-    # Connection / timeout errors
-    if any(kw in msg for kw in ("timeout", "timed out", "connection", "connect",
-                                 "reset by peer", "eof", "broken pipe")):
-        return True
-    return False
+    klass = _classify_error(exc)
+    if klass == _ErrorClass.UNKNOWN:
+        # Fall back to the legacy substring check for edge cases the
+        # classifier doesn't cover yet (provider-specific wording).
+        msg = str(exc).lower()
+        return "recovery" in msg
+    return True
+
+
+def _parse_human_duration(raw: str) -> float | None:
+    """Parse '12', '12s', '500ms', '1m', '1.5h' into seconds.
+
+    Used for Retry-After values that are not a bare integer-second
+    count (HTTP allows seconds OR an HTTP-date; some providers emit
+    '60s' / '1m' / ISO 8601 here too — be liberal).
+    """
+    raw = raw.strip().rstrip(".,;")
+    if not raw:
+        return None
+    # Bare number → assume seconds.
+    try:
+        return float(raw.replace(",", "."))
+    except ValueError:
+        pass
+    m = re.match(r"^\s*(\d+[.,]?\d*)\s*(ms|s|sec(?:ond)?s?|m|min(?:ute)?s?|h|hour?s?)\s*$",
+                 raw, re.IGNORECASE)
+    if not m:
+        return None
+    val = float(m.group(1).replace(",", "."))
+    unit = m.group(2).lower()
+    if unit == "ms":
+        return val / 1000.0
+    if unit.startswith("h"):
+        return val * 3600.0
+    if unit.startswith("m") and unit != "ms":
+        # 'm' / 'min' / 'minute(s)'
+        return val * 60.0
+    # default seconds
+    return val
 
 
 def _parse_recovery_delay(exc: BaseException) -> float | None:
     """Extract recovery time from error messages.
 
     Sources (checked in order):
-      1. [Retry-After: Xs] — from HTTP header, most authoritative
-      2. 'next recovery in Xs' — from KeyPool NoKeyAvailable message
+      1. ``[Retry-After: …]`` — from HTTP header (most authoritative).
+         Now accepts '60', '60s', '500ms', '1m', '2 minutes'.
+      2. Inline 'try again in 12s' / 'retry in 1m 30s' (Anthropic,
+         OpenRouter, xAI all phrase rate limits this way).
+      3. ``next recovery in Xs`` — from KeyPool ``NoKeyAvailable``.
 
-    Handles both '15.4' and '15,4' decimal formats.
-    Returns None for values < 2s (forces backoff instead of busy-looping).
-    Caps at 60s — if pool says 280s, we retry sooner (pool may recover earlier).
+    Caps at 60s (long waits stall the agent — pool recovers earlier);
+    rejects values < 2s (force backoff floor instead of busy-looping).
     """
     msg = str(exc)
 
-    # Try Retry-After header first (most authoritative)
+    # 1. Retry-After header (parsed liberally).
     match = _RETRY_AFTER_RE.search(msg)
-    if not match:
-        match = _RECOVERY_TIME_RE.search(msg)
-
     if match:
-        value_str = match.group(1).replace(",", ".")
-        try:
-            val = float(value_str)
-            if val < 2.0:
-                return None  # fall through to exponential backoff
+        val = _parse_human_duration(match.group(1))
+        if val is not None and val >= 2.0:
             return min(val, 60.0)
+
+    # 2. Inline human phrasing.
+    match = _HUMAN_WAIT_RE.search(msg)
+    if match:
+        unit = (match.group(2) or "s").lower()
+        try:
+            num = float(match.group(1).replace(",", "."))
+        except ValueError:
+            num = None
+        if num is not None:
+            if unit.startswith("ms"):
+                seconds = num / 1000.0
+            elif unit.startswith("h"):
+                seconds = num * 3600.0
+            elif unit.startswith("m") and unit != "ms":
+                seconds = num * 60.0
+            else:
+                seconds = num
+            if seconds >= 2.0:
+                return min(seconds, 60.0)
+
+    # 3. KeyPool recovery hint.
+    match = _RECOVERY_TIME_RE.search(msg)
+    if match:
+        try:
+            val = float(match.group(1).replace(",", "."))
         except ValueError:
             return None
+        if val < 2.0:
+            return None
+        return min(val, 60.0)
+
     return None
+
+
+def _compute_retry_delay(
+    exc: BaseException | None,
+    attempt: int,
+) -> tuple[float, str]:
+    """Pick the wait duration based on error class and attempt number.
+
+    Returns (delay_seconds, reason_tag) so the caller can log why it
+    chose this delay (handy when debugging stuck retries).
+
+    Strategy by class:
+      • Authoritative hint (Retry-After / 'try again in X') always wins.
+      • POOL_EXHAUSTED — same: respect pool's recovery hint.
+      • QUOTA_EXCEEDED — minimal poll (5s) so the user sees the
+        confirmation modal almost immediately. Waiting won't fix
+        billing; we mostly retry to give the modal a chance to show.
+      • RATE_LIMIT (no hint) — exponential, capped at 30s (rate limits
+        usually clear within seconds on premium APIs; long waits hurt UX).
+      • OVERLOADED — short, capped at 15s. Anthropic 529 recovers fast.
+      • SERVER — medium backoff (cap 60s).
+      • NETWORK — fast-retry: cap 10s. Transport blips fix themselves.
+      • UNKNOWN — default exponential cap 60s.
+    """
+    klass = _classify_error(exc) if exc is not None else _ErrorClass.UNKNOWN
+
+    # QUOTA_EXCEEDED bypasses Retry-After: the API always echoes back a
+    # short "try again" hint on quota-exhausted responses, but waiting
+    # 30 minutes for billing to refresh would block the agent silently.
+    # Better to show the modal fast and let the user decide.
+    if klass == _ErrorClass.QUOTA_EXCEEDED:
+        return _jittered_backoff(attempt + 1, base_delay=2.0, max_delay=5.0), "quota"
+
+    if exc is not None:
+        hint = _parse_recovery_delay(exc)
+        if hint is not None:
+            return hint, "hint"
+
+    if klass == _ErrorClass.NETWORK:
+        return _jittered_backoff(attempt + 1, base_delay=1.5, max_delay=10.0), "network"
+    if klass == _ErrorClass.OVERLOADED:
+        return _jittered_backoff(attempt + 1, base_delay=2.0, max_delay=15.0), "overloaded"
+    if klass == _ErrorClass.RATE_LIMIT:
+        return _jittered_backoff(attempt + 1, base_delay=3.0, max_delay=30.0), "rate_limit"
+    if klass == _ErrorClass.SERVER:
+        return _jittered_backoff(attempt + 1, base_delay=3.0, max_delay=60.0), "server"
+    if klass == _ErrorClass.POOL_EXHAUSTED:
+        return _jittered_backoff(attempt + 1, base_delay=2.0, max_delay=20.0), "pool"
+    return _jittered_backoff(attempt + 1, base_delay=3.0, max_delay=60.0), "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +332,28 @@ class AgentRetry:
     attempt: int
     max_attempts: int
     delay: float
+    turn: int = 0
+
+
+@dataclass
+class AgentRetryConfirm:
+    """Stalled-retry notification for the UI.
+
+    Fire-and-forget: the agent emits this to let the UI pop a modal,
+    then keeps retrying on its own backoff schedule. The UI doesn't
+    need to signal back — Abort cancels the agent task directly via
+    ``app.action_cancel_agent()`` (same path as Esc), Continue just
+    closes the modal and the agent's already-running sleep finishes
+    on its own.
+
+    No futures, no events, no signaling. The simplest thing that
+    works: cancellation propagates through asyncio's normal channels.
+    """
+    attempt: int
+    max_attempts: int
+    error_class: str
+    error_message: str
+    auto_continue_in: float
     turn: int = 0
 
 
@@ -176,7 +405,7 @@ class AgentError:
     exc: BaseException | None = None
 
 
-AgentEvent = AgentText | AgentThinking | AgentRetry | AgentToolCall | AgentApprovalRequest | AgentToolResult | AgentInjected | AgentDone | AgentError
+AgentEvent = AgentText | AgentThinking | AgentRetry | AgentRetryConfirm | AgentToolCall | AgentApprovalRequest | AgentToolResult | AgentInjected | AgentDone | AgentError
 
 # ---------------------------------------------------------------------------
 # Agent config
@@ -769,8 +998,23 @@ class Agent:
         limits during handshake, etc.).
         """
         last_exc: BaseException | None = None
+        # Pick limits based on the user's preference. Modal off → 10
+        # attempts then surface a regular AgentError (the pre-modal
+        # behaviour the user explicitly asked to keep as default).
+        # Modal on → 8 attempts but with an interactive escalation
+        # after the 3rd failure, then again every 3 failures.
+        modal_enabled = _retry_confirm_enabled()
+        max_retries = _MAX_RETRIES if modal_enabled else _MAX_RETRIES_NO_MODAL
+        # Tracks the attempt number of the most-recent modal (0 = never).
+        # Used to gate "show another modal in 3 more failures" — keeps
+        # the wait spacing between modals consistent regardless of the
+        # absolute attempt count. Without this, after the first modal
+        # (which fires at attempt 3) the threshold check
+        # ``attempt_num >= 3`` was always true so every subsequent
+        # failure popped a new modal back-to-back.
+        last_modal_at = 0
 
-        for attempt in range(_MAX_RETRIES + 1):
+        for attempt in range(max_retries + 1):
             got_error_chunk = False
             error_msg = ""
             has_yielded_content = False
@@ -802,21 +1046,55 @@ class Agent:
                 # If content was already yielded, don't retry — it would duplicate
                 if has_yielded_content:
                     raise
-                if attempt >= _MAX_RETRIES or not _is_retryable_error(exc):
+                if attempt >= max_retries or not _is_retryable_error(exc):
                     raise
                 error_msg = str(exc)
 
-            # Retry logic — parse recovery delay or use exponential backoff
-            recovery_delay = _parse_recovery_delay(last_exc) if last_exc else None
-            delay = recovery_delay if recovery_delay is not None else _jittered_backoff(attempt + 1)
+            # Retry logic — pick delay by error class (rate_limit /
+            # overloaded / network / server / pool / unknown), respecting
+            # any authoritative hint (Retry-After / 'try again in X').
+            delay, reason = _compute_retry_delay(last_exc, attempt)
             log.warning(
-                "Stream attempt %d failed (%s), retrying in %.1fs",
-                attempt + 1, error_msg, delay,
+                "Stream attempt %d failed (%s) [class=%s], retrying in %.1fs",
+                attempt + 1, error_msg, reason, delay,
             )
+
+            # Escalate to a user-visible confirmation modal once we've
+            # burned through ``_RETRY_CONFIRM_THRESHOLD`` attempts since
+            # the last modal. Fire-and-forget — agent doesn't wait for
+            # a reply. UI pops the modal in parallel; if the user
+            # clicks Abort, the UI cancels ``_agent_task`` (same as
+            # Esc), the cancellation propagates through asyncio and
+            # the agent's backoff sleep below dies cleanly. If the
+            # user clicks Continue (or the modal auto-continues), the
+            # backoff sleep finishes and we go round again.
+            attempt_num = attempt + 1
+            klass = _classify_error(last_exc) if last_exc else _ErrorClass.UNKNOWN
+            permanent_class = klass == _ErrorClass.QUOTA_EXCEEDED
+            attempts_since_last_modal = attempt_num - last_modal_at
+            should_confirm = modal_enabled and (
+                permanent_class
+                or attempts_since_last_modal >= _RETRY_CONFIRM_THRESHOLD
+            )
+
+            if should_confirm:
+                trimmed = error_msg.strip()
+                if len(trimmed) > 240:
+                    trimmed = trimmed[:240] + "…"
+                await queue.put(AgentRetryConfirm(
+                    attempt=attempt_num,
+                    max_attempts=max_retries,
+                    error_class=klass,
+                    error_message=trimmed,
+                    auto_continue_in=_RETRY_CONFIRM_TIMEOUT,
+                    turn=turn,
+                ))
+                last_modal_at = attempt_num
+
             # Notify TUI about retry (friendly status, not raw error)
             await queue.put(AgentRetry(
                 attempt=attempt + 1,
-                max_attempts=_MAX_RETRIES,
+                max_attempts=max_retries,
                 delay=delay,
                 turn=turn,
             ))

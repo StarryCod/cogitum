@@ -143,13 +143,22 @@ def _provider_config_from_dict(pid: str, raw: dict[str, Any]) -> ProviderConfig:
             caps |= Capability.STREAMING
         if int(mraw.get("context_window", 0)) >= 128_000:
             caps |= Capability.LONG_CONTEXT
+        # 32K output floor: never let a model advertise less than the
+        # global minimum (cogitum.core.constants.MIN_MAX_OUTPUT_TOKENS).
+        # This silently uplifts old providers.toml entries seeded with
+        # 4K/8K caps so 'response stopped mid-sentence' goes away on
+        # upgrade — no migration step required.
+        from cogitum.core.constants import MIN_MAX_OUTPUT_TOKENS
+
+        raw_max_out = int(mraw.get("max_output_tokens", 4096))
+        max_out = max(raw_max_out, MIN_MAX_OUTPUT_TOKENS)
         models.append(ModelConfig(
             id=mid,
             display=str(mraw.get("display", "")),
             aliases=tuple(mraw.get("aliases") or ()),
             capabilities=caps,
             context_window=int(mraw.get("context_window", 8192)),
-            max_output_tokens=int(mraw.get("max_output_tokens", 4096)),
+            max_output_tokens=max_out,
             cost_input=float(mraw.get("cost_input", 0.0)),
             cost_output=float(mraw.get("cost_output", 0.0)),
             cost_cache_read=float(mraw.get("cost_cache_read", 0.0)),

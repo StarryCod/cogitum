@@ -66,6 +66,11 @@ def _account_id(access_token: str) -> str | None:
 
 
 def _post_form(url: str, body: dict[str, str], *, timeout: float = 30.0) -> dict[str, Any]:
+    """POST form-urlencoded, return parsed JSON. Raises RuntimeError with
+    the response body when the server returns non-JSON (Cloudflare
+    challenge page, region block, OpenAI 503 HTML) so the user sees
+    what came back instead of a cryptic ``JSONDecodeError``.
+    """
     data = urllib.parse.urlencode(body).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -76,10 +81,24 @@ def _post_form(url: str, body: dict[str, str], *, timeout: float = 30.0) -> dict
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = resp.read().decode("utf-8")
-            return json.loads(payload)
+            content_type = resp.headers.get("Content-Type", "")
+            try:
+                return json.loads(payload)
+            except json.JSONDecodeError as je:
+                preview = payload.strip()[:300] or "<empty body>"
+                raise RuntimeError(
+                    f"OpenAI token endpoint returned non-JSON "
+                    f"(Content-Type={content_type!r}): {preview}"
+                ) from je
     except urllib.error.HTTPError as e:
         text = e.read().decode("utf-8", "replace")
-        raise RuntimeError(f"OpenAI token endpoint returned {e.code}: {text}") from e
+        raise RuntimeError(
+            f"OpenAI token endpoint returned {e.code}: {text[:500]}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"OpenAI token endpoint unreachable: {e.reason}"
+        ) from e
 
 
 def _parse_manual_input(text: str) -> tuple[str | None, str | None]:

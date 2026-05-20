@@ -162,10 +162,21 @@ class Mesh:
         # int substitutes in (clamped to req.max_tokens to avoid handing
         # the provider MORE than the agent expected — provider config
         # tightens the budget, never loosens it past the agent ceiling).
+        #
+        # Floor: regardless of provider_cap or req.max_tokens, the final
+        # outgoing budget is never below MIN_MAX_OUTPUT_TOKENS. This
+        # mirrors the loader-side floor on ModelConfig.max_output_tokens
+        # so a user who manually tightened [providers.X] max_tokens=4096
+        # in providers.toml still gets at least 32K — matches the spec
+        # "minimum 32K, нельзя ниже даже тем моделям которые уже были".
+        from cogitum.core.constants import MIN_MAX_OUTPUT_TOKENS
+
         provider_cap = getattr(provider.config, "max_tokens", 0) or 0
         max_tokens = req.max_tokens
         if provider_cap > 0:
             max_tokens = min(provider_cap, req.max_tokens) if req.max_tokens > 0 else provider_cap
+        if max_tokens is None or max_tokens < MIN_MAX_OUTPUT_TOKENS:
+            max_tokens = MIN_MAX_OUTPUT_TOKENS
 
         cr = CompletionRequest(
             model=resolved.model,

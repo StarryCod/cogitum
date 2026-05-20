@@ -59,6 +59,11 @@ def _build_authorize_url(challenge: str, state: str) -> str:
 
 
 def _post_json(url: str, body: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
+    """POST JSON, return parsed JSON. Raises RuntimeError with the response
+    body when the server returns non-JSON (Cloudflare challenge page,
+    region block, OpenAPI 503 HTML) so the user sees what actually came
+    back instead of a cryptic ``JSONDecodeError`` from json.loads.
+    """
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -69,11 +74,23 @@ def _post_json(url: str, body: dict[str, Any], *, timeout: float = 30.0) -> dict
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = resp.read().decode("utf-8")
-            return json.loads(payload)
+            content_type = resp.headers.get("Content-Type", "")
+            try:
+                return json.loads(payload)
+            except json.JSONDecodeError as je:
+                preview = payload.strip()[:300] or "<empty body>"
+                raise RuntimeError(
+                    f"Anthropic token endpoint returned non-JSON "
+                    f"(Content-Type={content_type!r}): {preview}"
+                ) from je
     except urllib.error.HTTPError as e:
         body_text = e.read().decode("utf-8", "replace")
         raise RuntimeError(
-            f"Anthropic token endpoint returned {e.code}: {body_text}"
+            f"Anthropic token endpoint returned {e.code}: {body_text[:500]}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"Anthropic token endpoint unreachable: {e.reason}"
         ) from e
 
 

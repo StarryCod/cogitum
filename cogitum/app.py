@@ -11,7 +11,7 @@ from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.widgets import Static
 
-from .core.agent import Agent, AgentApprovalRequest, AgentConfig, AgentDone, AgentError, AgentInjected, AgentRetry, AgentText, AgentThinking, AgentToolCall, AgentToolResult
+from .core.agent import Agent, AgentApprovalRequest, AgentConfig, AgentDone, AgentError, AgentInjected, AgentRetry, AgentRetryConfirm, AgentText, AgentThinking, AgentToolCall, AgentToolResult
 from .core.builtin_tools import *
 from .widgets.approval import ApprovalWidget
 from .core.llm.loader import load_mesh, load_settings, write_settings
@@ -485,15 +485,26 @@ class CogitumApp(App):
             )
 
     def action_open_models(self) -> None:
-        # Always reload mesh from disk so newly-added providers/models
-        # appear immediately (user may have edited providers.toml or
-        # used /setup since last picker open).
+        """Open the model picker. Live-refreshes /v1/models in background.
+
+        We open the picker *immediately* with whatever's already in the
+        mesh so the user doesn't wait on network. A background task
+        then re-fetches every provider's live model list and rebuilds
+        the mesh — if new models arrive while the picker is open the
+        next ``/models`` call will see them.
+        """
+        # Reload from disk first so any wizard / external edits show up
+        # right away (cheap, no network).
         self._load_mesh_async()
         if self.mesh is None or not self.mesh.providers:
             self.query_one("#feed-pane", Feed).append_error(
                 "No mesh available — configure providers first (Ctrl+, or /setup)."
             )
             return
+        # Kick off live refresh in background; doesn't block the picker.
+        bg = asyncio.ensure_future(self._refresh_then_reload())
+        self._bg_tasks.add(bg)
+        bg.add_done_callback(self._bg_tasks.discard)
         picker = ModelPicker(self.mesh, current=self.current_model)
         self.push_screen(picker, self._on_model_picked)
 
@@ -501,19 +512,64 @@ class CogitumApp(App):
         self.push_screen(SetupScreen(), self._on_setup_close)
 
     def _on_setup_close(self, _result: object) -> None:
-        # Reload mesh + settings + agent so providers/models/default_model
-        # changes from the wizard take effect immediately. _load_mesh_async
-        # also calls _discover_mcp_tools which now reconciles fully — added,
-        # removed, disabled, or reconfigured MCP servers all sync up here
-        # without needing a Cogitum restart.
-        self._load_mesh_async()
+        """Re-fetch live model lists from every provider, then reload mesh.
+
+        The user may have toggled keys, swapped OAuth, or added/disabled
+        a provider in the wizard. Hitting every ``/v1/models`` endpoint
+        in parallel keeps the mesh in sync with what the provider
+        actually serves *right now* — newly enabled models appear in
+        ``/models``, decommissioned ones drop out, all without a
+        restart. ``_load_mesh_async`` then rebuilds the in-process mesh
+        and reconciles MCP servers (added / removed / reconfigured).
+        """
         feed = self.query_one("#feed-pane", Feed)
-        msg = (
-            f"config reloaded — "
-            f"{len(self.mesh.list_resolved()) if self.mesh else 0} models, "
-            f"{sum(1 for n in REGISTRY.names() if n.startswith('mcp_'))} MCP tools"
+        feed.append_system("refreshing models…", "setup closed")
+        bg = asyncio.ensure_future(self._refresh_then_reload())
+        self._bg_tasks.add(bg)
+        bg.add_done_callback(self._bg_tasks.discard)
+
+    async def _refresh_then_reload(self) -> None:
+        """Fetch /v1/models for every provider, then rebuild mesh + agent.
+
+        Runs as a background task so the TUI stays responsive while
+        the network calls fan out (parallel, 6s timeout each via
+        ``refresh_all_providers``).
+        """
+        feed = self.query_one("#feed-pane", Feed)
+        try:
+            results = await refresh_all_providers(timeout=6.0, only_empty=False)
+        except Exception as e:
+            feed.append_error(f"refresh failed: {e}", meta="auto-refresh")
+            self._load_mesh_async()
+            return
+
+        added = sum(r["count"] for r in results.values() if r.get("status") == "ok")
+        pruned = sum(
+            int(r.get("pruned", 0) or 0)
+            for r in results.values()
+            if r.get("status") == "ok"
         )
-        feed.append_system(msg, "setup closed")
+        ok_count = sum(1 for r in results.values() if r.get("status") == "ok")
+        skip_count = sum(1 for r in results.values() if r.get("status") != "ok")
+
+        # Reload regardless — even if nothing was added/pruned the user
+        # may have flipped enabled flags, swapped keys, or changed
+        # default_model in the wizard, all of which need a fresh mesh.
+        self._load_mesh_async()
+
+        msg = (
+            f"refresh: {ok_count} providers ok"
+            + (f" · {skip_count} skipped" if skip_count else "")
+            + (f" · +{added} models" if added else "")
+            + (f" · −{pruned} pruned" if pruned else "")
+        )
+        try:
+            mesh = getattr(self, "mesh", None)
+            if mesh is not None:
+                msg += f" · {len(mesh.list_resolved())} total"
+        except Exception:
+            pass
+        feed.append_system(msg, "models refreshed")
 
     def _on_model_picked(self, resolved: ResolvedModel | None) -> None:
         if resolved is None:
@@ -696,6 +752,28 @@ class CogitumApp(App):
                     if waiting is None:
                         waiting = feed.append_waiting()
                     waiting.set_status(label)
+
+                elif isinstance(event, AgentRetryConfirm):
+                    # Fire-and-forget. Modal pops in parallel with the
+                    # agent's backoff sleep. Abort calls
+                    # ``action_cancel_agent`` directly from inside the
+                    # modal — no signaling back, cancellation
+                    # propagates through asyncio. Continue just closes
+                    # the modal and the agent's backoff finishes on
+                    # its own. We don't await push_screen_wait because
+                    # blocking drain_queue while the modal is open
+                    # would freeze TEXT/THINKING/RETRY events that the
+                    # agent might emit in the background.
+                    from .widgets.retry_confirm import RetryConfirmModal
+
+                    modal = RetryConfirmModal(
+                        attempt=event.attempt,
+                        max_attempts=event.max_attempts,
+                        error_class=event.error_class,
+                        error_message=event.error_message,
+                        auto_continue_in=event.auto_continue_in,
+                    )
+                    self.push_screen(modal)
 
                 elif isinstance(event, AgentInjected):
                     # A queued message was consumed mid-turn — remove from

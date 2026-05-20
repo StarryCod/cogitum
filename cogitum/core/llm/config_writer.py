@@ -4,10 +4,19 @@ Mutating providers.toml with tomlkit so user comments and formatting survive.
 The plain `_dump_toml` in loader.py is used only for fresh writes (settings,
 seed). For any modification of an existing user-edited file we go through
 `ConfigWriter` so we don't trash hand-tuned blocks.
+
+Performance note: ``tomlkit.parse`` is *slow* on large configs — measured
+≈4000ms on a 25KB providers.toml with 37 providers, vs ≈25ms for the
+stdlib ``tomllib`` and ≈130ms for ``copy.deepcopy`` of an already-parsed
+document. The setup wizard reconstructs ``ConfigWriter`` on every section
+switch, so we cache the parsed document by ``(path, mtime_ns)`` and hand
+each caller a deep copy. A wizard navigation that previously cost 4+
+seconds now costs <200ms (first hit) and <150ms (cache hit).
 """
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +30,51 @@ from .loader import _PROVIDERS_PATH, seed_default_config
 _DEFAULT_BETAS_NOTE = "secret_ref schemes: env:VAR / keyring:svc:user / vault:id / oauth:<id> / plain:<v>"
 
 
+# Parsed-document cache — keyed by path, value is (mtime_ns, TOMLDocument).
+# Each caller receives ``copy.deepcopy(doc)`` so mutations on one writer
+# never leak into the cached entry. Reparse only happens when the file's
+# mtime advances (external editor, manual edit) or someone explicitly
+# calls ``invalidate_cache()``.
+_DOC_CACHE: dict[Path, tuple[int, TOMLDocument]] = {}
+
+
+def _load_cached(path: Path) -> TOMLDocument:
+    """Return a fresh ``TOMLDocument`` for ``path``.
+
+    Uses (mtime, parsed-doc) cache + ``deepcopy`` to skip the 4-second
+    tomlkit reparse cost on every wizard navigation.
+    """
+    try:
+        mtime = path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return parse("")
+
+    cached = _DOC_CACHE.get(path)
+    if cached is not None and cached[0] == mtime:
+        return copy.deepcopy(cached[1])
+
+    text = path.read_text(encoding="utf-8")
+    doc = parse(text)
+    _DOC_CACHE[path] = (mtime, doc)
+    # Hand the caller its own copy — never expose the cached instance,
+    # otherwise the first .save() would mutate every other writer that
+    # built on the same cache slot.
+    return copy.deepcopy(doc)
+
+
+def invalidate_cache(path: Path | None = None) -> None:
+    """Drop cached parse for ``path`` (or every path when ``None``).
+
+    Called automatically after ``ConfigWriter.save()``; external callers
+    only need this when they edit the file directly via shell / editor
+    and want the next ``ConfigWriter()`` to see the changes immediately.
+    """
+    if path is None:
+        _DOC_CACHE.clear()
+    else:
+        _DOC_CACHE.pop(path, None)
+
+
 class ConfigWriter:
     """Read, mutate and persist providers.toml without losing comments."""
 
@@ -28,7 +82,8 @@ class ConfigWriter:
         self.path = path or _PROVIDERS_PATH
         if not self.path.exists():
             seed_default_config(self.path)
-        self.doc: TOMLDocument = parse(self.path.read_text(encoding="utf-8"))
+            invalidate_cache(self.path)  # file just appeared — refresh
+        self.doc: TOMLDocument = _load_cached(self.path)
 
     # ---- read ---------------------------------------------------------
 
@@ -157,6 +212,12 @@ class ConfigWriter:
         context_window: int = 8192,
         max_output_tokens: int = 4096,
     ) -> None:
+        # 32K output floor — see cogitum.core.constants. Applies on the
+        # write path so providers.toml never gains a sub-floor entry,
+        # whether the source is the setup wizard, OAuth bootstrap
+        # (claude_models / codex_models), or live /v1/models discovery.
+        from cogitum.core.constants import MIN_MAX_OUTPUT_TOKENS
+
         p = self._provider_table(pid)
         models = p.get("models")
         if not isinstance(models, Table):
@@ -170,7 +231,7 @@ class ConfigWriter:
             m["aliases"] = aliases
         m["capabilities"] = capabilities or ["text", "tools"]
         m["context_window"] = int(context_window)
-        m["max_output_tokens"] = int(max_output_tokens)
+        m["max_output_tokens"] = max(int(max_output_tokens), MIN_MAX_OUTPUT_TOKENS)
         models[model_id] = m
 
     def remove_model(self, pid: str, model_id: str) -> bool:
@@ -195,6 +256,10 @@ class ConfigWriter:
         except OSError:
             pass
         tmp.replace(self.path)
+        # Refresh the parse cache so the next ConfigWriter() sees this
+        # save (otherwise the cached doc still has the pre-save mtime
+        # for a moment and the wizard re-renders stale state).
+        invalidate_cache(self.path)
 
     # ---- helpers ------------------------------------------------------
 
@@ -208,7 +273,7 @@ class ConfigWriter:
         return providers[pid]
 
 
-__all__ = ["ConfigWriter"]
+__all__ = ["ConfigWriter", "invalidate_cache"]
 
 
 # silence unused

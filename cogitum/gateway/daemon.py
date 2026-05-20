@@ -1,193 +1,86 @@
 """
 cogitum.gateway.daemon
-~~~~~~~~~~~~~~~~~~~~~~~
-Systemd user service management for the Telegram gateway.
+~~~~~~~~~~~~~~~~~~~~~~
+Cross-platform façade for the Telegram gateway daemon.
 
-POSIX-only. On Windows the gateway is run manually
-(``python -m cogitum.gateway.telegram``) or wrapped in NSSM /
-Task Scheduler — there's no equivalent of ``systemctl --user``
-out of the box. All public functions raise ``NotSupportedOnPlatform``
-when called on a non-POSIX system.
+Dispatches to ``_daemon_posix`` (systemctl --user) on Linux/macOS and
+``_daemon_windows`` (detached process + HKCU\\...\\Run) on Windows. The
+public surface is identical, so callers (CLI, TUI setup wizard) don't
+need to special-case the platform.
+
+Backwards-compat note: ``NotSupportedOnPlatform`` is preserved as a
+public symbol so older callers that import it keep working, but it is
+no longer raised in normal use — both platforms are supported now. The
+exception remains for environments where neither backend can run (e.g.
+a sandboxed test runner without ``%APPDATA%`` or ``systemctl``).
 """
 from __future__ import annotations
 
-import subprocess
 import sys
-from pathlib import Path
-
-# All systemctl invocations are bounded by this hard timeout. Without it,
-# a hung systemd-user (rare but real on headless boxes) would freeze every
-# `cog tg ...` subcommand indefinitely (M2).
-_SYSTEMCTL_TIMEOUT = 15
-
-_SERVICE_NAME = "cogitum-tg"
-_SERVICE_DIR = Path.home() / ".config" / "systemd" / "user"
-_SERVICE_PATH = _SERVICE_DIR / f"{_SERVICE_NAME}.service"
 
 
 class NotSupportedOnPlatform(RuntimeError):
-    """Raised when a daemon-control function is called on a platform
-    that doesn't have ``systemctl --user`` (Windows, mostly)."""
+    """Raised on platforms where no daemon backend can run.
+
+    Kept for backwards compatibility — ``setup_flow.py`` catches this
+    when rendering the Telegram section. With the Windows backend in
+    place, normal Windows / Linux / macOS users will never see it.
+    """
 
 
-def _check_supported() -> None:
+def _backend():  # type: ignore[no-untyped-def]
     if sys.platform == "win32":
-        raise NotSupportedOnPlatform(
-            "Telegram gateway daemon control is POSIX-only. "
-            "On Windows, run it manually with "
-            "`python -m cogitum.gateway.telegram` or wrap it in "
-            "NSSM / Task Scheduler."
-        )
+        from . import _daemon_windows as backend
+    else:
+        from . import _daemon_posix as backend
+    return backend
 
 
-def _systemctl(*args: str, capture: bool = True) -> subprocess.CompletedProcess:
-    """Run `systemctl --user <args>` with a bounded timeout.
-
-    Returns the CompletedProcess so callers can inspect rc/stdout/stderr.
-    On timeout we synthesize a CompletedProcess with rc=124 (the
-    conventional 'command timed out' exit code) and an explanatory
-    stderr message — callers don't need to special-case TimeoutExpired.
-    """
-    _check_supported()
-    try:
-        return subprocess.run(
-            ["systemctl", "--user", *args],
-            capture_output=capture,
-            text=True,
-            timeout=_SYSTEMCTL_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(
-            args=["systemctl", "--user", *args],
-            returncode=124,
-            stdout="",
-            stderr=f"systemctl --user {' '.join(args)} timed out after {_SYSTEMCTL_TIMEOUT}s",
-        )
-
-
-def _python_path() -> str:
-    """Get the Python interpreter that has cogitum installed.
-
-    Strategy (in order):
-      1. Honour explicit COGITUM_PYTHON env var (used by users who
-         deliberately split daemon python from CLI python).
-      2. Use sys.executable — that's the same interpreter the user
-         used to invoke `cog tg install`, so cogitum is definitely
-         importable from it. This handles the npm-installed case
-         (~/.local/share/cogitum/.venv/bin/python), the install.sh
-         case, and the manual `pip install -e .` case uniformly.
-    """
-    import os
-    explicit = os.environ.get("COGITUM_PYTHON")
-    if explicit and Path(explicit).exists():
-        return explicit
-    return sys.executable
-
-
-def _service_content() -> str:
-    python = _python_path()
-    return f"""\
-[Unit]
-Description=Cogitum Telegram Gateway
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart={python} -m cogitum.gateway.telegram
-Restart=on-failure
-RestartSec=10
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=default.target
-"""
+# ---------------------------------------------------------------------------
+# Public API — every function delegates to the platform backend.
+# ---------------------------------------------------------------------------
 
 
 def install_service() -> str:
-    """Install the systemd user service file."""
-    _SERVICE_DIR.mkdir(parents=True, exist_ok=True)
-    _SERVICE_PATH.write_text(_service_content(), encoding="utf-8")
-    _systemctl("daemon-reload")
-    return f"Service installed: {_SERVICE_PATH}"
+    return _backend().install_service()
 
 
 def enable_service() -> str:
-    """Enable auto-start on login."""
-    install_service()
-    result = _systemctl("enable", _SERVICE_NAME)
-    if result.returncode != 0:
-        return f"Enable failed: {result.stderr.strip()}"
-    return f"Enabled: {_SERVICE_NAME} (auto-start on login)"
-
-
-def start_service() -> str:
-    """Start the gateway daemon."""
-    install_service()
-    result = _systemctl("start", _SERVICE_NAME)
-    if result.returncode != 0:
-        return f"Start failed: {result.stderr.strip()}"
-    return "Started ✓"
-
-
-def stop_service() -> str:
-    """Stop the gateway daemon."""
-    result = _systemctl("stop", _SERVICE_NAME)
-    if result.returncode != 0:
-        return f"Stop failed: {result.stderr.strip()}"
-    return "Stopped ✓"
-
-
-def restart_service() -> str:
-    """Restart the gateway daemon.
-
-    Note: systemctl restart is more robust than stop-then-start because
-    systemd handles the unit-state transition atomically (M16). If you
-    need a hard reset (e.g. unit got stuck), call stop_service() first.
-    """
-    install_service()
-    result = _systemctl("restart", _SERVICE_NAME)
-    if result.returncode != 0:
-        return f"Restart failed: {result.stderr.strip()}"
-    return "Restarted ✓"
-
-
-def status_service() -> dict[str, str]:
-    """Get daemon status."""
-    result = _systemctl("status", _SERVICE_NAME)
-    output = result.stdout.strip()
-
-    # Parse status
-    active = "unknown"
-    for line in output.splitlines():
-        line = line.strip()
-        if line.startswith("Active:"):
-            active = line.split(":", 1)[1].strip()
-            break
-
-    is_enabled = _systemctl("is-enabled", _SERVICE_NAME).stdout.strip()
-
-    return {
-        "active": active,
-        "enabled": is_enabled,
-        "service_path": str(_SERVICE_PATH),
-        "full_output": output,
-    }
+    return _backend().enable_service()
 
 
 def disable_service() -> str:
-    """Disable auto-start."""
-    result = _systemctl("disable", _SERVICE_NAME)
-    if result.returncode != 0:
-        return f"Disable failed: {result.stderr.strip()}"
-    return "Disabled (won't auto-start)"
+    return _backend().disable_service()
+
+
+def start_service() -> str:
+    return _backend().start_service()
+
+
+def stop_service() -> str:
+    return _backend().stop_service()
+
+
+def restart_service() -> str:
+    return _backend().restart_service()
+
+
+def status_service() -> dict[str, str]:
+    return _backend().status_service()
 
 
 def uninstall_service() -> str:
-    """Stop, disable, and remove the service file."""
-    stop_service()
-    disable_service()
-    if _SERVICE_PATH.exists():
-        _SERVICE_PATH.unlink()
-    _systemctl("daemon-reload")
-    return "Service removed"
+    return _backend().uninstall_service()
+
+
+__all__ = [
+    "NotSupportedOnPlatform",
+    "install_service",
+    "enable_service",
+    "disable_service",
+    "start_service",
+    "stop_service",
+    "restart_service",
+    "status_service",
+    "uninstall_service",
+]

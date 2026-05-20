@@ -286,6 +286,33 @@ The lead Cogitum decides when to dispatch — you don't have to invoke it explic
 
 ---
 
+## 📜 What's new in 0.5.0
+
+**Cross-platform & UX**
+
+- 🖼 **TG Gateway runs on Windows.** Detached process + HKCU\Run autostart, no NSSM needed. Same TUI flow on Linux (`systemctl --user`) and Windows. Stop is now under a second — old behaviour was waiting up to 30s for the long-poll to time out.
+- ⚡ **Setup wizard 30× faster.** `tomlkit` parse caching with mtime invalidation: navigation between sections that took 4+ seconds now takes <150ms. Also fixed a Textual race that occasionally left the wizard with an empty content pane.
+- 📊 **Diagnostics shows live counters.** Was using a freshly-built mesh (zero counters) — now reads the in-process mesh so `req`/`tok` numbers reflect actual usage with a `Σ requests / Σ tokens` summary at the top.
+
+**Models & providers**
+
+- 🆕 **GPT-5.5 family added** (`gpt-5.5`, `gpt-5.5-mini`, `gpt-5.5-nano`) for both OpenAI API and ChatGPT Codex subscription presets.
+- 🔄 **Dynamic refresh on every entry.** `/v1/models` is hit in parallel for every provider on TUI start, on `/models` open, and on Setup Wizard close. Subscription providers (`oauth:`) get auto-seeded from a built-in catalogue, so old `providers.toml` files pick up new GPT-5.5 entries without re-running the wizard.
+- 🛡 **Better OAuth error messages.** Cloudflare challenge pages and 503 HTML used to surface as cryptic `JSONDecodeError`; now you see content-type + body preview so you know what to fix.
+
+**Stability & retries**
+
+- 🎯 **Smart error classifier.** `RATE_LIMIT / QUOTA_EXCEEDED / OVERLOADED / SERVER / NETWORK / POOL_EXHAUSTED` — each with its own backoff curve. Quota errors no longer silently retry for 5 minutes pretending it's a rate limit.
+- 📏 **32K minimum output tokens floor.** Old presets with 4K/8K caps caused "model stopped mid-sentence" reports — now uplifted on read, write, and outgoing request.
+- 🔁 **Retry confirmation modal** *(opt-in via Setup → Other)*. After 3 silent retries, pops a modal with the error class, provider response, and an Abort/Continue choice. 5-second auto-continue. Default off — when off, retries silently up to 10 times, then a regular error.
+
+**Telegram gateway**
+
+- ⏹ `/stop` cancels the current generation cleanly (was already there but is now reliable across long-polling waits).
+- ✕ Permanent quota errors get an explicit "top up your account or switch provider" message instead of an indefinite "thinking" status.
+
+---
+
 ## 🔄 Auto-update Notice
 
 Cogitum probes its master branch in the background on startup (4-second timeout, 12-hour cache). If a newer version is available, you'll see a centered banner card in the feed with the current version, the latest version, and the exact one-liner to upgrade — tailored to how you installed Cogitum:
