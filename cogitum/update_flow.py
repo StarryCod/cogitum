@@ -254,6 +254,10 @@ class _UpdateApp(App[int]):
 
         self._set_progress(20)
         self._set_subtitle("A newer version is available.", style=GOLD_HI, bold=True)
+        self._set_status(
+            "Press [b]Upgrade now[/b] to apply, or Esc to cancel.",
+            style=GOLD_HI,
+        )
         self._set_ticker(f"will run  git pull --ff-only  in  {self._update_root}")
         self._mount_upgrade_buttons()
 
@@ -264,47 +268,116 @@ class _UpdateApp(App[int]):
         self._busy = True
         self._clear_actions()
         self._set_subtitle("upgrading…", style=GOLD_HI, bold=True)
+        self._set_status("", style=TXT)
         self._set_progress(25)
         self._set_ticker("starting git pull --ff-only…")
 
-        env = {**os.environ, "GIT_PAGER": "cat", "PAGER": "cat",
-               "GIT_TERMINAL_PROMPT": "0"}
+        # Force progress output even when stdout isn't a TTY (it's a
+        # pipe here) so we get useful ticker lines instead of git's
+        # "quiet by default for non-tty" behaviour. Without this the
+        # bar sat at 25% staring at silence for the entire pull.
+        env = {
+            **os.environ,
+            "GIT_PAGER": "cat",
+            "PAGER": "cat",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_PROGRESS_DELAY": "0",
+        }
 
-        proc = await asyncio.create_subprocess_exec(
-            "git", "pull", "--ff-only", "origin", "master",
-            cwd=str(self._update_root),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
+        # Heartbeat task: bumps the ticker every 1.5s while we wait
+        # for git output, so the UI never looks dead. Stops as soon
+        # as the pull finishes.
+        heartbeat_running = True
+        heartbeat_dots = ["·", "··", "···", "····"]
+        heartbeat_idx = 0
+        last_real_line = ""
 
-        # Stream stdout, mapping each new line to the ticker + progress hint.
-        # Last raw line of any kind is also kept so the error path can
-        # surface it if the pull fails.
-        last_line = ""
-        assert proc.stdout is not None
-        async for raw in proc.stdout:
-            line = raw.decode("utf-8", "replace").rstrip()
-            if not line:
-                continue
-            last_line = line
-            self._set_ticker(line)
-            hint = _progress_for_line(line)
-            if hint is not None:
-                self._set_progress(hint)
+        async def heartbeat() -> None:
+            nonlocal heartbeat_idx
+            while heartbeat_running:
+                await asyncio.sleep(1.5)
+                if not heartbeat_running:
+                    break
+                tail = heartbeat_dots[heartbeat_idx % len(heartbeat_dots)]
+                heartbeat_idx += 1
+                self._set_ticker(
+                    f"{last_real_line or 'fetching from origin'}  {tail}"
+                )
 
-        rc = await proc.wait()
+        heartbeat_task = asyncio.create_task(heartbeat())
 
-        if rc == 0:
-            self._set_progress(100)
-            self._set_subtitle(
-                "✓ pulled. Restart Cogitum to apply.", style=OK, bold=True)
-            self._set_ticker(f"updated to {self._info.latest if self._info else '?'}")
-            self._exit_code = 0
-        else:
-            self._show_error(
-                f"git pull failed (exit {rc})", detail=last_line or "(no output)")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "pull", "--ff-only", "--progress",
+                "origin", "master",
+                cwd=str(self._update_root),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+
+            # git --progress writes status updates with \r (carriage
+            # return), not \n — splitting by '\n' would buffer the
+            # whole pull into one giant string. Read raw chunks and
+            # split on either separator so the ticker advances on
+            # every progress update.
+            assert proc.stdout is not None
+            buf = b""
+            while True:
+                chunk = await proc.stdout.read(256)
+                if not chunk:
+                    break
+                buf += chunk
+                # Split on either \r or \n; keep the partial last
+                # piece for the next iteration.
+                while True:
+                    nl = -1
+                    for sep in (b"\r", b"\n"):
+                        i = buf.find(sep)
+                        if i != -1 and (nl == -1 or i < nl):
+                            nl = i
+                    if nl == -1:
+                        break
+                    line = buf[:nl].decode("utf-8", "replace").rstrip()
+                    buf = buf[nl + 1:]
+                    if not line:
+                        continue
+                    last_real_line = line
+                    self._set_ticker(line)
+                    hint = _progress_for_line(line)
+                    if hint is not None:
+                        self._set_progress(hint)
+
+            # Drain any tail in buf.
+            tail_line = buf.decode("utf-8", "replace").rstrip()
+            if tail_line:
+                last_real_line = tail_line
+                self._set_ticker(tail_line)
+
+            rc = await proc.wait()
+
+            if rc == 0:
+                self._set_progress(100)
+                self._set_subtitle(
+                    "✓ pulled. Restart Cogitum to apply.", style=OK, bold=True)
+                self._set_ticker(
+                    f"updated to {self._info.latest if self._info else '?'}")
+                self._exit_code = 0
+            else:
+                self._show_error(
+                    f"git pull failed (exit {rc})",
+                    detail=last_real_line or "(no output)")
+                self._exit_code = 1
+        except Exception as e:
+            self._show_error("upgrade crashed", detail=str(e))
             self._exit_code = 1
+        finally:
+            heartbeat_running = False
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         self._busy = False
         self._mount_close_button()
@@ -336,7 +409,7 @@ class _UpdateApp(App[int]):
 
     def _set_status(self, text: str, *, style: str = TXT) -> None:
         node = self.query_one("#status", Static)
-        node.update(Text(text, style=style))
+        node.update(Text.from_markup(text, style=style))
 
     def _set_ticker(self, line: str) -> None:
         node = self.query_one("#ticker", Static)
