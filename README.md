@@ -4,12 +4,21 @@
 
 **Sovereign agentic CLI — forge, delegate, persist.**
 
-[![npm downloads](https://img.shields.io/npm/dw/cogitum?color=%23F5C24A&label=npm%20downloads&style=flat-square)](https://www.npmjs.com/package/cogitum)
-[![GitHub stars](https://img.shields.io/github/stars/StarryCod/cogitum?style=flat-square&color=%23F5C24A)](https://github.com/StarryCod/cogitum/stargazers)
+[![npm version](https://img.shields.io/npm/v/cogitum?color=%23F5C24A&label=npm&style=flat-square)](https://www.npmjs.com/package/cogitum)
+[![npm downloads](https://img.shields.io/npm/dm/cogitum?color=%23D9A23B&label=monthly%20installs&style=flat-square)](https://www.npmjs.com/package/cogitum)
+[![GitHub stars](https://img.shields.io/github/stars/StarryCod/cogitum?style=flat-square&color=%23F5C24A&label=github%20stars)](https://github.com/StarryCod/cogitum/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-E6E1CF?style=flat-square)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-A8732D?style=flat-square)](https://python.org)
 
-*Imperial Fists colorway. Built for engineers who think in terminals.*
+<a href="https://star-history.com/#StarryCod/cogitum&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=StarryCod/cogitum&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=StarryCod/cogitum&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=StarryCod/cogitum&type=Date" width="540" />
+  </picture>
+</a>
+
+*Imperial Fists colourway. Built for engineers who think in terminals.*
 
 </div>
 
@@ -19,7 +28,7 @@
   <img src="assets/main.png" alt="Cogitum Main Interface" width="90%">
 </p>
 
-> **Cogitum** is a terminal-native AI agent with a multi-provider LLM mesh, 15+ built-in tools, persistent sessions, memory, skills, checkpoints, and a Telegram gateway — all wrapped in a keyboard-driven TUI that stays out of your way.
+> **Cogitum** is a terminal-native AI agent with a multi-provider LLM mesh, 17 built-in tools, persistent sessions, memory, 83 bundled skills, checkpoints, and a Telegram gateway — all wrapped in a keyboard-driven TUI that stays out of your way.
 
 ---
 
@@ -28,10 +37,10 @@
 | Feature | Why it matters |
 |---------|----------------|
 | 🕸️ **Multi-Provider Mesh** | Load-balance across OpenAI, Anthropic, OpenRouter, Cerebras, Groq, CanopyWave, and any OpenAI-compatible endpoint. Automatic failover, key pooling, rate-limit tracking. |
-| 🧰 **15+ Built-in Tools** | Terminal, browser (Playwright), web search, file read/write/edit, git-style search, memory, skills, checkpoints, delegation, MCP servers. |
+| 🧰 **17 Built-in Tools** | Terminal, browser (Playwright), web search, file read/write/edit, git-style search, memory, skills, checkpoints, delegation, MCP servers. |
 | 🛡️ **Approval Layer** | Dangerous operations (`rm`, `git push`, package installs) pause for your approval. Per-tool risk levels. |
 | 💾 **Persistent Sessions** | Every conversation is auto-saved as JSONL. Resume anytime with `/resume`. Search across sessions. |
-| 🧠 **Memory & Skills** | Cross-session memory + **82+ built-in skills** (coding, research, MLOps, red-teaming, smart-home…) injected into every system prompt. |
+| 🧠 **Memory & Skills** | Cross-session memory + **83 bundled skills** (coding, research, MLOps, red-teaming, smart-home…) injected into every system prompt. |
 | 📦 **Cogit Checkpoints** | One-command project snapshots before destructive edits. Restore, diff, garbage-collect. |
 | 🎯 **Self-Learning Skills** | The agent observes your workflow and **writes its own skills** via the `skills` tool — refining its expertise for your specific projects over time. |
 | ⚔️ **Cogitator Legion** | Recursive 2-level swarm. The lead Cogitum spawns up to 5 parallel Cogitators (L1); each may further dispatch up to 3 sub-Cogitators (L2). Real-time sibling roster, async message bus, click the dispatch card to open a live tree view. Replaces the old single-shot delegation. |
@@ -286,6 +295,20 @@ The lead Cogitum decides when to dispatch — you don't have to invoke it explic
 
 ---
 
+## 🛡 Stability in the wild
+
+Battle-tested in real workflows, not just toy demos. One verified user session on 0.4.0:
+
+```
+736 messages   ·   343 turns   ·   4 h 27 min uptime   ·   no crash
+```
+
+That's a single conversation with the agent doing real work — multi-provider failover under rate-limit pressure, hundreds of tool invocations, mesh hot-reload between turns, persistent context maintained throughout. The mesh's per-key cooldown ladder, agent-level retry layer, and prompt caching together keep long sessions stable across providers without manual intervention.
+
+0.5.0 hardens this further with a per-class error backoff (separate curves for `rate_limit`, `quota`, `overloaded`, `network`, `server`), a 32K output-tokens floor that prevents mid-sentence cutoffs, and an optional confirmation modal for stuck retries (off by default).
+
+---
+
 ## 📜 What's new in 0.5.0
 
 **Cross-platform & UX**
@@ -325,9 +348,9 @@ The probe is silent on failure (no network, GitHub down) and never blocks startu
 
 ---
 
-## 🎓 Skill Library — 82+ Built-in Skills
+## 🎓 Skill Library — 83 Bundled Skills
 
-Cogitum ships with **82+ pre-written skills** organized into categories. They are markdown files with YAML frontmatter, automatically injected into the system prompt so the agent knows how to handle specialized tasks:
+Cogitum ships with **83 pre-written skills** organized into categories. They are markdown files with YAML frontmatter, automatically injected into the system prompt so the agent knows how to handle specialized tasks:
 
 | Category | Example Skills |
 |----------|----------------|
@@ -610,18 +633,6 @@ Cogitum uses a single warm token palette resolved from the active theme. The def
 | `MUTED` | `#5A5648` | Tertiary / scrollback |
 
 Tokens live in [`cogitum/themes.py`](cogitum/themes.py); every widget reads them via [`cogitum/design.py`](cogitum/design.py) so swapping a theme moves the entire TUI. No hardcoded hex anywhere in the app.
-
----
-
-## ⭐ Star History
-
-<a href="https://star-history.com/#StarryCod/cogitum&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=StarryCod/cogitum&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=StarryCod/cogitum&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=StarryCod/cogitum&type=Date" width="600" />
- </picture>
-</a>
 
 ---
 
