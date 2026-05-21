@@ -968,12 +968,21 @@ class CogitumBot:
             )
 
         elif data.startswith("approve:") or data.startswith("reject:"):
-            # Tool approval response
+            # Tool approval response.
+            #
+            # The agent's approval queue contract is a plain string —
+            # "approve", "reject", or "modify:<json>" — see
+            # cogitum.core.agent.Agent._execute_tool. Pushing a
+            # (call_id, action) tuple here used to crash the agent
+            # loop with `'tuple' object has no attribute 'startswith'`
+            # the moment any medium/danger tool was sanctioned from
+            # Telegram. The call_id round-trip is unnecessary because
+            # each ChatSession has its own approval_queue, so FIFO
+            # ordering already pairs the decision with the request.
             action = "approve" if data.startswith("approve:") else "reject"
-            call_id = data.split(":", 1)[1]
             session = self.sessions.get(chat_id)
             if session and hasattr(session, '_approval_queue') and session._approval_queue:
-                await session._approval_queue.put((call_id, action))
+                await session._approval_queue.put(action)
                 glyph = "◈" if action == "approve" else "✕"
                 await self.api.answer_callback(cb_id, f"{glyph} {'Sanctioned' if action == 'approve' else 'Forbidden'}")
                 # Edit the approval message to show decision

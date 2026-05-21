@@ -668,7 +668,7 @@ class Agent:
         history: list[Message] | None = None,
         queue: asyncio.Queue[AgentEvent] | None = None,
         inject_queue: asyncio.Queue[str] | None = None,
-        approval_queue: asyncio.Queue[tuple[str, str]] | None = None,
+        approval_queue: asyncio.Queue[str] | None = None,
     ) -> list[Message]:
         """
         Run the agentic loop.
@@ -686,11 +686,14 @@ class Agent:
             conversation between tool-call iterations (not after the whole
             loop finishes). This lets the TUI feed queued messages to the
             agent mid-turn.
-        approval_queue : asyncio.Queue[tuple[str, str]] | None
+        approval_queue : asyncio.Queue[str] | None
             If provided, medium/danger tool calls emit AgentApprovalRequest
-            and wait for (call_id, decision) where decision is:
-            "approve", "reject", or "modify:<new_args_json>".
-            If None, all tools execute without approval.
+            and wait for a decision string: ``"approve"``, ``"reject"``,
+            or ``"modify:<new_args_json>"``. The call_id is NOT part of
+            the payload — each agent run owns one queue and decisions are
+            consumed FIFO, so ordering pairs them with the corresponding
+            request automatically. If None, all tools execute without
+            approval.
 
         Returns
         -------
