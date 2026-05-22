@@ -494,13 +494,32 @@ class ModelPicker(ModalScreen[ResolvedModel | None]):
     # ------------------------------------------------------------------
 
     def action_select(self) -> None:
+        # Re-entrancy guard. ListView.Selected can be raised twice in
+        # rapid succession in two known cases:
+        #   1. ListItem click → ListView re-emit → both routed to the
+        #      same @on(ListView.Selected) handler before the first
+        #      dismiss has popped the screen off the stack.
+        #   2. Enter key → action_select_cursor posts Selected, which
+        #      our @on handler picks up — but the original Enter
+        #      action also calls action_select directly.
+        # Either way the second dismiss() lands when screen_stack is
+        # already [_default] and Textual raises ScreenStackError, which
+        # crashes the entire app. ``_dismissed`` makes the second call
+        # a no-op.
+        if getattr(self, "_dismissed", False):
+            return
         e = self._current_entry()
         if e is None:
+            self._dismissed = True
             self.dismiss(None)
             return
+        self._dismissed = True
         self.dismiss(e.resolved)
 
     def action_cancel(self) -> None:
+        if getattr(self, "_dismissed", False):
+            return
+        self._dismissed = True
         self.dismiss(None)
 
     # Keep typing routed to the Input even when the list is focused.

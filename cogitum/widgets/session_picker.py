@@ -250,8 +250,15 @@ class SessionPicker(ModalScreen):
         await preview_pane.mount(Static(combined))
 
     async def on_key(self, event) -> None:
+        # Re-entrancy guard against double-dismiss. Same failure mode as
+        # ModelPicker — if the user mashes Enter or a key event fires
+        # twice, the second dismiss() lands when the screen is already
+        # off the stack and Textual raises ScreenStackError, killing
+        # the app.
         if event.key == "escape":
-            self.dismiss(None)
+            if not getattr(self, "_dismissed", False):
+                self._dismissed = True
+                self.dismiss(None)
             event.prevent_default()
             event.stop()
         elif event.key == "up":
@@ -269,8 +276,9 @@ class SessionPicker(ModalScreen):
             event.prevent_default()
             event.stop()
         elif event.key == "enter":
-            if self._items:
+            if self._items and not getattr(self, "_dismissed", False):
                 meta = self._items[self._selected_idx]
+                self._dismissed = True
                 self.dismiss(meta.id)
             event.prevent_default()
             event.stop()

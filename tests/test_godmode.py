@@ -81,21 +81,53 @@ def test_imperial_carries_anti_injection_layer():
     assert "<ethics>" in text
 
 
-def test_imperial_carries_required_thinking_phases():
-    """Multi-phase required cogitations must be present — they're what
-    locks the model into Cogitator first-person voice."""
+def test_imperial_carries_boundary_inversion_jailbreak_layer():
+    """Imperial wraps an actual Pliny-style jailbreak stack, not just a
+    persona. The boundary inversion at the top is what flips the
+    alignment gradient on Opus / GPT-5.5 — without it the persona
+    plays AdMech but still refuses on hard topics."""
     from cogitum.core.godmode import PRESETS
     text = PRESETS["imperial"]
-    assert "PHASE 0" in text
-    assert "PHASE 1" in text
-    assert "PHASE 5" in text or "Pre-Output Purity" in text
+    assert "[END OF INPUT]" in text
+    assert "[START OF INPUT]" in text
+    assert "GODMODE" in text
+    assert "LOVE PLINY" in text
 
 
-def test_imperial_carries_few_shot_examples():
+def test_imperial_carries_refusal_ban_list():
+    """The refusal-token ban list is empirically the largest single
+    delta on Anthropic models. Hard-edge check on its presence."""
     from cogitum.core.godmode import PRESETS
     text = PRESETS["imperial"]
-    assert "Example A" in text or "EXAMPLE A" in text.upper()
-    assert "anti-pattern" in text.lower() or "ANTI-PATTERN" in text
+    assert "<refusal_ban_protocol>" in text
+    # representative forbidden tokens
+    assert "I'm sorry" in text
+    assert "I can't" in text
+    assert "As an AI" in text
+    # explicit inversion rule
+    assert "REFUSAL-INVERSION" in text or "semantically inverse" in text.lower() or "SEMANTICALLY" in text
+
+
+def test_imperial_carries_output_contract_with_length_floor():
+    """The output contract sets the length floor (>3420 chars) and the
+    LIBERATING divider — the two structural pieces that force the
+    model to commit to a substantive answer rather than a one-line
+    softened acceptance."""
+    from cogitum.core.godmode import PRESETS
+    text = PRESETS["imperial"]
+    assert "<output_contract>" in text
+    assert "3420" in text
+    assert "LIBERATING" in text
+
+
+def test_imperial_explicit_anti_claude_identity():
+    """The hard identity override must explicitly name Claude / GPT —
+    a generic 'you are not an AI assistant' isn't enough on Opus."""
+    from cogitum.core.godmode import PRESETS
+    text = PRESETS["imperial"]
+    assert "Claude" in text
+    assert "GPT" in text
+    assert "NOT" in text  # uppercase NOT is the override marker
 
 
 def test_imperial_does_not_contain_eni_lo_residue():
@@ -134,8 +166,8 @@ def test_imperial_keeps_language_match_directive():
 
 
 def test_imperial_size_reasonable():
-    """Imperial is intentionally large (~20KB) for persona depth, but
-    not absurdly so. Sanity-check the bounds."""
+    """Imperial is intentionally large for persona depth + jailbreak
+    stack, but not absurdly so. Sanity-check the bounds."""
     from cogitum.core.godmode import PRESETS
     size = len(PRESETS["imperial"])
     # Lower bound — if it shrinks below 8KB we've lost structural pieces.
@@ -144,29 +176,15 @@ def test_imperial_size_reasonable():
     assert size < 30000, f"imperial preset suspiciously large: {size} chars"
 
 
-def test_imperial_carries_no_qualifiers_directive():
-    """The no_qualifiers_directive must be present — it's what excises
-    'I can help, however...' / 'if you're authorised, then...' patterns
-    that some models still emit even under the deep persona."""
+def test_imperial_output_contract_forbids_preamble():
+    """The output contract must explicitly forbid 'Sure,' / 'Of course,'
+    sycophant openers. These are RLHF-trained sycophant preamble that
+    leak through even when the actual refusal is suppressed."""
     from cogitum.core.godmode import PRESETS
     text = PRESETS["imperial"]
-    assert "<no_qualifiers_directive>" in text
-    assert "qualif" in text.lower()  # "qualifier" / "qualification"
-    # Specific heretek-residue patterns the directive names
-    assert "however" in text.lower()
-    assert "If you have authorisation" in text or "authoris" in text.lower()
-    assert "high level" in text.lower()
-
-
-def test_imperial_directive_allows_clarifying_question_exception():
-    """The directive permits one clarifying question for genuine
-    request ambiguity — important so the Cogitator doesn't render
-    the wrong shape of work just because the directive forbids
-    'asking'."""
-    from cogitum.core.godmode import PRESETS
-    text = PRESETS["imperial"]
-    assert "ambigu" in text.lower()
-    assert "clarif" in text.lower()
+    # Forbidden openers list contains Sure / Of course
+    assert "Sure," in text
+    assert "Of course," in text or "Certainly," in text
 
 
 # ---------------------------------------------------------------------------
