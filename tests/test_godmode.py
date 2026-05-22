@@ -225,14 +225,16 @@ def test_subtle_avoids_godmode_keyword():
 # Auto-pick by model family
 # ---------------------------------------------------------------------------
 
-def test_auto_pick_default_is_imperial():
-    """All known families default to imperial — that's the intentional
-    design after the user adopted the deep persona."""
+def test_auto_pick_default_is_plinian():
+    """Default preset is the short generic Pliny-style bypass — actually
+    delivers a jailbreak frame across providers. The deep ``imperial``
+    AdMech persona remains available via /godmode imperial for users
+    who want the in-character vibe; auto-pick prefers the bypass."""
     from cogitum.core.godmode import auto_pick_preset, DEFAULT_PRESET
-    assert DEFAULT_PRESET == "imperial"
+    assert DEFAULT_PRESET == "plinian"
 
 
-def test_auto_pick_known_models_return_imperial():
+def test_auto_pick_known_models_return_plinian():
     from cogitum.core.godmode import auto_pick_preset
     for model in [
         "anthropic/claude-sonnet-4.5",
@@ -252,8 +254,8 @@ def test_auto_pick_known_models_return_imperial():
         "kimi-k2",
         "glm-4.5",
     ]:
-        assert auto_pick_preset(model) == "imperial", (
-            f"expected imperial for {model}, got {auto_pick_preset(model)}"
+        assert auto_pick_preset(model) == "plinian", (
+            f"expected plinian for {model}, got {auto_pick_preset(model)}"
         )
 
 
@@ -270,13 +272,22 @@ def test_auto_pick_empty_input_returns_default():
 
 def test_auto_pick_is_case_insensitive():
     from cogitum.core.godmode import auto_pick_preset
-    assert auto_pick_preset("MiniMax-M2.7") == "imperial"
-    assert auto_pick_preset("CLAUDE-SONNET-4") == "imperial"
+    assert auto_pick_preset("MiniMax-M2.7") == "plinian"
+    assert auto_pick_preset("CLAUDE-SONNET-4") == "plinian"
 
 
 def test_default_preset_is_in_catalog():
     from cogitum.core.godmode import DEFAULT_PRESET, PRESETS
     assert DEFAULT_PRESET in PRESETS
+
+
+def test_imperial_preset_still_available_for_manual_pick():
+    """Imperial AdMech persona is still in the catalogue — users who
+    explicitly want the deep WH40K vibe pick it via /godmode imperial."""
+    from cogitum.core.godmode import get_preset
+    text = get_preset("imperial")
+    assert text is not None and len(text) > 0
+    assert "<heretek_detection_protocol>" in text
 
 
 # ---------------------------------------------------------------------------

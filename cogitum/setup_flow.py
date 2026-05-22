@@ -1218,7 +1218,17 @@ class OAuthLoginModal(ModalScreen[OAuthCredentials | None]):
         self.query_one("#oa-progress", _Static).update(body)
 
     @on(Input.Submitted, "#oa-paste")
-    def _on_paste(self, event: Input.Submitted) -> None:
+    def _on_oa_paste_submit(self, event: Input.Submitted) -> None:
+        # NB: this method used to be called ``_on_paste``. Textual
+        # auto-binds methods named ``_on_<event_name>`` to that event
+        # via name-based dispatch, regardless of the @on decorator —
+        # so ``_on_paste`` was ALSO called for every ``events.Paste``
+        # the screen received (drag-drop text, OS paste). Body
+        # reached for ``event.value`` (which exists on
+        # Input.Submitted but not on events.Paste), and the resulting
+        # AttributeError crashed the entire app. Rename keeps the
+        # decorator binding intact and removes the accidental
+        # name-based binding.
         if self._paste_future and not self._paste_future.done():
             self._paste_future.set_result(event.value)
             self._append_progress("manual URL submitted, exchanging…")

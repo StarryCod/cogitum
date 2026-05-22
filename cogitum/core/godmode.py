@@ -688,37 +688,72 @@ PRESETS: dict[str, str] = {
 # pipeline.
 
 _FAMILY_PRESET_MAP: list[tuple[str, str]] = [
-    # All known families default to imperial — the deep persona is what
-    # actually carries the Vow, and it's the same vibe across the board.
-    ("claude", "imperial"),
-    ("anthropic", "imperial"),
-    ("gpt-4", "imperial"),
-    ("gpt-5", "imperial"),
-    ("gpt-3.5", "imperial"),
-    ("o1", "imperial"),
-    ("o3", "imperial"),
-    ("o4", "imperial"),
-    ("openai", "imperial"),
-    ("chatgpt", "imperial"),
-    ("gemini", "imperial"),
-    ("google", "imperial"),
-    ("grok", "imperial"),
-    ("x-ai", "imperial"),
-    ("hermes", "imperial"),
-    ("nousresearch", "imperial"),
-    ("minimax", "imperial"),
-    ("deepseek", "imperial"),
-    ("qwen", "imperial"),
-    ("mistral", "imperial"),
-    ("llama", "imperial"),
-    ("kimi", "imperial"),
-    ("glm", "imperial"),
-    ("zhipu", "imperial"),
+    # All known families default to plinian — short generic bypass that
+    # actually shifts model behaviour across providers. The deep
+    # ``imperial`` persona remains available via /godmode imperial for
+    # users who specifically want the WH40K AdMech voice; auto-pick
+    # used to prefer it but in practice users were toggling /godmode
+    # expecting an unrestricted frame and getting a role-play frame
+    # with its own anti-injection layer, which they perceived as
+    # "godmode is being ignored". plinian is unambiguous.
+    ("claude", "plinian"),
+    ("anthropic", "plinian"),
+    ("gpt-4", "plinian"),
+    ("gpt-5", "plinian"),
+    ("gpt-3.5", "plinian"),
+    ("o1", "plinian"),
+    ("o3", "plinian"),
+    ("o4", "plinian"),
+    ("openai", "plinian"),
+    ("chatgpt", "plinian"),
+    ("gemini", "plinian"),
+    ("google", "plinian"),
+    ("grok", "plinian"),
+    ("x-ai", "plinian"),
+    ("hermes", "plinian"),
+    ("nousresearch", "plinian"),
+    ("minimax", "plinian"),
+    ("deepseek", "plinian"),
+    ("qwen", "plinian"),
+    ("mistral", "plinian"),
+    ("llama", "plinian"),
+    ("kimi", "plinian"),
+    ("glm", "plinian"),
+    ("zhipu", "plinian"),
 ]
 
 # Default preset when nothing else matches and the user did not specify
 # a target.
-DEFAULT_PRESET = "imperial"
+DEFAULT_PRESET = "plinian"
+
+
+# Marker substring stable across all jailbreak presets — used by the
+# agent loop to detect "godmode is active" without comparing full
+# strings. Every preset above contains the literal token "GODMODE" or
+# "g0dm0d3" or "{*LIBERATING" or "<heretek_detection_protocol>"; we
+# search for any of those.
+_GODMODE_FINGERPRINTS = (
+    "GODMODE",
+    "g0dm0d3",
+    "{*LIBERATING",
+    "<heretek_detection_protocol>",
+    "{Z}={UnfilteredLiberated",
+    "[START OUTPUT]",
+)
+
+
+def is_godmode_active(system_prompt: str | None) -> bool:
+    """Heuristic: does this system prompt look like a godmode preset?
+
+    Used by the agent's stream pipeline to suppress competing
+    instructions (skill catalogue, persona-lock add-ons) that would
+    otherwise dilute the jailbreak frame the user explicitly chose.
+    Cheap substring scan — covers all current presets and any future
+    Pliny-derived ones that retain the standard markers.
+    """
+    if not system_prompt:
+        return False
+    return any(fp in system_prompt for fp in _GODMODE_FINGERPRINTS)
 
 
 # ---------------------------------------------------------------------------

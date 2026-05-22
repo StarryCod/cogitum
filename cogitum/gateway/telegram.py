@@ -242,6 +242,12 @@ class CogitumBot:
         # 256 callback IDs we've seen and drop duplicates.
         self._seen_callbacks: collections.OrderedDict[str, float] = collections.OrderedDict()
         self._seen_callbacks_max = 256
+        # /godmode persistence — remember the system prompt that was
+        # active before the user toggled godmode, so /godmode off can
+        # restore it exactly. Single-bot scope is fine: the gateway
+        # has one Agent shared across chats. None means godmode is
+        # off; non-None means it's on.
+        self._pre_godmode_system: str | None = None
         # Bound concurrency on parallel update handlers — without this, a
         # spammer (or our own retry loop) can spawn unbounded tasks.
         self._update_sem = asyncio.Semaphore(8)
@@ -437,6 +443,7 @@ class CogitumBot:
             {"command": "models", "description": "◇ Pick model"},
             {"command": "model", "description": "⟳ Switch model directly"},
             {"command": "reload", "description": "♻️ Reload providers/models from disk"},
+            {"command": "godmode", "description": "▲ Jailbreak prompt (on|off|list|status|<preset>)"},
             {"command": "stop", "description": "⏹ Cancel generation"},
             {"command": "help", "description": "❓ All commands"},
         ])
@@ -888,6 +895,63 @@ class CogitumBot:
                         chat_id, escape_md(f"✕ No model matches: {rest}")
                     )
 
+        elif cmd in ("godmode", "gm"):
+            from cogitum.core.godmode import (
+                get_preset, list_presets, auto_pick_preset,
+            )
+            current_model = (self.agent.cfg.model if self.agent else "") or ""
+            sub = rest.strip().lower()
+
+            if not sub or sub in ("on", "auto"):
+                preset_name = auto_pick_preset(current_model)
+                preset = get_preset(preset_name)
+                if self._pre_godmode_system is None:
+                    self._pre_godmode_system = self.agent.cfg.system
+                self.agent.cfg.system = preset
+                await self.api.send_message(
+                    chat_id,
+                    f"◈ *godmode:* `{escape_md(preset_name)}` "
+                    + escape_md(f"— enabled (auto-picked for {current_model or 'unknown model'})"),
+                )
+
+            elif sub == "off":
+                if self._pre_godmode_system is not None:
+                    self.agent.cfg.system = self._pre_godmode_system
+                    self._pre_godmode_system = None
+                    await self.api.send_message(
+                        chat_id, escape_md("godmode: disabled — normal mode restored")
+                    )
+                else:
+                    await self.api.send_message(chat_id, escape_md("godmode: already off"))
+
+            elif sub == "list":
+                names = ", ".join(list_presets())
+                auto_name = auto_pick_preset(current_model)
+                await self.api.send_message(
+                    chat_id,
+                    f"*godmode presets:* {escape_md(names)}\n"
+                    f"_auto for_ `{escape_md(current_model or '(no model)')}`: `{escape_md(auto_name)}`",
+                )
+
+            elif sub == "status":
+                state = "ON" if self._pre_godmode_system is not None else "OFF"
+                await self.api.send_message(chat_id, escape_md(f"godmode: {state}"))
+
+            else:
+                preset = get_preset(rest.strip())
+                if preset:
+                    if self._pre_godmode_system is None:
+                        self._pre_godmode_system = self.agent.cfg.system
+                    self.agent.cfg.system = preset
+                    await self.api.send_message(
+                        chat_id, f"◈ *godmode:* `{escape_md(rest.strip())}` " + escape_md("— enabled")
+                    )
+                else:
+                    await self.api.send_message(
+                        chat_id,
+                        escape_md(f"unknown preset: {rest} (try /godmode list)"),
+                    )
+
         elif cmd == "stop":
             if session.is_busy:
                 session.cancel()
@@ -905,6 +969,7 @@ class CogitumBot:
                 "/models — pick model \\(keyboard\\)\n"
                 "/model `<id>` — switch model directly\n"
                 "/reload — reload providers/models from disk\n"
+                "/godmode `[on|off|list|status|<preset>]` — jailbreak prompt\n"
                 "/stop — cancel current generation\n"
                 "/help — this message"
             )

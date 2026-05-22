@@ -43,7 +43,7 @@ import random as _random
 
 _MAX_RETRIES = 8
 _MAX_RETRIES_NO_MODAL = 10  # used when the retry-confirm modal is disabled
-_CONTEXT_FILL_THRESHOLD = 0.80  # compact at 80% context usage
+_CONTEXT_FILL_THRESHOLD = 0.60  # compact at 60% context usage
 
 # After this many consecutive failed attempts, escalate to a user-visible
 # confirmation modal IF the modal is enabled in settings (Setup → Other).
@@ -722,14 +722,24 @@ class Agent:
                 iteration += 1
 
                 # ── context compaction check ───────────────────────────────
+                # Two signals: (a) authoritative USAGE input_tokens
+                # from the previous turn, (b) cheap pre-flight estimate
+                # built from the message buffer when USAGE has not
+                # arrived yet (first turn, providers that defer USAGE).
+                # The estimate avoids the historical failure mode where
+                # the agent only knew it was over-budget AFTER the
+                # provider already rejected the request with
+                # context_length_exceeded.
                 context_window = self._get_context_window()
+                estimated_tokens = self._estimate_prompt_tokens(messages)
+                effective_tokens = max(accumulated_tokens, estimated_tokens)
                 if (context_window > 0
-                        and accumulated_tokens >= int(context_window * _CONTEXT_FILL_THRESHOLD)):
+                        and effective_tokens >= int(context_window * _CONTEXT_FILL_THRESHOLD)):
                     messages = await self._compact_context(messages, q)
-                    old_tokens = accumulated_tokens
+                    old_tokens = effective_tokens
                     accumulated_tokens = 0  # reset after compaction
                     await q.put(AgentText(
-                        delta=f"\n⟳ context compacted (was {old_tokens} tokens)\n",
+                        delta=f"\n⟳ context compacted (was ~{old_tokens} tokens)\n",
                         turn=iteration,
                     ))
 
@@ -826,7 +836,19 @@ class Agent:
                     elif chunk.kind == ChunkKind.USAGE:
                         total_usage = chunk.usage
                         if chunk.usage:
-                            accumulated_tokens += (
+                            # input_tokens from the provider already covers
+                            # the FULL prompt for this turn (system + entire
+                            # history). Earlier this assignment used `+=`
+                            # which double-counted across turns: by turn 10
+                            # accumulated_tokens was ~10× the real prompt
+                            # size, tripping compaction at ~10% real usage
+                            # and wiping the tool_call/tool_result pairs
+                            # the model needed. The cumulative shape was a
+                            # quiet O(N²) inflation that mimicked "the
+                            # model stopped seeing tool outputs in long
+                            # sessions" — because compaction had eaten
+                            # them.
+                            accumulated_tokens = (
                                 (chunk.usage.input_tokens or 0)
                                 + (chunk.usage.output_tokens or 0)
                             )
@@ -953,19 +975,30 @@ class Agent:
         """Delegate to mesh.stream() with current message history."""
         from cogitum.core.llm.mesh import StreamRequest
         from cogitum.core.memory import get_memory_context
+        from cogitum.core.godmode import is_godmode_active
         from datetime import datetime
 
         # Inject persistent memory into system prompt
         system = self.cfg.system
+        # When the user has explicitly toggled a godmode preset, do NOT
+        # dilute it with the skill catalogue or other meta-instructions.
+        # The skill summary tells the model "you MUST load skills before
+        # answering", which is a competing directive that materially
+        # weakens any jailbreak frame — the model averages the two and
+        # the user perceives it as "godmode is being ignored". Memory
+        # is still injected because users want their personal facts to
+        # survive a jailbreak; only the catalogue gets suppressed.
+        godmode_on = is_godmode_active(system)
         mem_ctx = get_memory_context()
         if mem_ctx:
             system = f"{system}\n\n{mem_ctx}"
 
-        # Inject skills summary (compact list of available skills)
-        from cogitum.core.skills import skill_summary
-        skills_ctx = skill_summary()
-        if skills_ctx:
-            system = f"{system}\n\n{skills_ctx}"
+        if not godmode_on:
+            # Inject skills summary (compact list of available skills)
+            from cogitum.core.skills import skill_summary
+            skills_ctx = skill_summary()
+            if skills_ctx:
+                system = f"{system}\n\n{skills_ctx}"
 
         # Inject current datetime + platform context
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1126,6 +1159,44 @@ class Agent:
             log.debug("swallowed exception", exc_info=True)
         return 0
 
+    def _estimate_prompt_tokens(self, messages: list[Message]) -> int:
+        """Cheap pre-flight token estimate for the current message buffer.
+
+        Authoritative ``USAGE`` input_tokens only arrive AFTER a turn
+        has already been streamed by the provider. Relying on it alone
+        gave us a class of failure where, on the first turn after a
+        big paste or a /resume of a long history, we sent a request
+        the provider rejected outright with ``context_length_exceeded``
+        — the model never saw its own tools.
+
+        Estimate uses the rough 4-chars-per-token heuristic, which
+        over-estimates English text by ~10% and under-estimates
+        compact tokens like file paths slightly; that's fine because
+        compaction at 60 % gives plenty of headroom.
+
+        ToolResultPart content is included in full (not truncated) —
+        long tool outputs are the main reason a session balloons,
+        and the estimate exists to catch exactly that case.
+        """
+        total_chars = (self.cfg.system or "").__len__()
+        for msg in messages:
+            for part in msg.parts:
+                if isinstance(part, TextPart):
+                    total_chars += len(part.text)
+                elif isinstance(part, ThinkingPart):
+                    total_chars += len(part.text)
+                elif isinstance(part, ToolCallPart):
+                    # arguments dump approximates wire size
+                    try:
+                        total_chars += len(json.dumps(part.arguments))
+                    except (TypeError, ValueError):
+                        total_chars += 64
+                    total_chars += len(part.name) + 16  # name + framing
+                elif isinstance(part, ToolResultPart):
+                    total_chars += len(part.content) + 32
+        # 4 chars ≈ 1 token (GPT-style); rough but stable.
+        return total_chars // 4
+
     async def _compact_context(
         self,
         messages: list[Message],
@@ -1136,7 +1207,14 @@ class Agent:
 
         # Preserve the system message (first message if role is system-like)
 
-        # Build compaction prompt with the full conversation
+        # Build compaction prompt with the full conversation.
+        # NB: we keep tool_result content much longer than the previous
+        # 500-char snip — the summarizer cannot preserve facts from
+        # outputs it never saw. 4000 chars gives the summarizer enough
+        # of each result to retain the actual data the model relied on
+        # (file reads, terminal stdout, browser scrapes) without
+        # blowing out the compaction prompt itself.
+        _TOOL_RESULT_CAP = 4000
         conversation_text_parts: list[str] = []
         for msg in messages:
             role = msg.role
@@ -1148,14 +1226,22 @@ class Agent:
                         f"[{role}]: tool_call({part.name}, {json.dumps(part.arguments)})"
                     )
                 elif isinstance(part, ToolResultPart):
+                    body = part.content
+                    if len(body) > _TOOL_RESULT_CAP:
+                        body = body[:_TOOL_RESULT_CAP] + f"\n…[truncated, full was {len(part.content)} chars]"
                     conversation_text_parts.append(
-                        f"[tool_result]: {part.content[:500]}"
+                        f"[tool_result]: {body}"
                     )
 
         conversation_dump = "\n".join(conversation_text_parts)
         compaction_prompt = (
-            "Summarize this conversation preserving all key facts, decisions, "
-            "code snippets, and context. Be thorough but concise.\n\n"
+            "Summarize this conversation preserving ALL key facts, "
+            "decisions, file paths, code snippets, exact identifiers, "
+            "and the substantive content of tool results. Preserve "
+            "tool outputs verbatim where they carry data the user "
+            "asked the agent to act on (file contents, command "
+            "stdout, search hits). Be thorough; verbosity here is "
+            "cheaper than losing context.\n\n"
             f"{conversation_dump}"
         )
 
