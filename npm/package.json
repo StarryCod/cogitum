@@ -1,7 +1,7 @@
 {
   "name": "cogitum",
   "version": "0.2.0",
-  "description": "Cogitum — sovereign agentic CLI. Imperial Fists colorway. Cross-platform npm wrapper.",
+  "description": "Cogitum — sovereign agentic CLI. Textual TUI, multi-provider LLM mesh, persistent sessions, skills, MCP, Telegram gateway. Cross-platform npm launcher.",
   "bin": {
     "cog": "bin/cog.js",
     "cogitum": "bin/cogitum.js"
@@ -18,13 +18,17 @@
     "cli",
     "ai",
     "agent",
+    "agentic",
     "terminal",
-    "llm",
     "tui",
+    "textual",
+    "llm",
     "anthropic",
     "openai",
-    "minimax",
-    "warhammer",
+    "claude",
+    "gpt",
+    "mcp",
+    "telegram",
     "imperial-fists"
   ],
   "author": "OpenReason",
