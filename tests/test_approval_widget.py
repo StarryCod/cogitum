@@ -124,3 +124,38 @@ async def test_no_emoji_in_widget_render():
             for banned in ("✅", "❌", "🔴", "🟡", "✏️"):
                 assert banned not in text, \
                     f"banned {banned!r} in static render: {text!r}"
+
+
+@pytest.mark.asyncio
+async def test_widget_survives_markup_in_tool_args():
+    """Tool args routinely contain ``[/]``, ``[bg]``, ``[a-z]`` etc.
+    The header used to interpolate that text into a Textual markup
+    string, which crashed the whole TUI with ``MarkupError: Expected
+    markup value (found '/]')`` the moment such an approval popped up.
+
+    This test runs the widget against three known-bad payloads — a
+    closing-tag literal, a Windows path with brackets, and a regex
+    with character classes — and asserts the widget mounts cleanly.
+    No more crash on user-controlled tool-arg shapes."""
+    bad_payloads = [
+        # Closing-tag literal (the original crash report from the user).
+        ("terminal", {"command": "echo [/]"}),
+        # Windows path with bracketed segment — common when users
+        # paste downloads / project folders (the field that
+        # surfaced the bug).
+        ("write_file", {"path": r"C:\Users\u\Project [Lermess]\out.py", "content": "x"}),
+        # Python regex with character class — would parse as a tag.
+        ("edit_file", {"path": r"src/util.py", "old": r"re.compile(r'\[/\]')"}),
+        # Background-mode tag inside a description (we previously
+        # emitted ``[bg] {cmd}`` raw into markup).
+        ("terminal", {"command": "long-build", "mode": "background"}),
+    ]
+    for tool_name, args in bad_payloads:
+        app = _HostApp(tool_name, args, "medium")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            # If the widget tried to parse markup, run_test would
+            # have raised MarkupError before we get here. Querying
+            # the rendered text just confirms the widget is alive.
+            widget = app.query(ApprovalWidget).first()
+            assert widget is not None, f"widget missing for {tool_name} {args!r}"

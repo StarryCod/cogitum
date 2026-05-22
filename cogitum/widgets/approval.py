@@ -18,6 +18,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
+from rich.text import Text
 
 from ..design import (
     GOLD,
@@ -138,21 +139,40 @@ class ApprovalWidget(Widget, can_focus=True):
         rune = _DANGER_RUNES.get(self.danger_level, "◈")
         color = _DANGER_COLORS.get(self.danger_level, BRONZE)
 
+        # ``_describe_tool`` returns user-controlled text — tool args
+        # routinely include characters that look like Textual markup
+        # (closing tags ``[/]``, attribute brackets ``[link](path)``,
+        # regex literals ``[a-z]``, Windows paths). Those crashed
+        # ``Static.update`` with ``MarkupError: Expected markup value``
+        # because Static parses its first arg as markup unless it
+        # receives a Rich ``Text`` instance.
+        #
+        # Fix: hand-build the header as Rich ``Text`` and append the
+        # description verbatim (no markup parsing). Keeps every
+        # styled fragment intact while making the user-controlled
+        # piece safe to embed.
         desc = self._describe_tool()
         level_label = self.danger_level.upper()
 
-        yield Static(
-            f"[bold {color}]{rune}  Sanction required[/]  "
-            f"[{TXT_DIM}]· {level_label}[/]\n"
-            f"[bold {GOLD_HI}]{self.tool_name}[/]  [{TXT_DIM}]{desc}[/]",
-            id="approval-header",
-        )
+        header = Text()
+        header.append(f"{rune}  Sanction required", style=f"bold {color}")
+        header.append("  ")
+        header.append(f"· {level_label}", style=TXT_DIM)
+        header.append("\n")
+        header.append(self.tool_name, style=f"bold {GOLD_HI}")
+        header.append("  ")
+        header.append(desc, style=TXT_DIM)
+        yield Static(header, id="approval-header")
+
         yield Static(self._render_options(), id="approval-options")
-        yield Static(
-            f"[{TXT_DIM}]↑↓ select · enter confirm · "
-            f"[{GOLD}]Y[/] sanction · [{GOLD}]N[/]/esc forbid[/]",
-            id="approval-hint",
-        )
+
+        hint = Text()
+        hint.append("↑↓ select · enter confirm · ", style=TXT_DIM)
+        hint.append("Y", style=GOLD)
+        hint.append(" sanction · ", style=TXT_DIM)
+        hint.append("N", style=GOLD)
+        hint.append("/esc forbid", style=TXT_DIM)
+        yield Static(hint, id="approval-hint")
 
     def on_mount(self) -> None:
         # Take focus immediately so arrow keys work without an extra click.
@@ -205,14 +225,21 @@ class ApprovalWidget(Widget, can_focus=True):
             return f"{args.get('action', '')} {args.get('label', '')}"
         return str(args)[:80]
 
-    def _render_options(self) -> str:
-        parts = []
+    def _render_options(self) -> Text:
+        """Build the option list as a Rich ``Text`` so it bypasses
+        markup parsing entirely. The string-with-markup form was a
+        latent landmine: ``rune``/``label`` are static today but if
+        anyone ever feeds a brace-bearing rune through here it would
+        crash at runtime exactly like the description path did."""
+        out = Text()
         for i, (rune, label) in enumerate(self._options):
+            if i:
+                out.append("\n")
             if i == self.selected:
-                parts.append(f"  [bold {GOLD_HI}]▸ {rune}  {label}[/]")
+                out.append(f"  ▸ {rune}  {label}", style=f"bold {GOLD_HI}")
             else:
-                parts.append(f"    [{TXT_DIM}]{rune}  {label}[/]")
-        return "\n".join(parts)
+                out.append(f"    {rune}  {label}", style=TXT_DIM)
+        return out
 
     def watch_selected(self) -> None:
         try:
