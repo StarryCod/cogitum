@@ -444,6 +444,8 @@ class CogitumBot:
             {"command": "model", "description": "⟳ Switch model directly"},
             {"command": "reload", "description": "♻️ Reload providers/models from disk"},
             {"command": "godmode", "description": "▲ Jailbreak prompt (on|off|list|status|<preset>)"},
+            {"command": "yolo", "description": "◈ Auto-approve all tools (autonomous: on|off|toggle|status)"},
+            {"command": "compact", "description": "⟳ Compact context now (free up tokens)"},
             {"command": "stop", "description": "⏹ Cancel generation"},
             {"command": "help", "description": "❓ All commands"},
         ])
@@ -952,6 +954,85 @@ class CogitumBot:
                         escape_md(f"unknown preset: {rest} (try /godmode list)"),
                     )
 
+        elif cmd == "yolo":
+            sub = (rest or "").strip().lower()
+            if sub in ("", "on", "toggle"):
+                if sub == "on":
+                    self.agent.cfg.yolo_mode = True
+                else:
+                    self.agent.cfg.yolo_mode = not self.agent.cfg.yolo_mode
+                if self.agent.cfg.yolo_mode:
+                    await self.api.send_message(
+                        chat_id,
+                        escape_md(
+                            "◈ yolo: ENABLED — agent runs autonomously. "
+                            "No approval prompts. Use /stop to abort."
+                        ),
+                    )
+                else:
+                    await self.api.send_message(
+                        chat_id,
+                        escape_md("yolo: disabled — approval prompts restored"),
+                    )
+            elif sub == "off":
+                self.agent.cfg.yolo_mode = False
+                await self.api.send_message(
+                    chat_id,
+                    escape_md("yolo: disabled — approval prompts restored"),
+                )
+            elif sub == "status":
+                state = "ON" if self.agent.cfg.yolo_mode else "OFF"
+                await self.api.send_message(chat_id, escape_md(f"yolo: {state}"))
+            else:
+                await self.api.send_message(
+                    chat_id, escape_md("usage: /yolo [on|off|toggle|status]")
+                )
+
+        elif cmd == "compact":
+            # Manual context compaction.
+            if not session.history:
+                await self.api.send_message(
+                    chat_id, escape_md("nothing to compact — history is empty")
+                )
+                return
+            if session.is_busy:
+                await self.api.send_message(
+                    chat_id,
+                    escape_md("agent is busy — wait for the current turn to finish"),
+                )
+                return
+            if self.agent is None:
+                await self.api.send_message(chat_id, escape_md("no agent — /models first"))
+                return
+
+            try:
+                new_msgs, before, after = await self.agent.compact_now(
+                    session.history, queue=None
+                )
+                session.history = new_msgs
+                # Persist the compacted history so /resume picks up the
+                # smaller form rather than the bloated original.
+                if session.session_id:
+                    from ..core.sessions import get_store
+                    store = get_store()
+                    # Wipe and rewrite — append-only would leave the
+                    # old log in place. The session file is the live
+                    # state, not an audit trail.
+                    store.replace_messages(session.session_id, new_msgs)
+                msgs_delta = len(new_msgs)
+                await self.api.send_message(
+                    chat_id,
+                    escape_md(
+                        f"⟳ context compacted: ~{before} → ~{after} tokens, "
+                        f"{msgs_delta} messages now"
+                    ),
+                )
+            except Exception as exc:
+                log.warning("Manual compact failed", exc_info=True)
+                await self.api.send_message(
+                    chat_id, escape_md(f"compact failed: {exc}")
+                )
+
         elif cmd == "stop":
             if session.is_busy:
                 session.cancel()
@@ -970,6 +1051,8 @@ class CogitumBot:
                 "/model `<id>` — switch model directly\n"
                 "/reload — reload providers/models from disk\n"
                 "/godmode `[on|off|list|status|<preset>]` — jailbreak prompt\n"
+                "/yolo `[on|off|status]` — auto\\-approve all tools \\(autonomous\\)\n"
+                "/compact — compact context now \\(free up tokens\\)\n"
                 "/stop — cancel current generation\n"
                 "/help — this message"
             )

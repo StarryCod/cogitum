@@ -43,7 +43,14 @@ import random as _random
 
 _MAX_RETRIES = 8
 _MAX_RETRIES_NO_MODAL = 10  # used when the retry-confirm modal is disabled
-_CONTEXT_FILL_THRESHOLD = 0.60  # compact at 60% context usage
+_CONTEXT_FILL_THRESHOLD = 0.80  # compact at 80% context usage
+# How many of the most-recent messages to keep verbatim during compaction.
+# Older messages are summarized; the tail is preserved untouched so the
+# model can still see the live tool_call/tool_result pairs it just made.
+# Tuned conservatively — at 16 messages we keep roughly the last 4-8 turns
+# of agent ↔ tool exchange, which is plenty for the model to keep working
+# without losing thread.
+_COMPACTION_KEEP_TAIL = 16
 
 # After this many consecutive failed attempts, escalate to a user-visible
 # confirmation modal IF the modal is enabled in settings (Setup → Other).
@@ -400,12 +407,28 @@ class AgentDone:
 
 
 @dataclass
+class AgentCompacted:
+    """Context was compacted (auto at threshold OR manual via /compact).
+
+    Carries before/after token estimates so the inspector can reset
+    its running ``tokens_used`` counter to the new authoritative
+    value — without this, the cumulative bar keeps growing forever
+    and the user can't see that compaction actually freed space.
+    """
+    before_tokens: int
+    after_tokens: int
+    messages_before: int
+    messages_after: int
+    manual: bool = False
+
+
+@dataclass
 class AgentError:
     message: str
     exc: BaseException | None = None
 
 
-AgentEvent = AgentText | AgentThinking | AgentRetry | AgentRetryConfirm | AgentToolCall | AgentApprovalRequest | AgentToolResult | AgentInjected | AgentDone | AgentError
+AgentEvent = AgentText | AgentThinking | AgentRetry | AgentRetryConfirm | AgentToolCall | AgentApprovalRequest | AgentToolResult | AgentInjected | AgentDone | AgentCompacted | AgentError
 
 # ---------------------------------------------------------------------------
 # Agent config
@@ -414,7 +437,14 @@ AgentEvent = AgentText | AgentThinking | AgentRetry | AgentRetryConfirm | AgentT
 @dataclass
 class AgentConfig:
     model: str | None = None          # override mesh default
-    max_turns: int = 20               # hard cap on tool-call iterations
+    # Hard cap on tool-call iterations. 0 = unlimited (no cap at all).
+    # Default raised from 20 → 0 because the cap silently truncated long
+    # agent runs: the loop committed the final tool_result message, broke
+    # out, and the model never got a chance to see/respond to its own
+    # last tool batch. Symptom: "output от тулов перестаёт идти модели".
+    # The compaction loop keeps memory bounded, so an unbounded turn
+    # count is safe.
+    max_turns: int = 0
     max_tokens: int = 32768
     temperature: float | None = None
     system: str = (
@@ -614,6 +644,13 @@ class AgentConfig:
     tools_enabled: bool = True
     tool_tags: list[str] | None = None   # None = all tools
     platform: str = "cli"  # "cli" or "telegram" — injected into context
+    # YOLO mode — when True, all medium/danger tool approvals are
+    # auto-granted without prompting the user. The agent runs fully
+    # autonomous: terminal commands, file writes, network calls all
+    # execute immediately. Toggled per-session via /yolo (TUI + TG).
+    # Default OFF because the safety net catches mistakes; YOLO is an
+    # explicit "I trust this run, don't interrupt me" switch.
+    yolo_mode: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -718,7 +755,11 @@ class Agent:
         iteration = 0
 
         try:
-            while iteration < self.cfg.max_turns:
+            # max_turns == 0 → unlimited iterations. Compaction at
+            # 60% context still bounds memory; this just stops the
+            # loop from cutting the model off mid-thought after a
+            # fixed number of tool batches.
+            while self.cfg.max_turns == 0 or iteration < self.cfg.max_turns:
                 iteration += 1
 
                 # ── context compaction check ───────────────────────────────
@@ -735,11 +776,23 @@ class Agent:
                 effective_tokens = max(accumulated_tokens, estimated_tokens)
                 if (context_window > 0
                         and effective_tokens >= int(context_window * _CONTEXT_FILL_THRESHOLD)):
+                    msgs_before = len(messages)
                     messages = await self._compact_context(messages, q)
-                    old_tokens = effective_tokens
                     accumulated_tokens = 0  # reset after compaction
+                    after_tokens = self._estimate_prompt_tokens(messages)
+                    await q.put(AgentCompacted(
+                        before_tokens=effective_tokens,
+                        after_tokens=after_tokens,
+                        messages_before=msgs_before,
+                        messages_after=len(messages),
+                        manual=False,
+                    ))
                     await q.put(AgentText(
-                        delta=f"\n⟳ context compacted (was ~{old_tokens} tokens)\n",
+                        delta=(
+                            f"\n⟳ context compacted "
+                            f"(~{effective_tokens} → ~{after_tokens} tokens, "
+                            f"{msgs_before} → {len(messages)} messages)\n"
+                        ),
                         turn=iteration,
                     ))
 
@@ -1202,81 +1255,208 @@ class Agent:
         messages: list[Message],
         queue: asyncio.Queue[AgentEvent],
     ) -> list[Message]:
-        """Summarize conversation to free context space."""
+        """Compact old context while keeping the recent tail intact.
+
+        Old behaviour was destructive: the entire history was replaced
+        by a single summary + a fake assistant ack. That broke three
+        things at once —
+
+          1. tool_use / tool_result pairs the model had just emitted
+             disappeared, so on the very next turn it could not see
+             its own latest work (the bug the user kept hitting).
+          2. Each ToolResultPart was hard-truncated at 4 KB, dropping
+             everything past 4000 chars from terminal stdout, file
+             reads, browser scrapes — the summarizer never even saw
+             the data, so the data was unrecoverable.
+          3. A synthetic assistant message ("Understood. I have the
+             full context.") was injected. The model treats its own
+             prior turns as ground truth; a fabricated "I have it"
+             response makes it *more* confident it remembers things
+             it never saw.
+
+        New shape:
+
+          • Split messages into ``head`` (older) and ``tail`` (last
+            ``_COMPACTION_KEEP_TAIL`` messages, with safety to keep
+            tool_use/tool_result pairs together).
+          • Summarize ONLY the head. The summary becomes a single
+            user message at the start.
+          • The tail is appended verbatim — every TextPart,
+            ThinkingPart, ToolCallPart, ToolResultPart preserved
+            byte-for-byte. The model walks back into its own work
+            mid-thought.
+          • No fake assistant ack. The summary is framed as
+            background context the model is being briefed on, not
+            as something it said.
+          • Tool result truncation in the head is generous (16 KB)
+            and explicitly tells the summarizer *what* was lost so
+            it can record at least the existence of long outputs.
+
+        Returns the new ``messages`` list. On any failure (empty
+        summary, stream error) returns the input unchanged so the
+        agent loop can keep going — better to risk hitting context
+        limit than to wipe the user's session.
+        """
         from cogitum.core.llm.mesh import StreamRequest
 
-        # Preserve the system message (first message if role is system-like)
+        if len(messages) <= _COMPACTION_KEEP_TAIL:
+            # Nothing to compact — the whole buffer fits in the tail
+            # window. Caller will retry once more usage data arrives.
+            return messages
 
-        # Build compaction prompt with the full conversation.
-        # NB: we keep tool_result content much longer than the previous
-        # 500-char snip — the summarizer cannot preserve facts from
-        # outputs it never saw. 4000 chars gives the summarizer enough
-        # of each result to retain the actual data the model relied on
-        # (file reads, terminal stdout, browser scrapes) without
-        # blowing out the compaction prompt itself.
-        _TOOL_RESULT_CAP = 4000
+        # Find the split point. Start with naive index, then walk
+        # backwards so a tool-role message is never separated from
+        # the assistant message that produced its tool_calls — the
+        # provider rejects orphan tool_results with a contract error.
+        split_idx = len(messages) - _COMPACTION_KEEP_TAIL
+        while split_idx > 0 and messages[split_idx].role == "tool":
+            split_idx -= 1
+
+        head = messages[:split_idx]
+        tail = messages[split_idx:]
+        if not head:
+            # Whole buffer is one tightly-coupled tail. Compaction
+            # can't help here — the tail itself is what's expensive.
+            return messages
+
+        # Render head into a compaction prompt. Tool results get a
+        # generous cap (vs the old 4 KB) so the summarizer actually
+        # sees the substance instead of guessing from a truncated
+        # snippet.
+        _HEAD_TOOL_RESULT_CAP = 16_000
         conversation_text_parts: list[str] = []
-        for msg in messages:
+        for msg in head:
             role = msg.role
             for part in msg.parts:
                 if isinstance(part, TextPart):
                     conversation_text_parts.append(f"[{role}]: {part.text}")
+                elif isinstance(part, ThinkingPart):
+                    # Thinking blocks rarely need to survive into the
+                    # summary — they're internal scratch, not facts.
+                    # Skip them to keep the summary focused.
+                    continue
                 elif isinstance(part, ToolCallPart):
                     conversation_text_parts.append(
-                        f"[{role}]: tool_call({part.name}, {json.dumps(part.arguments)})"
+                        f"[{role}]: tool_call({part.name}, "
+                        f"{json.dumps(part.arguments, ensure_ascii=False)})"
                     )
                 elif isinstance(part, ToolResultPart):
                     body = part.content
-                    if len(body) > _TOOL_RESULT_CAP:
-                        body = body[:_TOOL_RESULT_CAP] + f"\n…[truncated, full was {len(part.content)} chars]"
-                    conversation_text_parts.append(
-                        f"[tool_result]: {body}"
-                    )
+                    if len(body) > _HEAD_TOOL_RESULT_CAP:
+                        omitted = len(part.content) - _HEAD_TOOL_RESULT_CAP
+                        body = (
+                            body[:_HEAD_TOOL_RESULT_CAP]
+                            + f"\n…[truncated {omitted} chars; "
+                            f"full result was {len(part.content)} chars]"
+                        )
+                    conversation_text_parts.append(f"[tool_result]: {body}")
 
         conversation_dump = "\n".join(conversation_text_parts)
         compaction_prompt = (
-            "Summarize this conversation preserving ALL key facts, "
-            "decisions, file paths, code snippets, exact identifiers, "
-            "and the substantive content of tool results. Preserve "
-            "tool outputs verbatim where they carry data the user "
-            "asked the agent to act on (file contents, command "
-            "stdout, search hits). Be thorough; verbosity here is "
-            "cheaper than losing context.\n\n"
+            "You are summarizing the EARLIER part of an ongoing agent "
+            "session. The agent will continue working immediately after "
+            "your summary, with the most recent turns kept verbatim — "
+            "you only need to compress what came before.\n\n"
+            "PRESERVE EXACTLY:\n"
+            "  • All file paths, identifiers, URLs, exact names\n"
+            "  • All decisions made and the reasoning behind them\n"
+            "  • Substantive tool output (file contents, command "
+            "stdout, search hits, scraped data) — keep verbatim where "
+            "the agent is likely to reference it later\n"
+            "  • Errors encountered and how they were resolved\n"
+            "  • Anything the user asked for that hasn't been done yet\n\n"
+            "OK TO DROP:\n"
+            "  • Pleasantries, filler text, retry chatter\n"
+            "  • Intermediate thinking / scratch reasoning\n"
+            "  • Tool calls whose results are already reflected in "
+            "later state (file was read then rewritten — keep the "
+            "rewrite, drop the original read)\n\n"
+            "Format the summary as a tight briefing, not a transcript. "
+            "Verbosity is fine if the data demands it — losing context "
+            "is the only failure mode that matters.\n\n"
+            "═══ EARLIER SESSION ═══\n"
             f"{conversation_dump}"
         )
 
-        # Stream the compaction (no tools)
         compaction_messages = [
             Message(role="user", parts=[TextPart(text=compaction_prompt)])
         ]
         req = StreamRequest(
             messages=compaction_messages,
             model=self.cfg.model or "",
-            system="You are a precise summarizer. Preserve all important details.",
+            system=(
+                "You are a precise context-compaction summarizer for an "
+                "agent session. Preserve every fact the agent will need "
+                "to continue its work. Be thorough — losing detail is "
+                "the only thing that hurts here."
+            ),
             tools=[],
             max_tokens=self.cfg.max_tokens,
             temperature=0.0,
         )
 
         summary_buf: list[str] = []
-        async for chunk in self.mesh.stream(req):
-            if chunk.kind == ChunkKind.TEXT:
-                summary_buf.append(chunk.text)
-            elif chunk.kind == ChunkKind.ERROR:
-                log.warning("Compaction stream error: %s", chunk.error)
-                return messages  # fall back to original on failure
+        try:
+            async for chunk in self.mesh.stream(req):
+                if chunk.kind == ChunkKind.TEXT:
+                    summary_buf.append(chunk.text)
+                elif chunk.kind == ChunkKind.ERROR:
+                    log.warning("Compaction stream error: %s", chunk.error)
+                    return messages  # keep original on failure
+        except Exception:
+            log.warning("Compaction crashed", exc_info=True)
+            return messages
 
-        compacted_summary = "".join(summary_buf)
-        if not compacted_summary.strip():
-            return messages  # compaction produced nothing, keep original
+        compacted_summary = "".join(summary_buf).strip()
+        if not compacted_summary:
+            log.warning("Compaction produced empty summary; keeping original")
+            return messages
 
-        # Replace messages with compacted version
-        return [
-            Message(role="user", parts=[TextPart(text=compacted_summary)]),
-            Message(role="assistant", parts=[TextPart(
-                text="Understood. I have the full context. Continuing."
-            )]),
+        # Stitch: one user message holding the briefing, then the
+        # untouched tail. NO fake assistant ack — the briefing is
+        # framed as the agent being told what came before, which is
+        # the truth.
+        briefing_text = (
+            "═══ CONTEXT BRIEFING (earlier in this session) ═══\n"
+            f"{compacted_summary}\n"
+            "═══ END BRIEFING — recent turns follow verbatim ═══"
+        )
+        rebuilt: list[Message] = [
+            Message(role="user", parts=[TextPart(text=briefing_text)])
         ]
+        rebuilt.extend(tail)
+        return rebuilt
+
+    async def compact_now(
+        self,
+        messages: list[Message],
+        queue: asyncio.Queue[AgentEvent] | None = None,
+    ) -> tuple[list[Message], int, int]:
+        """Public manual-compaction entrypoint for ``/compact``.
+
+        Returns ``(new_messages, before_tokens, after_tokens)``. Emits
+        an ``AgentCompacted`` event on ``queue`` if provided so the
+        TUI can refresh its inspector counters.
+
+        Distinct from the in-loop trigger so the TUI can call this
+        from the main coroutine while the agent is idle (no live
+        ``run()`` task), without having to fake a turn.
+        """
+        msgs_before = len(messages)
+        before_tokens = self._estimate_prompt_tokens(messages)
+        new_messages = await self._compact_context(
+            messages, queue or asyncio.Queue()
+        )
+        after_tokens = self._estimate_prompt_tokens(new_messages)
+        if queue is not None:
+            await queue.put(AgentCompacted(
+                before_tokens=before_tokens,
+                after_tokens=after_tokens,
+                messages_before=msgs_before,
+                messages_after=len(new_messages),
+                manual=True,
+            ))
+        return new_messages, before_tokens, after_tokens
 
     async def _execute_tool_indexed(
         self,
@@ -1301,9 +1481,13 @@ class Agent:
         """
         from cogitum.core.builtin_tools import classify_danger
 
-        # Check danger level and request approval if needed
+        # Check danger level and request approval if needed.
+        # YOLO mode short-circuits the gate entirely — the user has
+        # opted into "no questions asked" autonomy for this run.
         danger = classify_danger(tc.name, tc.arguments)
-        if danger in ("medium", "danger") and self._approval_queue is not None:
+        if (danger in ("medium", "danger")
+                and self._approval_queue is not None
+                and not self.cfg.yolo_mode):
             # Emit approval request
             if queue:
                 await queue.put(AgentApprovalRequest(

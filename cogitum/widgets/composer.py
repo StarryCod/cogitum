@@ -45,6 +45,8 @@ COMMANDS: list[CommandDef] = [
     CommandDef("tools", "List available tools", aliases=["t"]),
     CommandDef("mcp", "MCP servers: /mcp [list|reload|risk]", aliases=[]),
     CommandDef("godmode", "Jailbreak prompt: /godmode [on|off|list|<preset>]", aliases=["gm"]),
+    CommandDef("yolo", "Auto-approve all tools (autonomous mode): /yolo [on|off|toggle|status]", aliases=["y"]),
+    CommandDef("compact", "Compact context now (free up tokens)", aliases=[]),
     CommandDef("clear", "Clear feed display", aliases=["cls", "c"]),
     CommandDef("help", "Show all commands", aliases=["h", "?"]),
     CommandDef("quit", "Exit Cogitum", aliases=["q", "exit"], shortcut="Ctrl+Q"),

@@ -11,7 +11,7 @@ from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.widgets import Static
 
-from .core.agent import Agent, AgentApprovalRequest, AgentConfig, AgentDone, AgentError, AgentInjected, AgentRetry, AgentRetryConfirm, AgentText, AgentThinking, AgentToolCall, AgentToolResult
+from .core.agent import Agent, AgentApprovalRequest, AgentCompacted, AgentConfig, AgentDone, AgentError, AgentInjected, AgentRetry, AgentRetryConfirm, AgentText, AgentThinking, AgentToolCall, AgentToolResult
 from .core.builtin_tools import *
 from .widgets.approval import ApprovalWidget
 from .core.llm.loader import load_mesh, load_settings, write_settings
@@ -775,6 +775,29 @@ class CogitumApp(App):
                     )
                     self.push_screen(modal)
 
+                elif isinstance(event, AgentCompacted):
+                    # Compaction freed context — reset the inspector's
+                    # cumulative tokens_used to the new authoritative
+                    # estimate so the bar actually shows the recovered
+                    # space. Without this it keeps growing forever and
+                    # the user can't tell compaction did anything.
+                    try:
+                        inspector = self.query_one("#inspector-widget", Inspector)
+                        inspector.update_state(
+                            tokens_used=event.after_tokens,
+                            messages=event.messages_after,
+                        )
+                    except Exception:
+                        log.debug("swallowed exception", exc_info=True)
+                    feed.append_system(
+                        f"context compacted "
+                        f"(~{event.before_tokens} → ~{event.after_tokens} tokens · "
+                        f"{event.messages_before} → {event.messages_after} messages"
+                        + (" · manual" if event.manual else "")
+                        + ")",
+                        "compact",
+                    )
+
                 elif isinstance(event, AgentInjected):
                     # A queued message was consumed mid-turn — remove from
                     # _pending_messages so it isn't re-sent after AgentDone.
@@ -1177,6 +1200,8 @@ class CogitumApp(App):
                 "/model <id> — direct switch · /new — clear history · "
                 "/tools — list tools · /mcp — manage MCP servers · "
                 "/godmode [on|off|list|<preset>] — jailbreak prompt · "
+                "/yolo [on|off|status] — auto-approve all tools · "
+                "/compact — compact context now · "
                 "/clear — clear feed · /quit — exit",
                 "commands",
             )
@@ -1184,6 +1209,117 @@ class CogitumApp(App):
 
         if cmd == "clear":
             feed.clear()
+            return
+
+        if cmd == "compact":
+            # Manual context compaction. Useful when the user knows
+            # they're about to start a new sub-task and wants to free
+            # the buffer without waiting for the 80% threshold.
+            if not self._history:
+                feed.append_system("nothing to compact — history is empty", "compact")
+                return
+            if self._agent_task and not self._agent_task.done():
+                feed.append_system(
+                    "agent is busy — wait for the current turn to finish",
+                    "compact",
+                )
+                return
+            if self._agent is None:
+                feed.append_error("no agent — pick a model first")
+                return
+
+            async def _do_compact() -> None:
+                event_q: asyncio.Queue = asyncio.Queue()
+
+                async def _drain() -> None:
+                    try:
+                        while True:
+                            ev = await event_q.get()
+                            if isinstance(ev, AgentCompacted):
+                                try:
+                                    inspector = self.query_one(
+                                        "#inspector-widget", Inspector
+                                    )
+                                    inspector.update_state(
+                                        tokens_used=ev.after_tokens,
+                                        messages=ev.messages_after,
+                                    )
+                                except Exception:
+                                    log.debug("swallowed exception", exc_info=True)
+                                feed.append_system(
+                                    f"context compacted "
+                                    f"(~{ev.before_tokens} → ~{ev.after_tokens} tokens · "
+                                    f"{ev.messages_before} → {ev.messages_after} messages"
+                                    + (" · manual" if ev.manual else "")
+                                    + ")",
+                                    "compact",
+                                )
+                                return
+                    except asyncio.CancelledError:
+                        return
+
+                drain_task = asyncio.create_task(_drain())
+                try:
+                    new_msgs, before, after = await self._agent.compact_now(
+                        self._history, queue=event_q
+                    )
+                    self._history = new_msgs
+                    # Compaction shrinks the buffer in-place — append-only
+                    # session save would leave the old long form on disk
+                    # and /resume would just pull all of it back. Rewrite
+                    # the file atomically and resync the message counter.
+                    if self._session_id:
+                        from .core.sessions import get_store
+                        get_store().replace_messages(self._session_id, new_msgs)
+                        self._session_msg_count = len(new_msgs)
+                    if before == after:
+                        feed.append_system(
+                            "compaction made no change "
+                            f"(buffer already small: ~{after} tokens)",
+                            "compact",
+                        )
+                except Exception as exc:
+                    feed.append_error(f"compact failed: {exc}", meta="compact")
+                finally:
+                    # give drain a chance to flush, then cancel
+                    await asyncio.sleep(0.05)
+                    drain_task.cancel()
+
+            asyncio.create_task(_do_compact())
+            return
+
+        if cmd == "yolo":
+            sub = (rest or "").strip().lower()
+            if sub in ("", "on", "toggle"):
+                # bare /yolo = toggle; /yolo on = force-on
+                if sub == "on":
+                    self._agent.cfg.yolo_mode = True
+                else:
+                    self._agent.cfg.yolo_mode = not self._agent.cfg.yolo_mode
+                if self._agent.cfg.yolo_mode:
+                    feed.append_system(
+                        "yolo: ENABLED — agent runs autonomously, "
+                        "no approval prompts. Press Esc to abort.",
+                        "yolo",
+                    )
+                else:
+                    feed.append_system(
+                        "yolo: disabled — approval prompts restored",
+                        "yolo",
+                    )
+            elif sub == "off":
+                self._agent.cfg.yolo_mode = False
+                feed.append_system(
+                    "yolo: disabled — approval prompts restored",
+                    "yolo",
+                )
+            elif sub == "status":
+                state = "ON" if self._agent.cfg.yolo_mode else "OFF"
+                feed.append_system(f"yolo: {state}", "yolo")
+            else:
+                feed.append_error(
+                    "usage: /yolo [on|off|toggle|status]"
+                )
             return
 
         if cmd == "godmode":

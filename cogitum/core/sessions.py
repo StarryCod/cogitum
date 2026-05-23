@@ -199,6 +199,34 @@ class SessionStore:
                 break
         self._save_index()
 
+    def replace_messages(self, session_id: str, messages: list[Message]) -> None:
+        """Atomically rewrite the session file with the given messages.
+
+        Used by manual compaction (``/compact``) — append-only would
+        leave the bloated original on disk and the next ``/resume``
+        would still load all of it. Atomic temp-rename keeps the
+        operation crash-safe on POSIX (the rename either happens or
+        doesn't; no half-written file).
+        """
+        path = self.base_dir / f"{session_id}.jsonl"
+        tmp = path.with_suffix(".jsonl.tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            for msg in messages:
+                f.write(message_to_json(msg) + "\n")
+        tmp.replace(path)
+
+        for meta in self._index:
+            if meta.id == session_id:
+                meta.updated_at = time.time()
+                meta.count = len(messages)
+                last_model = next(
+                    (m.model for m in reversed(messages) if m.model), None
+                )
+                if last_model:
+                    meta.model = last_model
+                break
+        self._save_index()
+
     def load_session(self, session_id: str) -> list[Message]:
         """Load all messages from a session."""
         path = self.base_dir / f"{session_id}.jsonl"
