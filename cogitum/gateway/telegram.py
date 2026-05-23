@@ -26,6 +26,7 @@ import httpx
 from cogitum.core.agent import (
     Agent,
     AgentApprovalRequest,
+    AgentCompacted,
     AgentConfig,
     AgentDone,
     AgentError,
@@ -1221,11 +1222,38 @@ class CogitumBot:
             #   thinking → spoiler rail (live edits)
             #   tool calls → status rail (rolling tail, live edits)
             #   text → response rail (live stream, auto-split at 3800 chars)
+            #
+            # Idle watchdog instead of a fixed 180 s timeout. The old
+            # ``wait_for(queue.get(), timeout=180)`` would break out of
+            # the drain loop the moment the model sat thinking for more
+            # than 3 minutes (long reasoning, slow tool, big terminal
+            # output) and the agent ``task`` was still running — its
+            # ``task.done()`` was False, so the success branch below
+            # didn't fire and the conversation history was silently
+            # discarded for that turn. Now we only consider the run
+            # truly stalled when (a) the queue has been quiet for the
+            # idle window AND (b) the underlying agent task itself is
+            # done. Otherwise we keep waiting.
+            _IDLE_WINDOW_S = 300
             while True:
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=180)
+                    event = await asyncio.wait_for(
+                        queue.get(), timeout=_IDLE_WINDOW_S
+                    )
                 except asyncio.TimeoutError:
-                    break
+                    if task.done():
+                        # Agent finished but we never saw AgentDone /
+                        # AgentError on the queue (drained out of
+                        # order, or crashed silently). Exit the loop
+                        # so the persistence branch below can run.
+                        break
+                    # Agent is still working. Send a typing pulse so
+                    # the chat doesn't look frozen and keep waiting.
+                    try:
+                        await self.api.send_typing(chat_id)
+                    except Exception:
+                        log.debug("typing pulse failed", exc_info=True)
+                    continue
 
                 if isinstance(event, AgentThinking):
                     thinking_buf += event.delta
@@ -1283,6 +1311,22 @@ class CogitumBot:
                 elif isinstance(event, AgentRetry):
                     pass  # silent retry
 
+                elif isinstance(event, AgentCompacted):
+                    # Surface auto-compaction visibly — without this,
+                    # the user sees the chat appear to "forget" the
+                    # earlier turns silently. Manual /compact has its
+                    # own status path; this branch only fires for the
+                    # automatic threshold trigger inside agent.run().
+                    label = "manual" if event.manual else "auto"
+                    await self.api.send_message(
+                        chat_id,
+                        escape_md(
+                            f"⟳ context compacted ({label}): "
+                            f"~{event.before_tokens} → ~{event.after_tokens} tokens, "
+                            f"{event.messages_before} → {event.messages_after} messages"
+                        ),
+                    )
+
                 elif isinstance(event, AgentRetryConfirm):
                     # No modal in Telegram — just send a status
                     # message so the user knows we're stuck. Agent
@@ -1328,9 +1372,16 @@ class CogitumBot:
             # Update history
             if task.done() and not task.cancelled() and not task.exception():
                 session.history = task.result()
-                # Persist to disk
+                # Persist to disk. Append-only used to mean: when the
+                # agent's auto-compaction shrinks ``session.history``
+                # in-place, we would still APPEND the (shorter) new
+                # history on top of the old long form already on disk.
+                # ``/resume`` then loaded a duplicated, contradictory
+                # log. Switching to atomic replace_messages keeps the
+                # session file as the live state of the conversation,
+                # which is what every read path already assumes.
                 store = get_store()
-                store.append_messages(session.session_id, session.history)
+                store.replace_messages(session.session_id, session.history)
 
         except asyncio.CancelledError:
             await self.api.send_message(chat_id, escape_md("⏹ Cancelled."))
