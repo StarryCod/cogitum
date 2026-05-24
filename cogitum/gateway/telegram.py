@@ -36,6 +36,7 @@ from cogitum.core.agent import (
     AgentThinking,
     AgentToolCall,
     AgentToolResult,
+    AgentTurnPersist,
 )
 from cogitum.core.builtin_tools import *
 from cogitum.core.events import Message
@@ -1307,6 +1308,26 @@ class CogitumBot:
                         {"text": "✕ Forbid", "callback_data": f"reject:{event.call_id}"},
                     ]]}
                     await self.api.send_message(chat_id, approval_text, reply_markup=markup)
+
+                elif isinstance(event, AgentTurnPersist):
+                    # Mid-run persistence checkpoint. Agent finished
+                    # an atomic state change (assistant commit, tool
+                    # results landed, fallback summary). Snapshot
+                    # the buffer and atomic-rewrite the session file
+                    # so a crash mid-loop only loses the in-flight
+                    # turn, never accumulated history.
+                    try:
+                        session.history = list(event.messages)
+                        if session.session_id:
+                            from ..core.sessions import get_store
+                            get_store().replace_messages(
+                                session.session_id, session.history,
+                            )
+                    except Exception:
+                        log.debug(
+                            "TG mid-run persist failed (will retry on AgentDone)",
+                            exc_info=True,
+                        )
 
                 elif isinstance(event, AgentRetry):
                     pass  # silent retry

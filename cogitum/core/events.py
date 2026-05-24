@@ -28,7 +28,7 @@ def _id() -> str:
 # Roles & content
 # ---------------------------------------------------------------------------
 
-Role = Literal["system", "user", "assistant", "tool"]
+Role = Literal["system", "user", "assistant", "tool", "function", "developer"]
 
 
 @dataclass(slots=True)

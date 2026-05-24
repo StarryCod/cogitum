@@ -101,9 +101,10 @@ async def _collect_stream(
     Drive ``mesh.stream`` to completion and return ``(text, model, stop_reason)``.
     """
     from ..llm.mesh import StreamRequest  # local import: avoid cycle at module load
+    from ..message_sanitization import sanitize_messages_for_provider
 
     req = StreamRequest(
-        messages=messages,
+        messages=sanitize_messages_for_provider(messages),
         model=model,
         system=system,
         tools=[],

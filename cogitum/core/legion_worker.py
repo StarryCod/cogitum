@@ -46,6 +46,7 @@ from .legion import (
     LegionNode, LegionRun,
     render_inbox_for, render_roster_for,
 )
+from .message_sanitization import sanitize_messages_for_provider
 
 if TYPE_CHECKING:
     from .llm.mesh import Mesh
@@ -391,7 +392,7 @@ def make_legion_worker(
             has_yielded_content = False
 
             req = StreamRequest(
-                messages=history,
+                messages=sanitize_messages_for_provider(history),
                 model=_resolve_model(),
                 system=system,
                 tools=tools_schema,

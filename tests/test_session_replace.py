@@ -89,3 +89,55 @@ def test_replace_messages_preserves_index_for_other_sessions(tmp_path) -> None:
     assert len(store.load_session(s2.id)) == 3
     assert store.get_meta(s1.id).count == 1
     assert store.get_meta(s2.id).count == 3
+
+
+def test_replace_messages_refuses_to_zero_out_existing_session(tmp_path) -> None:
+    """Round-1 adversarial finding: a bug upstream that produces an
+    empty buffer must not be allowed to silently destroy a user's
+    session. replace_messages([]) on a non-empty session is refused
+    with a WARNING log; the existing file stays put."""
+    store = SessionStore(base_dir=tmp_path)
+    meta = store.create_session(session_id="s1", model="m1")
+    store.append_messages(meta.id, [_user("a"), _user("b"), _user("c")])
+    assert store.get_meta(meta.id).count == 3
+
+    store.replace_messages(meta.id, [])
+
+    # File and index intact
+    on_disk = store.load_session(meta.id)
+    assert len(on_disk) == 3
+    assert store.get_meta(meta.id).count == 3
+
+
+def test_replace_messages_empty_list_on_empty_session_is_ok(tmp_path) -> None:
+    """Replacing an already-empty session with [] is a no-op, not
+    a refusal. The guard is specifically against zeroing out
+    existing user content."""
+    store = SessionStore(base_dir=tmp_path)
+    meta = store.create_session(session_id="s1", model="m1")
+    # Brand new session, count=0
+    assert store.get_meta(meta.id).count == 0
+
+    store.replace_messages(meta.id, [])  # should not raise
+
+    assert len(store.load_session(meta.id)) == 0
+
+
+def test_init_sweeps_stale_jsonl_tmp_files(tmp_path) -> None:
+    """A process kill mid replace_messages can leave .jsonl.tmp
+    files. They're incomplete by definition (rename never happened)
+    so SessionStore.__init__ unlinks them on startup. Without this
+    sweep, sessions that are never re-opened leak temp garbage
+    forever."""
+    # Plant stale temps before initializing the store
+    (tmp_path / "session-A.jsonl.tmp").write_text("garbage")
+    (tmp_path / "session-B.jsonl.tmp").write_text("more garbage")
+    (tmp_path / "real.jsonl").write_text("legit")
+    (tmp_path / "index.json").write_text("[]")
+
+    SessionStore(base_dir=tmp_path)
+
+    leftover = list(tmp_path.glob("*.jsonl.tmp"))
+    assert leftover == [], f".tmp files leaked: {leftover}"
+    # Real session file preserved
+    assert (tmp_path / "real.jsonl").exists()

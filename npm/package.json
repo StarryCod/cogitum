@@ -1,6 +1,6 @@
 {
   "name": "cogitum",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Cogitum — sovereign agentic CLI. Textual TUI, multi-provider LLM mesh, persistent sessions, skills, MCP, Telegram gateway. Cross-platform npm launcher.",
   "bin": {
     "cog": "bin/cog.js",

@@ -31,6 +31,7 @@ from cogitum.core.events import (
     Usage,
 )
 from cogitum.core.llm.mesh import Mesh
+from cogitum.core.message_sanitization import sanitize_messages_for_provider
 from cogitum.core.tools import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -423,12 +424,45 @@ class AgentCompacted:
 
 
 @dataclass
+class AgentTurnPersist:
+    """Mid-run persistence checkpoint.
+
+    Emitted by ``Agent.run()`` after every turn that mutated
+    ``messages`` (after committing the assistant response, after
+    appending tool results, after a fallback summary). The TUI / TG
+    gateway should react by writing ``messages`` to disk so a
+    process crash mid-loop can only lose the in-flight turn, never
+    accumulated history.
+
+    The ``messages`` field is a SHALLOW SNAPSHOT taken at emission
+    time — a fresh ``list(...)`` copy so subsequent agent turns
+    can't retroactively change what the consumer sees as "the
+    state at this checkpoint". Message objects inside the list are
+    still shared by reference (deep-copy would be too expensive
+    per persist), so consumers must serialize/snapshot before any
+    long await rather than holding the list across turn boundaries.
+
+    Why an event vs an inline ``Store.replace_messages`` call:
+    persistence is a UI/gateway concern (which store, which session
+    id, what backend). The agent stays storage-agnostic and the
+    consumer decides what to do.
+    """
+    messages: list  # list[Message] — shallow snapshot at emit, see docstring
+    iteration: int
+
+    @property
+    def messages_count(self) -> int:
+        """Count at emission time (frozen — the list is a snapshot)."""
+        return len(self.messages)
+
+
+@dataclass
 class AgentError:
     message: str
     exc: BaseException | None = None
 
 
-AgentEvent = AgentText | AgentThinking | AgentRetry | AgentRetryConfirm | AgentToolCall | AgentApprovalRequest | AgentToolResult | AgentInjected | AgentDone | AgentCompacted | AgentError
+AgentEvent = AgentText | AgentThinking | AgentRetry | AgentRetryConfirm | AgentToolCall | AgentApprovalRequest | AgentToolResult | AgentInjected | AgentDone | AgentCompacted | AgentTurnPersist | AgentError
 
 # ---------------------------------------------------------------------------
 # Agent config
@@ -706,6 +740,7 @@ class Agent:
         queue: asyncio.Queue[AgentEvent] | None = None,
         inject_queue: asyncio.Queue[str] | None = None,
         approval_queue: asyncio.Queue[str] | None = None,
+        _suppress_fallback_summary: bool = False,
     ) -> list[Message]:
         """
         Run the agentic loop.
@@ -741,20 +776,33 @@ class Agent:
         self._approval_queue = approval_queue
         messages: list[Message] = list(history or [])
 
-        # Append user message
-        messages.append(Message(role="user", parts=[TextPart(text=user_message)]))
-
-        tools_schema = (
-            self.registry.to_openai(self.cfg.tool_tags)
-            if self.cfg.tools_enabled
-            else []
-        )
-
         total_usage: Usage | None = None
         accumulated_tokens: int = 0
         iteration = 0
+        # Why this turn ended — set by every break/return path so the
+        # diagnostic log at the bottom records an accurate reason.
+        # Default sentinel "unknown" indicates a code path forgot to
+        # update it (would surface as a noisy log line for us to find).
+        turn_exit_reason: str = "unknown"
+        # Approximate length of the final assistant text response,
+        # used to surface "model emitted nothing" failures in the log.
+        # Stays 0 on max_turns_reached / cancelled / exception paths
+        # because no final response was produced — that's correct.
+        final_response_len: int = 0
 
         try:
+            # Append user message INSIDE the try so a malformed
+            # user_message (or registry.to_openai failure) still
+            # produces a Turn-ended diagnostic via the finally below.
+            messages.append(
+                Message(role="user", parts=[TextPart(text=user_message)])
+            )
+
+            tools_schema = (
+                self.registry.to_openai(self.cfg.tool_tags)
+                if self.cfg.tools_enabled
+                else []
+            )
             # max_turns == 0 → unlimited iterations. Compaction at
             # 60% context still bounds memory; this just stops the
             # loop from cutting the model off mid-thought after a
@@ -795,6 +843,22 @@ class Agent:
                         ),
                         turn=iteration,
                     ))
+                    # Persist post-compaction state immediately so a
+                    # crash before the next assistant commit doesn't
+                    # leave the OLD bloated history on disk. Wrapped
+                    # in try/except so a queue rejection here can't
+                    # poison the run — the next persist will catch
+                    # up if this one fails.
+                    try:
+                        await q.put(AgentTurnPersist(
+                            messages=list(messages),
+                            iteration=iteration,
+                        ))
+                    except Exception:
+                        log.exception(
+                            "AgentTurnPersist after compaction "
+                            "failed (suppressed)"
+                        )
 
                 assistant_text_parts: list[TextPart] = []
                 assistant_thinking_parts: list[ThinkingPart] = []
@@ -938,9 +1002,42 @@ class Agent:
                 )
                 if all_parts:
                     messages.append(Message(role="assistant", parts=all_parts))
+                    # Persist now: an assistant message (text +
+                    # reasoning + tool_calls) is the smallest
+                    # crash-safe boundary. Even if the run dies
+                    # before the tool batch executes, the model's
+                    # commitment to call those tools is on disk.
+                    # Wrapped in try/except so a broken consumer
+                    # queue can't kill the run — persistence is a
+                    # checkpoint hint, never a fatal contract.
+                    try:
+                        await q.put(AgentTurnPersist(
+                            messages=list(messages),
+                            iteration=iteration,
+                        ))
+                    except Exception:
+                        log.exception(
+                            "AgentTurnPersist after assistant commit "
+                            "failed (suppressed)"
+                        )
 
                 # ── no tool calls → done ─────────────────────────────────
                 if not assistant_tool_calls:
+                    final_response_len = sum(
+                        len(p.text) for p in assistant_text_parts
+                    )
+                    if assistant_text_parts:
+                        turn_exit_reason = "end_turn"
+                    elif assistant_thinking_parts:
+                        # Reasoning-only response with no text and no
+                        # tool_calls. Provider stopped but the model
+                        # gave the user nothing visible.
+                        turn_exit_reason = "thinking_only_response"
+                    else:
+                        # No text, no thinking, no tool_calls. Either
+                        # the provider returned an empty stream or the
+                        # stream ended without any content chunks.
+                        turn_exit_reason = "empty_response"
                     break
 
                 # ── execute tools in parallel (cancellable) ────────────────
@@ -995,8 +1092,32 @@ class Agent:
                 # Filter out None (shouldn't happen but safety)
                 tool_result_parts = [p for p in tool_result_parts if p is not None]
 
-                # tool results go in as a "tool" role message
-                messages.append(Message(role="tool", parts=tool_result_parts))
+                # tool results go in as a "tool" role message — but
+                # only if we actually have results. Empty parts list
+                # is wire-illegal (provider rejects on /resume) and
+                # signals every tool was cancelled mid-flight before
+                # producing anything; persisting an empty tool turn
+                # would leave the session in that wire-illegal state.
+                if tool_result_parts:
+                    messages.append(
+                        Message(role="tool", parts=tool_result_parts)
+                    )
+                    # Persist after tool results land: this is the
+                    # most expensive thing we want crash-safe — a long
+                    # terminal/file-read result that completed should
+                    # survive a crash on the very next stream call.
+                    # Wrapped in try/except for the same reason as
+                    # the assistant-commit persist above.
+                    try:
+                        await q.put(AgentTurnPersist(
+                            messages=list(messages),
+                            iteration=iteration,
+                        ))
+                    except Exception:
+                        log.exception(
+                            "AgentTurnPersist after tool results "
+                            "failed (suppressed)"
+                        )
 
                 # ── inject queued user messages between iterations ────────
                 if inject_queue:
@@ -1008,17 +1129,319 @@ class Agent:
                         messages.append(Message(role="user", parts=[TextPart(text=injected_text)]))
                         await q.put(AgentInjected(text=injected_text, turn=iteration))
 
-            await q.put(AgentDone(turns=iteration, usage=total_usage))
+            else:
+                # while-else fires only when the loop's condition went
+                # False naturally (i.e. max_turns hit, since `break`
+                # paths set their own reason and skip the else). With
+                # max_turns=0 (default) this branch is unreachable, but
+                # tests and explicit-cap users still hit it.
+                turn_exit_reason = (
+                    f"max_turns_reached({iteration}/{self.cfg.max_turns})"
+                )
 
+            # NB: AgentDone is NOT emitted here — moved into the
+            # finally below so it lands AFTER the fallback summary's
+            # AgentText deltas. UI consumers treat AgentDone as
+            # "stop rendering / re-enable input"; if it arrived
+            # before the fallback's text, the closing summary would
+            # be invisible to them.
+
+        except asyncio.CancelledError:
+            turn_exit_reason = "cancelled"
+            raise
         except Exception as exc:
+            turn_exit_reason = f"exception:{type(exc).__name__}"
             log.exception("Agent loop error")
             await q.put(AgentError(message=str(exc), exc=exc))
+
+        finally:
+            # Nested try/finally guarantees the diagnostic ALWAYS
+            # runs, even if the fallback summary raises (including
+            # CancelledError raised during its mesh.stream — the
+            # outer except Exception below does NOT catch
+            # BaseException, so cancel would otherwise skip past
+            # both the diag block AND AgentDone). The diagnostic is
+            # the canonical record of "what happened in this turn"
+            # and operators rely on its presence.
+            try:
+                # ── Fallback summary on no-text exits ────────────
+                # If the loop ended without producing a final
+                # assistant text response, ask the model for one
+                # extra closing turn WITHOUT tools so the user
+                # always gets a coherent end to the conversation.
+                # Hermes-agent does the same via
+                # ``_handle_max_iterations``.
+                #
+                # Trigger conditions (in priority order):
+                #   - turn_exit_reason in {max_turns_reached*,
+                #     empty_response, thinking_only_response}
+                #   - last_msg_role == "tool" (loop ended after a
+                #     tool batch and the model never got to comment
+                #     on it)
+                #
+                # Do NOT trigger on:
+                #   - end_turn — we already have a final response
+                #   - cancelled — user explicitly aborted
+                #   - exception:* — AgentError event already fired;
+                #     a second stream call risks the same exception
+                #
+                # Wrapped in try/except so a fallback failure can
+                # never mask the original exit. CancelledError
+                # propagates (not caught here) but the OUTER
+                # finally's nested try ensures the diagnostic still
+                # fires before propagation.
+                if not _suppress_fallback_summary:
+                    try:
+                        needs_fallback = (
+                            (
+                                turn_exit_reason.startswith("max_turns_reached")
+                                or turn_exit_reason in (
+                                    "empty_response",
+                                    "thinking_only_response",
+                                )
+                                or (messages and messages[-1].role == "tool")
+                            )
+                            and not turn_exit_reason.startswith("exception:")
+                            and turn_exit_reason != "cancelled"
+                        )
+                        if needs_fallback:
+                            summary_text = await self._emit_fallback_summary(
+                                messages=list(messages),
+                                queue=q,
+                                iteration=iteration,
+                                reason=turn_exit_reason,
+                            )
+                            if summary_text:
+                                messages.append(Message(
+                                    role="assistant",
+                                    parts=[TextPart(text=summary_text)],
+                                ))
+                                final_response_len = len(summary_text)
+                                turn_exit_reason = (
+                                    f"{turn_exit_reason}+fallback_summary"
+                                )
+                                # Persist the fallback summary too —
+                                # it's the user-visible final answer.
+                                # Wrapped in try/except so a queue
+                                # rejection can't poison the run.
+                                try:
+                                    await q.put(AgentTurnPersist(
+                                        messages=list(messages),
+                                        iteration=iteration,
+                                    ))
+                                except Exception:
+                                    log.exception(
+                                        "AgentTurnPersist after fallback "
+                                        "failed (suppressed)"
+                                    )
+                    except asyncio.CancelledError:
+                        # User cancelled mid-fallback. Mark and let
+                        # it propagate AFTER the diagnostic in the
+                        # outer finally below.
+                        turn_exit_reason = (
+                            f"{turn_exit_reason}+fallback_cancelled"
+                            if "+fallback" not in turn_exit_reason
+                            else turn_exit_reason
+                        )
+                        raise
+                    except Exception:
+                        log.exception(
+                            "Fallback summary failed (suppressed)"
+                        )
+
+                # ── AgentDone ────────────────────────────────────
+                # Emitted AFTER the fallback so the UI sees its
+                # closing-summary deltas before the "stop rendering"
+                # signal. Skipped on the exception path because
+                # AgentError was already pushed there. Wrapped in
+                # its own try/except so a broken caller queue
+                # cannot turn a successful run into an exception
+                # path — the diagnostic in the inner finally below
+                # is the canonical record either way.
+                if not turn_exit_reason.startswith("exception:") \
+                        and turn_exit_reason != "cancelled":
+                    try:
+                        await q.put(
+                            AgentDone(turns=iteration, usage=total_usage)
+                        )
+                    except Exception:
+                        log.exception(
+                            "AgentDone emission failed (suppressed)"
+                        )
+            finally:
+                # ── Turn-exit diagnostic ─────────────────────────
+                # Always logged, on EVERY exit path including
+                # cancellation that may have raised inside the
+                # fallback. WARNING level when the last message is
+                # a tool result — that's the "agent stopped
+                # mid-work" pattern users report as "model didn't
+                # see tool feedback". Hermes-agent uses the same
+                # shape.
+                #
+                # Wrapped in its own try/except so a malformed
+                # Message in ``messages`` can never poison
+                # Agent.run()'s return value (or, in the cancel
+                # path, mask the CancelledError).
+                try:
+                    last_msg_role = (
+                        messages[-1].role if messages else None
+                    )
+                    last_tool_name: str | None = None
+                    if last_msg_role == "tool":
+                        for m in reversed(messages):
+                            if m.role == "assistant" and m.tool_calls:
+                                last_tool_name = m.tool_calls[-1].name
+                                break
+                    tool_turns = sum(
+                        1 for m in messages
+                        if m.role == "assistant" and m.tool_calls
+                    )
+
+                    diag = (
+                        "Turn ended: reason=%s model=%s iterations=%d "
+                        "tool_turns=%d last_msg_role=%s last_tool=%s "
+                        "response_len=%d messages=%d"
+                    )
+                    level = (
+                        logging.WARNING
+                        if last_msg_role == "tool"
+                        else logging.INFO
+                    )
+                    log.log(
+                        level,
+                        diag,
+                        turn_exit_reason,
+                        self.cfg.model or "?",
+                        iteration,
+                        tool_turns,
+                        last_msg_role,
+                        last_tool_name
+                        or ("?" if last_msg_role == "tool" else "—"),
+                        final_response_len,
+                        len(messages),
+                    )
+                except Exception:
+                    log.exception(
+                        "Turn-exit diagnostic failed (suppressed)"
+                    )
 
         return messages
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _emit_fallback_summary(
+        self,
+        *,
+        messages: list[Message],
+        queue: asyncio.Queue[AgentEvent],
+        iteration: int,
+        reason: str,
+    ) -> str:
+        """One extra LLM call WITHOUT tools to close out an unfinished turn.
+
+        Triggered from ``run()``'s finally when the loop ended without
+        producing a final assistant text response (max_turns,
+        empty_response, thinking_only_response, or last_msg_role==tool).
+        Asks the model to summarise what's been done so the user
+        always sees a coherent end to the conversation rather than a
+        truncated half-turn or silent stop.
+
+        Streams ``AgentText`` chunks to ``queue`` so the TUI/TG see
+        the fallback the same way they see any other response.
+        Returns the accumulated text (may be empty on stream failure).
+
+        Implementation notes:
+          * tools=[] — the model can't call more tools to escape
+          * temperature=0 — we want a stable closing summary
+          * sanitize_messages_for_provider stays in the path
+            (called via _stream → mesh.stream contract); the call
+            sites that bypass _stream and go straight to mesh.stream
+            already wrap with sanitize_messages_for_provider.
+          * No retry wrapper — if the fallback itself fails, we
+            return "" and the diagnostic above logs the situation.
+            Better to silently degrade than to recurse.
+        """
+        from cogitum.core.llm.mesh import StreamRequest
+        from cogitum.core.memory import get_memory_context
+        from datetime import datetime
+
+        prefix = (
+            "─── closing summary ───\n"
+            f"[The agent loop ended without a final response "
+            f"(reason={reason}). Producing a closing summary of what "
+            "has been done so far without further tool use.]\n\n"
+        )
+
+        # Inject a one-off user nudge for the summarizer. We build a
+        # NEW list via concatenation (`messages + [synthetic]`) so
+        # the caller's history is never mutated and the synthetic
+        # prompt cannot leak into persisted state.
+        nudge = (
+            "You've reached the end of the agent loop without "
+            "producing a final response. Please summarise what you "
+            "found, what tools you ran, and what the result is — "
+            "without calling any more tools. If the work is "
+            "incomplete, say so and explain what's left."
+        )
+        synthetic = Message(role="user", parts=[TextPart(text=nudge)])
+        messages_for_summary = messages + [synthetic]
+
+        # Build a thin system prompt — we don't need the full skills
+        # catalog here, just the persona + memory + datetime context.
+        system = self.cfg.system or ""
+        mem = get_memory_context()
+        if mem:
+            system = f"{system}\n\n{mem}"
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        platform_label = (
+            "Telegram" if self.cfg.platform == "telegram" else "CLI TUI"
+        )
+        system = (
+            f"{system}\n\n═══ CONTEXT ═══\n"
+            f"Current time: {now}\nPlatform: {platform_label}"
+        )
+
+        req = StreamRequest(
+            messages=sanitize_messages_for_provider(messages_for_summary),
+            model=self.cfg.model or "",
+            system=system,
+            tools=[],  # critical: no tools, otherwise we recurse
+            max_tokens=self.cfg.max_tokens,
+            temperature=0.0,
+        )
+
+        accumulated: list[str] = []
+        try:
+            # Emit prefix INSIDE the try so a queue.put failure
+            # (e.g. caller-supplied bounded queue rejecting writes)
+            # is caught alongside the stream errors and we still
+            # honour the docstring contract: "may be empty on
+            # stream failure" — never raise, always return a string.
+            await queue.put(AgentText(delta=prefix, turn=iteration))
+            async for chunk in self.mesh.stream(req):
+                if chunk.kind == ChunkKind.TEXT and chunk.text:
+                    accumulated.append(chunk.text)
+                    await queue.put(AgentText(delta=chunk.text, turn=iteration))
+                elif chunk.kind == ChunkKind.ERROR:
+                    log.warning(
+                        "Fallback summary stream error: %s", chunk.error,
+                    )
+                    break
+                # Ignore THINKING / TOOL_* / USAGE — fallback should
+                # only produce text. If the model tries to emit a
+                # tool call here despite tools=[], we simply drop it.
+        except asyncio.CancelledError:
+            # Let cancellation propagate; the caller's outer
+            # finally will log the diagnostic and we don't want to
+            # swallow the user's stop signal.
+            raise
+        except Exception:
+            log.exception("Fallback summary stream raised")
+            return ""
+
+        return "".join(accumulated).strip()
 
     async def _stream(
         self,
@@ -1059,7 +1482,7 @@ class Agent:
         system = f"{system}\n\n═══ CONTEXT ═══\nCurrent time: {now}\nPlatform: {platform_label}"
 
         req = StreamRequest(
-            messages=messages,
+            messages=sanitize_messages_for_provider(messages),
             model=self.cfg.model or "",
             system=system,
             tools=tools_schema,

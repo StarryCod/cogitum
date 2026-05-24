@@ -121,6 +121,19 @@ class SessionStore:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._index_path = self.base_dir / "index.json"
         self._index: list[SessionMeta] = self._load_index()
+        # Sweep stale .jsonl.tmp files left over from a process kill
+        # mid replace_messages. Any such temp file is by definition
+        # incomplete (the rename never happened) so it's safe to
+        # unlink. Without this, sessions that were never re-opened
+        # leak temp garbage forever.
+        try:
+            for tmp in self.base_dir.glob("*.jsonl.tmp"):
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
     def _load_index(self) -> list[SessionMeta]:
         if not self._index_path.exists():
@@ -207,8 +220,29 @@ class SessionStore:
         would still load all of it. Atomic temp-rename keeps the
         operation crash-safe on POSIX (the rename either happens or
         doesn't; no half-written file).
+
+        Refuses to overwrite a non-empty session file with an empty
+        message list — that would silently destroy the user's
+        history. A bug upstream that produces an empty buffer (or a
+        race where a snapshot beats the user-message append) must
+        not be able to zero out persisted state.
         """
         path = self.base_dir / f"{session_id}.jsonl"
+        if not messages:
+            existing_count = 0
+            for meta in self._index:
+                if meta.id == session_id:
+                    existing_count = meta.count
+                    break
+            if existing_count > 0:
+                # Loud log so a regression here doesn't pass silently.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "replace_messages refused to zero out session %r "
+                    "(would destroy %d existing message(s))",
+                    session_id, existing_count,
+                )
+                return
         tmp = path.with_suffix(".jsonl.tmp")
         with tmp.open("w", encoding="utf-8") as f:
             for msg in messages:

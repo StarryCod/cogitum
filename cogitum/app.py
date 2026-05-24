@@ -11,7 +11,7 @@ from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.widgets import Static
 
-from .core.agent import Agent, AgentApprovalRequest, AgentCompacted, AgentConfig, AgentDone, AgentError, AgentInjected, AgentRetry, AgentRetryConfirm, AgentText, AgentThinking, AgentToolCall, AgentToolResult
+from .core.agent import Agent, AgentApprovalRequest, AgentCompacted, AgentConfig, AgentDone, AgentError, AgentInjected, AgentRetry, AgentRetryConfirm, AgentText, AgentThinking, AgentToolCall, AgentToolResult, AgentTurnPersist
 from .core.builtin_tools import *
 from .widgets.approval import ApprovalWidget
 from .core.llm.loader import load_mesh, load_settings, write_settings
@@ -689,6 +689,19 @@ class CogitumApp(App):
         approval_queue: asyncio.Queue = asyncio.Queue()
         self._approval_queue = approval_queue
 
+        # Pre-create the session BEFORE the agent starts so mid-run
+        # AgentTurnPersist events have a valid self._session_id to
+        # write against. Otherwise the very first user message of a
+        # fresh session — exactly the long-run-then-crash scenario
+        # this feature targets — gets no on-disk crash safety.
+        try:
+            self._ensure_session()
+        except Exception:
+            log.debug(
+                "session pre-creation failed (mid-run persist disabled)",
+                exc_info=True,
+            )
+
         # Current agent block and thinking block (updated live)
         agent_block: AgentBlock | None = None
         thinking_block: ThinkingBlock | None = None
@@ -774,6 +787,34 @@ class CogitumApp(App):
                         auto_continue_in=event.auto_continue_in,
                     )
                     self.push_screen(modal)
+
+                elif isinstance(event, AgentTurnPersist):
+                    # Mid-run persistence checkpoint. The agent
+                    # finished some atomic state change (assistant
+                    # commit, tool results landed, fallback summary
+                    # appended) and wants the buffer flushed to disk.
+                    # If the run dies after this point, /resume picks
+                    # up exactly what was committed.
+                    #
+                    # event.messages is a SHARED reference to the
+                    # agent's internal buffer (see AgentTurnPersist
+                    # docstring). We update self._history to that
+                    # state and persist immediately. SessionStore.
+                    # replace_messages writes via temp+rename so an
+                    # interrupted disk write can't corrupt the file.
+                    try:
+                        self._history = list(event.messages)
+                        if self._session_id:
+                            from .core.sessions import get_store
+                            get_store().replace_messages(
+                                self._session_id, self._history,
+                            )
+                            self._session_msg_count = len(self._history)
+                    except Exception:
+                        log.debug(
+                            "mid-run persist failed (will retry on AgentDone)",
+                            exc_info=True,
+                        )
 
                 elif isinstance(event, AgentCompacted):
                     # Compaction freed context — reset the inspector's
