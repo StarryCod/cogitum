@@ -9,9 +9,23 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+
+
+# Detach kwargs — same rationale as builtin_tools._SUBPROC_DETACH_KWARGS.
+# `start_new_session=True` is POSIX-only; on Windows we need
+# CREATE_NEW_PROCESS_GROUP via creationflags or stdout capture breaks
+# silently. Computed at import time, per platform.
+if sys.platform == "win32":
+    _SUBPROC_DETACH_KWARGS: dict = {
+        "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
+    }
+else:
+    _SUBPROC_DETACH_KWARGS = {"start_new_session": True}
 
 
 @dataclass
@@ -60,7 +74,7 @@ class ProcessManager:
             stderr=asyncio.subprocess.STDOUT,
             stdin=asyncio.subprocess.PIPE,
             cwd=cwd,
-            start_new_session=True,
+            **_SUBPROC_DETACH_KWARGS,
         )
 
         bp = BackgroundProcess(pid=proc.pid, proc=proc, command=command)

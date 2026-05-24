@@ -42,3 +42,4 @@ prompt.md
 
 # Reference checkouts (vendored for code-comparison study, not shipped)
 hermes-agent/
+codegraph/

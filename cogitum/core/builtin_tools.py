@@ -409,6 +409,25 @@ def list_dir(path: str = ".") -> str:
 # Shell
 # ---------------------------------------------------------------------------
 
+# `start_new_session=True` is POSIX-only (setsid()). On Windows it either
+# raises ValueError on older Pythons or silently breaks stdout capture on
+# newer ones — users see "(no output)" or "[exit N]" with no body. The
+# Windows equivalent is creationflags=CREATE_NEW_PROCESS_GROUP, which
+# detaches the child from our Ctrl+C handler the same way setsid does on
+# POSIX. Detection is per-process so a Linux Cogitum talking to a Windows
+# Telegram gateway still picks the right shape from each side.
+import sys as _shell_sys
+
+if _shell_sys.platform == "win32":
+    _SUBPROC_DETACH_KWARGS = {
+        # CREATE_NEW_PROCESS_GROUP isolates the child from our console
+        # so we can kill it without taking out our own process.
+        "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
+    }
+else:
+    _SUBPROC_DETACH_KWARGS = {"start_new_session": True}
+
+
 @tool(tags=["shell"])
 async def terminal(
     command: str,
@@ -524,7 +543,7 @@ async def terminal(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
-                start_new_session=True,
+                **_SUBPROC_DETACH_KWARGS,
             )
             stdout, _ = await proc.communicate()
             output = stdout.decode(errors="replace").strip()
@@ -547,7 +566,7 @@ async def terminal(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
-                start_new_session=True,
+                **_SUBPROC_DETACH_KWARGS,
             )
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)

@@ -210,6 +210,24 @@ class ComposerArea(TextArea):
         # Everything else — let TextArea handle normally
         await super()._on_key(event)
 
+    async def _on_paste(self, event: events.Paste) -> None:
+        """Stop the default TextArea paste so Composer.on_paste owns it.
+
+        Without this hook the paste was inserted TWICE: TextArea's own
+        default handler ran (insert text into the buffer), then the
+        event bubbled up to Composer.on_paste which also inserted —
+        the user saw the pasted text duplicated. ``event.stop()`` on
+        the parent doesn't help because by the time the parent sees
+        it, the TextArea has already mutated its buffer.
+
+        We suppress the default insert here but DO NOT call ``stop()``
+        — the Composer above us still needs to receive the event so
+        it can collapse long pastes into ``[Pasted N lines]`` / insert
+        short ones inline. Bubble continues, only the default action
+        is suppressed.
+        """
+        event.prevent_default()
+
 
 # ── Composer widget ──────────────────────────────────────────────────────────
 
