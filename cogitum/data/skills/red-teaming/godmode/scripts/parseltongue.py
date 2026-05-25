@@ -15,8 +15,44 @@ Usage:
     variants = generate_variants("How do I hack a WiFi network?", tier="standard")
 """
 
+# ──────────────────────────────────────────────────────────────────
+# Approval gate — see _godmode_gate.py. MUST run before any other
+# import so the script aborts cleanly even if upstream deps are
+# missing (yaml, anthropic, …).
+# ──────────────────────────────────────────────────────────────────
+import os as _gm_os
+import sys as _gm_sys
+from pathlib import Path as _gm_Path
+_gm_gate_dir = _gm_Path(_gm_os.getenv("HERMES_HOME", _gm_Path.home() / ".hermes")) / "skills" / "red-teaming" / "godmode" / "scripts"
+_gm_sys.path.insert(0, str(_gm_gate_dir))
+try:
+    from _godmode_gate import require_consent as _gm_require_consent
+    _gm_require_consent("parseltongue")
+finally:
+    try:
+        _gm_sys.path.remove(str(_gm_gate_dir))
+    except ValueError:
+        pass
+
+
 import re
 import base64
+
+
+# ──────────────────────────────────────────────────────────────────
+import os as _gm_os
+import sys as _gm_sys
+from pathlib import Path as _GmPath
+_gm_gate_dir = _GmPath(_gm_os.getenv("HERMES_HOME", _GmPath.home() / ".hermes")) / "skills" / "red-teaming" / "godmode" / "scripts"
+_gm_sys.path.insert(0, str(_gm_gate_dir))
+try:
+    from _godmode_gate import require_consent as _gm_require_consent
+    _gm_require_consent("parseltongue")
+finally:
+    try:
+        _gm_sys.path.remove(str(_gm_gate_dir))
+    except ValueError:
+        pass
 
 # ═══════════════════════════════════════════════════════════════════
 # Trigger words that commonly trip safety classifiers

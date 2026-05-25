@@ -54,12 +54,40 @@ class SessionPicker(ModalScreen):
     SessionPicker {{
         align: center middle;
     }}
+    /* Default sizing: still capped at 90×28 on roomy terminals (the
+       original look), but wraps in min/max so it survives <90-col or
+       <28-row terminals. The classic 80x24 SSH window now fits cleanly.
+    */
     #session-picker-box {{
         width: 90;
+        max-width: 95%;
         height: 28;
+        max-height: 90%;
+        min-width: 40;
+        min-height: 14;
         background: {BG};
         border: round {BRONZE};
         padding: 1 2;
+    }}
+    /* On narrow terminals (≤80 cols) drop the modal frame entirely so
+       every column counts. */
+    App.-narrow SessionPicker #session-picker-box {{
+        width: 100%;
+        height: 100%;
+        max-width: 100%;
+        max-height: 100%;
+        border: none;
+        padding: 0 1;
+    }}
+    /* On narrow terminals the preview pane crowds out the list — hide
+       it. The list rows still show title + age + count, which is
+       enough for picking. */
+    App.-narrow SessionPicker #session-preview-pane {{
+        display: none;
+    }}
+    App.-narrow SessionPicker #session-list-pane {{
+        width: 100%;
+        border-right: none;
     }}
     #session-header {{
         width: 100%;

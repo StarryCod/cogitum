@@ -17,9 +17,14 @@ def _isolated_config(tmp_path, monkeypatch):
     monkeypatch.setenv("COGITUM_CONFIG_DIR", str(cfg))
     # Force cogitum.core.llm.loader module-level paths to refresh —
     # they read the env var at import. Reload if already imported.
+    #
+    # Exception: cogitum.codegraph.* doesn't touch COGITUM_CONFIG_DIR and
+    # ships pickled worker functions to ProcessPoolExecutor — wiping the
+    # module mid-test invalidates those function identities and breaks
+    # parallel indexing tests.
     import sys
     for mod in list(sys.modules):
-        if mod.startswith("cogitum"):
+        if mod.startswith("cogitum") and not mod.startswith("cogitum.codegraph"):
             sys.modules.pop(mod, None)
     yield cfg
 

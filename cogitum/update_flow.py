@@ -306,7 +306,14 @@ class _UpdateApp(App[int]):
 
         heartbeat_task = asyncio.create_task(heartbeat())
 
-        try:
+        async def _do_pull() -> tuple[int, str]:
+            """Run git pull and stream progress; return (rc, last_line).
+
+            Pulled out so we can wrap the whole thing in
+            ``asyncio.wait_for(..., timeout=120)`` and clean up the
+            subprocess group on timeout.
+            """
+            nonlocal last_real_line
             proc = await asyncio.create_subprocess_exec(
                 "git", "pull", "--ff-only", "--progress",
                 "origin", "master",
@@ -315,46 +322,80 @@ class _UpdateApp(App[int]):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )
-
-            # git --progress writes status updates with \r (carriage
-            # return), not \n — splitting by '\n' would buffer the
-            # whole pull into one giant string. Read raw chunks and
-            # split on either separator so the ticker advances on
-            # every progress update.
-            assert proc.stdout is not None
-            buf = b""
-            while True:
-                chunk = await proc.stdout.read(256)
-                if not chunk:
-                    break
-                buf += chunk
-                # Split on either \r or \n; keep the partial last
-                # piece for the next iteration.
+            try:
+                # git --progress writes status updates with \r (carriage
+                # return), not \n — splitting by '\n' would buffer the
+                # whole pull into one giant string. Read raw chunks and
+                # split on either separator so the ticker advances on
+                # every progress update.
+                assert proc.stdout is not None
+                buf = b""
                 while True:
-                    nl = -1
-                    for sep in (b"\r", b"\n"):
-                        i = buf.find(sep)
-                        if i != -1 and (nl == -1 or i < nl):
-                            nl = i
-                    if nl == -1:
+                    chunk = await proc.stdout.read(256)
+                    if not chunk:
                         break
-                    line = buf[:nl].decode("utf-8", "replace").rstrip()
-                    buf = buf[nl + 1:]
-                    if not line:
-                        continue
-                    last_real_line = line
-                    self._set_ticker(line)
-                    hint = _progress_for_line(line)
-                    if hint is not None:
-                        self._set_progress(hint)
+                    buf += chunk
+                    # Split on either \r or \n; keep the partial last
+                    # piece for the next iteration.
+                    while True:
+                        nl = -1
+                        for sep in (b"\r", b"\n"):
+                            i = buf.find(sep)
+                            if i != -1 and (nl == -1 or i < nl):
+                                nl = i
+                        if nl == -1:
+                            break
+                        line = buf[:nl].decode("utf-8", "replace").rstrip()
+                        buf = buf[nl + 1:]
+                        if not line:
+                            continue
+                        last_real_line = line
+                        self._set_ticker(line)
+                        hint = _progress_for_line(line)
+                        if hint is not None:
+                            self._set_progress(hint)
 
-            # Drain any tail in buf.
-            tail_line = buf.decode("utf-8", "replace").rstrip()
-            if tail_line:
-                last_real_line = tail_line
-                self._set_ticker(tail_line)
+                # Drain any tail in buf.
+                tail_line = buf.decode("utf-8", "replace").rstrip()
+                if tail_line:
+                    last_real_line = tail_line
+                    self._set_ticker(tail_line)
 
-            rc = await proc.wait()
+                rc = await proc.wait()
+                return rc, last_real_line
+            except asyncio.CancelledError:
+                # Caller (wait_for timeout) is unwinding us. Nuke the
+                # whole git process group so a hung child doesn't
+                # outlive the upgrade dialog. Mirrors the headless
+                # path's TimeoutExpired handling.
+                try:
+                    if proc.returncode is None:
+                        try:
+                            os.killpg(os.getpgid(proc.pid), 9)
+                        except (AttributeError, ProcessLookupError, OSError):
+                            try:
+                                proc.kill()
+                            except ProcessLookupError:
+                                pass
+                except Exception:
+                    pass
+                raise
+
+        try:
+            try:
+                # 120s ceiling matches the headless CLI path. Anything
+                # longer is a hung auth prompt or dead network — kill it
+                # rather than letting the dialog stare at a frozen ticker.
+                rc, last_real_line = await asyncio.wait_for(
+                    _do_pull(), timeout=120,
+                )
+            except asyncio.TimeoutError:
+                self._show_error(
+                    "Upgrade timed out",
+                    detail="git pull > 120s — check network/auth and retry",
+                )
+                self._exit_code = 1
+                rc = 1
 
             if rc == 0:
                 self._set_progress(100)
@@ -522,10 +563,23 @@ def _run_headless() -> int:
     print(f"running: git pull --ff-only  (cwd={root})")
     env = {**os.environ, "GIT_PAGER": "cat", "PAGER": "cat",
            "GIT_TERMINAL_PROMPT": "0"}
-    rc = subprocess.call(
-        ["git", "pull", "--ff-only", "origin", "master"],
-        cwd=str(root), env=env,
-    )
+    # 120s is generous for a fast-forward pull on any reasonable
+    # repo/network. If we're stuck longer than that we're probably
+    # blocked on auth or a hung connection (GIT_TERMINAL_PROMPT=0 should
+    # have killed prompts already, but belt-and-braces). Use ``run``
+    # with check=False so we can log the returncode ourselves rather
+    # than catching CalledProcessError; ``call`` had no timeout kwarg
+    # before Python 3.3+ added it transitively, but we want explicit
+    # error paths for both timeout and nonzero exits.
+    try:
+        cp = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "master"],
+            cwd=str(root), env=env, check=False, timeout=120,
+        )
+        rc = cp.returncode
+    except subprocess.TimeoutExpired:
+        print("✗ git pull timed out after 120s — check network/auth and retry")
+        return 1
     if rc == 0:
         print("✓ pulled. Restart Cogitum to apply.")
         return 0

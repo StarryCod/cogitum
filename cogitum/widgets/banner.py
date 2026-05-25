@@ -28,7 +28,11 @@ from ..design import (
 
 _LOGO_RAW = pyfiglet.figlet_format("COGITUM", font="ansi_shadow", width=200).rstrip("\n")
 _LOGO_WIDTH = max((len(line) for line in _LOGO_RAW.splitlines()), default=0)
-_NARROW_THRESHOLD = max(_LOGO_WIDTH, 60)
+# Bug fix: previously max(_LOGO_WIDTH, 60) gave 70, so terminals 60–69
+# cols wide drew an overflowing figlet (no fallback, no clipping marker).
+# Now we trip the fallback well before the figlet would clip — leaving a
+# 10-col safety margin around the actual logo width.
+_NARROW_THRESHOLD = max(_LOGO_WIDTH - 10, 40)
 
 
 def _layered(text: str) -> Text:
@@ -64,7 +68,20 @@ class Banner(Widget):
             avail = self.size.width
         except Exception:
             avail = _LOGO_WIDTH
-        if avail and avail < _NARROW_THRESHOLD:
+
+        # Responsive: when the App is on a short or narrow terminal,
+        # always use the compact one-line banner. The TCSS template
+        # collapses #banner height to 3 in -short so the figlet would
+        # be clipped vertically anyway.
+        force_compact = False
+        try:
+            app = self.app
+            if app.has_class("-short") or app.has_class("-narrow"):
+                force_compact = True
+        except Exception:
+            pass
+
+        if force_compact or (avail and avail < _NARROW_THRESHOLD):
             compact = Text()
             compact.append("◆ ", style=GOLD_HI)
             compact.append("COGITUM", style=f"bold {GOLD_HI}")

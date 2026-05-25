@@ -15,6 +15,8 @@ The agent has tools:
 """
 from __future__ import annotations
 
+import logging
+import os
 import re
 import shutil
 from pathlib import Path
@@ -22,7 +24,53 @@ from dataclasses import dataclass
 
 from .platform_paths import get_data_dir
 
+log = logging.getLogger(__name__)
+
 _SKILLS_DIR = get_data_dir() / "skills"
+
+# F8: cap how many bytes ``list_skills`` will read from a single
+# SKILL.md before truncating. Frontmatter + first description line is
+# all we ever need — a skill that legitimately exceeds 256KB has
+# bigger problems. Without the cap a single 100MB file could
+# materialize the whole listing into memory and stall the TUI.
+_LIST_SKILL_READ_CAP = 256_000
+
+# F9: hard ceiling on ``write_skill`` payload size. 1MB is generous
+# for any sane procedural-memory entry; anything bigger is almost
+# certainly accidental (an LLM dumping a transcript or binary
+# blob into the skills store). Reject before we touch disk.
+_WRITE_SKILL_MAX_BYTES = 1_048_576
+
+# Reject names containing path separators, parent traversal, glob metachars,
+# or control characters. Skill names are allowed to be reasonably free-form
+# (we still pass them to write_skill which sanitizes), but for *read* we lock
+# them down hard since they flow into glob() patterns.
+_NAME_REJECT_RE = re.compile(r"[\x00-\x1f/\\*?\[\]]")
+
+
+def _name_is_safe(name: str) -> bool:
+    """Return True iff `name` is safe to feed into glob/path joins."""
+    if not name or not isinstance(name, str):
+        return False
+    if ".." in name:
+        return False
+    if _NAME_REJECT_RE.search(name):
+        return False
+    return True
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """Return True iff `path` (after realpath) lives under `root` (after realpath)."""
+    try:
+        rp = Path(os.path.realpath(str(path)))
+        rr = Path(os.path.realpath(str(root)))
+    except OSError:
+        return False
+    try:
+        rp.relative_to(rr)
+        return True
+    except ValueError:
+        return False
 
 # Default skills shipped with the package
 _DEFAULT_SKILLS_PACKAGE = Path(__file__).resolve().parent.parent / "data" / "skills"
@@ -94,7 +142,13 @@ def list_skills(category: str = "") -> list[SkillMeta]:
         if category and cat != category:
             continue
 
-        content = path.read_text(encoding="utf-8")
+        # F8: cap reads at ``_LIST_SKILL_READ_CAP`` so a malicious or
+        # accidentally-huge SKILL.md can't OOM the listing pass.
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                content = fh.read(_LIST_SKILL_READ_CAP)
+        except OSError:
+            continue
         meta, body = _parse_frontmatter(content)
         description = meta.get("description", "")
         if not description:
@@ -108,7 +162,11 @@ def list_skills(category: str = "") -> list[SkillMeta]:
 
     # Also find flat .md files (agent-created skills)
     for path in sorted(_SKILLS_DIR.glob("*.md")):
-        content = path.read_text(encoding="utf-8")
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                content = fh.read(_LIST_SKILL_READ_CAP)
+        except OSError:
+            continue
         meta, body = _parse_frontmatter(content)
         name = path.stem
         description = meta.get("description", "")
@@ -123,6 +181,40 @@ def list_skills(category: str = "") -> list[SkillMeta]:
     return skills
 
 
+def _read_text_nofollow(path: Path) -> str | None:
+    """Read ``path`` rejecting any symlink along the final component.
+
+    Closes the TOCTOU between an ``os.path.realpath`` check and a
+    subsequent ``read_text``: an attacker who wins the race could
+    swap the file for a symlink between check and open. ``O_NOFOLLOW``
+    makes the kernel refuse to follow a terminal-component symlink at
+    open time (returns ELOOP / errno 40), so we either get the real
+    file or nothing. Falls back to a plain read on platforms missing
+    the flag (Windows). Tier-4 hardening.
+    """
+    o_nofollow = getattr(os, "O_NOFOLLOW", None)
+    if o_nofollow is None:
+        # Windows etc. — symlinks are rare and read_text() suffices.
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+    try:
+        fd = os.open(str(path), os.O_RDONLY | o_nofollow)
+    except OSError as e:
+        # ELOOP (40) means the final component was a symlink — refuse
+        # silently so the caller can log + continue. Other errors
+        # (ENOENT, EACCES) propagate as None too — we never crashed
+        # the agent on a missing skill.
+        log.warning("read_skill: O_NOFOLLOW open rejected %s (%s)", path, e)
+        return None
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
 def read_skill(name: str) -> str | None:
     """Read full skill content by name (searches nested and flat).
 
@@ -134,6 +226,10 @@ def read_skill(name: str) -> str | None:
     """
     _ensure_dir()
 
+    if not _name_is_safe(name):
+        log.warning("read_skill: rejected unsafe name %r", name)
+        return None
+
     for root in (_SKILLS_DIR, _DEFAULT_SKILLS_PACKAGE):
         if not root.exists():
             continue
@@ -142,12 +238,28 @@ def read_skill(name: str) -> str | None:
         for path in root.rglob("SKILL.md"):
             rel = path.relative_to(root)
             if len(rel.parts) >= 2 and rel.parts[-2] == name:
-                return path.read_text(encoding="utf-8")
+                if not _is_within(path, root):
+                    log.warning(
+                        "read_skill: skipping symlink-escape %s -> %s",
+                        path, os.path.realpath(str(path)),
+                    )
+                    continue
+                content = _read_text_nofollow(path)
+                if content is not None:
+                    return content
 
         # Try flat match
         flat = root / f"{name}.md"
         if flat.exists():
-            return flat.read_text(encoding="utf-8")
+            if not _is_within(flat, root):
+                log.warning(
+                    "read_skill: skipping symlink-escape %s -> %s",
+                    flat, os.path.realpath(str(flat)),
+                )
+                continue
+            content = _read_text_nofollow(flat)
+            if content is not None:
+                return content
 
     # Fuzzy match — only on user dir (avoid picking package skills
     # by accident when the user clearly meant their own).
@@ -155,12 +267,20 @@ def read_skill(name: str) -> str | None:
     for path in _SKILLS_DIR.rglob("SKILL.md"):
         rel = path.relative_to(_SKILLS_DIR)
         if len(rel.parts) >= 2 and name in rel.parts[-2]:
-            candidates.append(path)
+            if _is_within(path, _SKILLS_DIR):
+                candidates.append(path)
     if not candidates:
-        candidates = list(_SKILLS_DIR.glob(f"*{name}*.md"))
+        for p in _SKILLS_DIR.glob(f"*{name}*.md"):
+            if _is_within(p, _SKILLS_DIR):
+                candidates.append(p)
 
     if candidates:
-        return candidates[0].read_text(encoding="utf-8")
+        # F7: route the fuzzy fallback through the same NOFOLLOW reader
+        # the exact-match path uses. Without this, an attacker could
+        # plant a symlink ``red-tea.md → /etc/shadow`` and a fuzzy
+        # search for "red" would happily resolve and read the target.
+        # Returns None when the candidate is a symlink.
+        return _read_text_nofollow(candidates[0])
 
     return None
 
@@ -168,38 +288,76 @@ def read_skill(name: str) -> str | None:
 def write_skill(name: str, content: str, category: str = "custom") -> str:
     """Create or update a skill."""
     _ensure_dir()
+    # F9: reject pathologically-large content. 1MB ceiling is generous
+    # for a procedural-memory entry; anything bigger is an LLM
+    # accident (transcript dump, base64-encoded blob) and writing it
+    # would just waste disk + slow every subsequent ``list_skills``.
+    if isinstance(content, str) and len(content.encode("utf-8")) > _WRITE_SKILL_MAX_BYTES:
+        return (
+            f"ERROR: skill content too large "
+            f"({len(content.encode('utf-8'))} > {_WRITE_SKILL_MAX_BYTES} bytes)"
+        )
     # Sanitize name
     name = re.sub(r"[^a-z0-9_-]", "-", name.lower())
     category = re.sub(r"[^a-z0-9_-]", "-", category.lower()) if category else "custom"
+
+    # F12: use atomic_write_text to eliminate the torn-write window where
+    # a Ctrl+C / power loss mid-write would leave SKILL.md half-written
+    # (and corrupt every subsequent read until the user manually fixes it).
+    from .atomic_io import atomic_write_text
 
     # Check if skill already exists (update in place)
     for path in _SKILLS_DIR.rglob("SKILL.md"):
         rel = path.relative_to(_SKILLS_DIR)
         if len(rel.parts) >= 2 and rel.parts[-2] == name:
-            path.write_text(content, encoding="utf-8")
+            atomic_write_text(path, content)
             return f"OK: skill '{name}' updated ({len(content)} chars)"
 
     # Create new in category/name/SKILL.md
     skill_dir = _SKILLS_DIR / category / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     path = skill_dir / "SKILL.md"
-    path.write_text(content, encoding="utf-8")
+    atomic_write_text(path, content)
     return f"OK: skill '{category}/{name}' created ({len(content)} chars)"
 
 
 def delete_skill(name: str) -> str:
     """Delete a skill (removes entire skill directory)."""
+    # F11: name validation gate. Without it, a name like "../../../etc"
+    # hit ``_SKILLS_DIR.rglob("SKILL.md")`` (which only walks under the
+    # skills root, harmless) BUT the discovered ``skill_dir = path.parent``
+    # could be a symlink pointing outside the skills root, and then
+    # ``shutil.rmtree`` happily followed it. Refuse unsafe names up
+    # front and verify the resolved directory is contained before
+    # rmtree.
+    if not _name_is_safe(name):
+        return f"ERROR: invalid skill name '{name}'"
+
     # Find nested
     for path in _SKILLS_DIR.rglob("SKILL.md"):
         rel = path.relative_to(_SKILLS_DIR)
         if len(rel.parts) >= 2 and rel.parts[-2] == name:
             skill_dir = path.parent
+            if not _is_within(skill_dir, _SKILLS_DIR):
+                # Symlink-escape: refuse to rmtree something outside
+                # the skills directory.
+                log.warning(
+                    "delete_skill: refusing rmtree %s (escapes %s)",
+                    skill_dir, _SKILLS_DIR,
+                )
+                return f"ERROR: skill '{name}' resolves outside skills root"
             shutil.rmtree(skill_dir)
             return f"OK: skill '{name}' deleted"
 
     # Try flat
     flat = _SKILLS_DIR / f"{name}.md"
     if flat.exists():
+        if not _is_within(flat, _SKILLS_DIR):
+            log.warning(
+                "delete_skill: refusing unlink %s (escapes %s)",
+                flat, _SKILLS_DIR,
+            )
+            return f"ERROR: skill '{name}' resolves outside skills root"
         flat.unlink()
         return f"OK: skill '{name}' deleted"
 

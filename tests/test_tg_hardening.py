@@ -97,10 +97,13 @@ def test_offset_default_zero_when_no_file(isolated_offset):
 
 
 def test_offset_default_zero_on_corrupt_file(isolated_offset):
+    # F18: corrupt file now returns -1 sentinel (skip backlog) instead of
+    # 0, which used to cause a 24h replay storm of buffered updates after
+    # restart. The poll loop interprets -1 as "jump to latest pending".
     isolated_offset.parent.mkdir(parents=True, exist_ok=True)
     isolated_offset.write_text("not-a-number")
     bot = _make_bot()
-    assert bot._offset == 0
+    assert bot._offset == -1
 
 
 def test_save_offset_creates_parent_dir(isolated_offset, tmp_path):
@@ -117,8 +120,11 @@ def test_save_offset_creates_parent_dir(isolated_offset, tmp_path):
 
 def test_update_semaphore_bounds_concurrency(isolated_offset):
     bot = _make_bot()
-    # Default cap is 8 — there should be a semaphore, not None.
-    assert bot._update_sem._value == 8
+    # T4 redesign: a single global Semaphore was replaced with
+    # a per-chat semaphore + a global cap to prevent one chatty
+    # chat from starving others. Default global cap is 32.
+    assert bot._global_sem._value == 32
+    assert isinstance(bot._chat_sems, dict)
 
 
 def test_update_tasks_set_is_initialized(isolated_offset):

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import httpx
@@ -117,7 +118,11 @@ class AnthropicProvider(Provider):
     # ------------------------------------------------------------------
 
     def _build_body(self, req: CompletionRequest) -> dict[str, Any]:
-        system, messages = normalize_messages_anthropic(req.messages, system=req.system)
+        # GAP-9: pass current model so cross-model thinking signatures
+        # are dropped (Anthropic 400s on signature replay across models).
+        system, messages = normalize_messages_anthropic(
+            req.messages, system=req.system, current_model=req.model.id,
+        )
 
         body: dict[str, Any] = {
             "model": req.model.id,
@@ -253,8 +258,26 @@ class AnthropicProvider(Provider):
                 idx = payload.get("index", 0)
                 block = payload.get("content_block") or {}
                 if block.get("type") == "tool_use":
+                    raw_id = block.get("id")
+                    # F4 fix: anthropic-compat shims occasionally emit a
+                    # tool_use content block with no id (or id="").
+                    # Downstream the empty id would either be dropped by
+                    # the sanitizer (orphaning the paired tool_result) or
+                    # cause TOOL_CALL_DONE/DELTA to mismatch the agent's
+                    # pending-tool dict. Synthesize a stable id keyed on
+                    # the content block index so all subsequent deltas /
+                    # the final stop event line up on the same call_id.
+                    if not raw_id or not str(raw_id).strip():
+                        synthetic = f"toolu_auto_{idx}_{uuid.uuid4().hex[:16]}"
+                        logger.warning(
+                            "anthropic stream: tool_use block %s arrived "
+                            "without id; synthesizing %s",
+                            idx,
+                            synthetic,
+                        )
+                        raw_id = synthetic
                     active_tool[idx] = {
-                        "id": block.get("id"),
+                        "id": raw_id,
                         "name": block.get("name"),
                         "args": "",
                     }
@@ -297,15 +320,29 @@ class AnthropicProvider(Provider):
                 idx = payload.get("index", 0)
                 if idx in active_tool:
                     info = active_tool.pop(idx)
+                    # F3 fix (anthropic native flavour): on a JSON decode
+                    # error never silently substitute {} or _raw=... ,
+                    # both let the tool execute with bogus state. Signal
+                    # the parse failure to the agent loop via
+                    # tool_call_args=None and a human-readable preview
+                    # in tool_call_args_delta so it surfaces as an
+                    # ERROR ToolResultPart and skips execution.
+                    parse_error: str | None = None
+                    raw = info["args"] or ""
                     try:
-                        args_obj = json.loads(info["args"]) if info["args"] else {}
-                    except json.JSONDecodeError:
-                        args_obj = {"_raw": info["args"]}
+                        args_obj = json.loads(raw) if raw else {}
+                    except json.JSONDecodeError as exc:
+                        args_obj = None
+                        parse_error = (
+                            f"ERROR: invalid JSON in tool arguments: "
+                            f"{exc.msg} | preview: {raw[:200]}"
+                        )
                     yield StreamChunk(
                         kind=ChunkKind.TOOL_CALL_DONE,
                         tool_call_id=info["id"],
                         tool_call_name=info["name"],
                         tool_call_args=args_obj,
+                        tool_call_args_delta=parse_error,
                     )
                 continue
 

@@ -233,3 +233,70 @@ async def test_compact_now_no_event_when_queue_none() -> None:
     assert isinstance(new_msgs, list)
     assert isinstance(before, int)
     assert isinstance(after, int)
+
+
+# ── /compact UX status field (regression for "X → X tokens") ─────────
+
+
+@pytest.mark.asyncio
+async def test_compact_now_status_not_needed_for_short_buffer() -> None:
+    """User reported: pressing /compact on a 4-message session showed
+    'context compacted (~2826 → ~2826 tokens · 4 → 4 messages)' which
+    reads as 'compaction broken'. compact_now must return status
+    'not_needed' so the consumer can show a meaningful message."""
+    agent = _make_agent()
+    # Buffer ≤ keep-tail → compaction is a no-op by design.
+    msgs = [_user(f"hi-{i}") for i in range(_COMPACTION_KEEP_TAIL - 4)]
+    queue: asyncio.Queue = asyncio.Queue()
+    new_msgs, before, after = await agent.compact_now(msgs, queue=queue)
+
+    # Token counts unchanged
+    assert before == after
+    # Single AgentCompacted event with status='not_needed'
+    ev = queue.get_nowait()
+    assert type(ev).__name__ == "AgentCompacted"
+    assert ev.status == "not_needed"
+    assert ev.manual is True
+    # No subsequent events
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_compact_now_status_no_change_when_summarizer_returns_empty() -> None:
+    """Buffer is large enough to compact, but the summarizer returns
+    empty/error and _compact_context falls back to the original
+    buffer. status='no_change' so consumer can tell the user the
+    compaction didn't actually reduce size."""
+    agent = _make_agent()
+    # Override mesh to return a STOP with no TEXT — simulates a
+    # provider that errored out of summarization.
+    agent.mesh = _FakeMesh(summary="")
+
+    msgs = [_user(f"msg-{i}" * 200) for i in range(_COMPACTION_KEEP_TAIL + 5)]
+    queue: asyncio.Queue = asyncio.Queue()
+    new_msgs, before, after = await agent.compact_now(msgs, queue=queue)
+
+    # _compact_context returns input unchanged when summary is empty
+    assert new_msgs is msgs
+    assert before == after
+
+    ev = queue.get_nowait()
+    assert ev.status == "no_change", (
+        f"expected status='no_change' when summarizer fails, got "
+        f"{ev.status!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_compact_now_status_ok_when_compaction_actually_works() -> None:
+    """Sanity check: when compaction actually reduces size,
+    status is 'ok'. The other two test the failure shapes."""
+    agent = _make_agent()
+    # Long history, mesh returns a real summary
+    msgs = [_user("x" * 4000) for _ in range(_COMPACTION_KEEP_TAIL + 8)]
+    queue: asyncio.Queue = asyncio.Queue()
+    new_msgs, before, after = await agent.compact_now(msgs, queue=queue)
+
+    assert before > after, "compaction should reduce token estimate"
+    ev = queue.get_nowait()
+    assert ev.status == "ok"

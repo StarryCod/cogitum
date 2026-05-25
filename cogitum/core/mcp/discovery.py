@@ -106,7 +106,7 @@ def _make_call_fn(server: str, tool: str, manager: MCPManager):
     """
 
     async def _call(**kwargs: Any) -> str:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
             lambda: manager.call_tool(server, tool, kwargs),

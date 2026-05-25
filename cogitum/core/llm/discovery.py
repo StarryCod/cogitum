@@ -42,6 +42,15 @@ def resolve_secret_ref(ref: str) -> str:
     scheme = scheme.lower()
 
     if scheme == "plain":
+        # Hard log + soft warning — `warnings.warn` is silent in many
+        # production deployments, but this is exactly the case where the
+        # operator should hear about it. Logger goes to whichever handler
+        # is configured (stderr by default), warnings.warn keeps the old
+        # contract for code that filters DeprecationWarning-style streams.
+        logger.warning(
+            "plain: secret_ref used — value is in cleartext on disk. "
+            "Prefer env:VAR_NAME or keyring:service:account."
+        )
         warnings.warn(
             "plain: secret_ref used for discovery — move to env/keyring for production.",
             stacklevel=2,

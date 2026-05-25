@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cogitum"
-version = "0.7.1"
+version = "0.8.0"
 description = "Cogitum — sovereign agentic CLI. Imperial Fists colorway."
 requires-python = ">=3.11"
 authors = [{ name = "Starred" }]

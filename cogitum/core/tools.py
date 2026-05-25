@@ -191,11 +191,27 @@ class ToolSpec:
         }
 
     async def call(self, **kwargs: Any) -> Any:
-        """Invoke the tool, handling both sync and async callables."""
+        """Invoke the tool, handling both sync and async callables.
+
+        Bug fix (audit C1): a sync function may *return* a coroutine or other
+        awaitable (e.g. ``functools.partial`` over an async fn, decorators that
+        wrap an async coro in a sync return, etc.). ``iscoroutinefunction``
+        only detects ``async def`` declarations — it returns ``False`` for
+        these wrappers. Without the post-call ``isawaitable`` check we'd
+        ``str()`` the coroutine object into the tool result and the model
+        would receive ``<coroutine object foo at 0x...>`` instead of the real
+        output. That's the original "tool output stops reaching the model"
+        symptom. Always check the *result* and await it if needed.
+        """
         if asyncio.iscoroutinefunction(self.fn):
-            return await self.fn(**kwargs)
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: self.fn(**kwargs))
+            result = await self.fn(**kwargs)
+        else:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, lambda: self.fn(**kwargs))
+        # Sync fns can still return awaitables — await them too.
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
 
 # ---------------------------------------------------------------------------

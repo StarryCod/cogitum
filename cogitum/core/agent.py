@@ -14,9 +14,11 @@ Events emitted on the queue (all are dataclasses):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
@@ -63,6 +65,12 @@ _RETRY_CONFIRM_THRESHOLD = 3
 # owns this timer so the two timers can't race.
 _RETRY_CONFIRM_TIMEOUT = 5.0
 
+# Sentinel used by the approval-future machinery to signal that a duplicate
+# call_id arrived and the existing future was preempted. Receivers must
+# detect this and treat the duplicate request as REJECTED rather than
+# crashing on a non-string decision.
+_DUPLICATE_ID_SENTINEL = "__cogitum_duplicate_call_id__"
+
 
 def _retry_confirm_enabled() -> bool:
     """Read the user's preference fresh each call.
@@ -75,7 +83,14 @@ def _retry_confirm_enabled() -> bool:
         settings = load_settings() or {}
         other = settings.get("other") or {}
         return bool(other.get("retry_confirm_enabled", False))
-    except Exception:
+    except Exception as e:
+        # F40: was silent. A corrupt settings.toml silently disabled the
+        # retry-confirmation modal forever; operator never knew why the
+        # opt-in feature stopped responding to flips.
+        log.warning(
+            "settings load failed, retry_confirm disabled: %s: %s",
+            type(e).__name__, e,
+        )
         return False
 
 _RETRYABLE_STATUS_RE = re.compile(r"\b(429|5\d{2})\b")
@@ -319,6 +334,71 @@ def _compute_retry_delay(
 
 
 # ---------------------------------------------------------------------------
+# Delegate result classification (LEGION_RUN / DELEGATE_WORKERS /
+# DELEGATE_EXPERTS share the same set of "this came back as failure"
+# prefixes). Centralised so a new prefix is added in one place — F40
+# audit found three drifting copies of this list.
+# ---------------------------------------------------------------------------
+
+_DELEGATE_ERROR_PREFIXES = (
+    "ERROR:",
+    "REJECTED:",
+    "Internal error",
+    # _run_delegate_workers formats the header as
+    # "Workers completed (N/M success):" — N==0 means every worker
+    # failed. M==0 (zero tasks dispatched) is also surfaced as failure
+    # since the parent asked for work and got none done.
+    "Workers completed (0/",
+    # Symmetric guard for an experts-side "0 of N completed" header —
+    # the current _run_delegate_experts doesn't emit this format, but
+    # we want the prefix detected if/when it does.
+    "Experts completed (0/",
+    # A bare traceback string slipped through one of the delegate
+    # branches means an unhandled exception leaked into the result —
+    # always an error.
+    "Traceback (most recent call last):",
+)
+
+_DELEGATE_ERROR_SUBSTRINGS = (
+    "raised an exception",
+)
+
+
+# _format_tool_result_for_model is re-exported from tool_result_format so
+# subworker paths (legion_worker, delegate) can import the same normaliser
+# without a circular dep on agent.py. The leading-underscore alias preserves
+# existing call sites inside this module.
+from cogitum.core.tool_result_format import (  # noqa: E402
+    format_tool_result_for_model as _format_tool_result_for_model,
+)
+
+
+def _result_indicates_error(text: str) -> bool:
+    """Return True if a delegate / legion subagent result string looks like
+    an error.
+
+    Used by all three sentinel branches (LEGION_RUN, DELEGATE_WORKERS,
+    DELEGATE_EXPERTS) so the parent model sees a uniform error signal
+    no matter which dispatch path the failure came back through.
+
+    Detection rules:
+      - any of the prefixes in ``_DELEGATE_ERROR_PREFIXES`` at start
+      - any of the substrings in ``_DELEGATE_ERROR_SUBSTRINGS`` anywhere
+        (covers worker output that says "task X raised an exception:" mid
+        line — the swarm formatter doesn't always lead with ERROR:).
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    for p in _DELEGATE_ERROR_PREFIXES:
+        if text.startswith(p):
+            return True
+    for s in _DELEGATE_ERROR_SUBSTRINGS:
+        if s in text:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Agent events (sent over asyncio.Queue to the TUI)
 # ---------------------------------------------------------------------------
 
@@ -415,12 +495,22 @@ class AgentCompacted:
     its running ``tokens_used`` counter to the new authoritative
     value — without this, the cumulative bar keeps growing forever
     and the user can't see that compaction actually freed space.
+
+    ``status`` lets the consumer distinguish three outcomes for the
+    manual /compact path so the user gets a meaningful message
+    instead of "X → X tokens, N → N messages":
+      * ``ok`` — work was done, before/after differ
+      * ``not_needed`` — buffer fit in the keep-tail window so
+        compaction was a no-op by design
+      * ``no_change`` — compaction ran but didn't shrink anything
+        (summarizer returned same content, stream errored, etc.)
     """
     before_tokens: int
     after_tokens: int
     messages_before: int
     messages_after: int
     manual: bool = False
+    status: str = "ok"  # 'ok' | 'not_needed' | 'no_change'
 
 
 @dataclass
@@ -685,6 +775,16 @@ class AgentConfig:
     # Default OFF because the safety net catches mistakes; YOLO is an
     # explicit "I trust this run, don't interrupt me" switch.
     yolo_mode: bool = False
+    # F38: optional monotonic-clock deadline. When set, the approval
+    # gate automatically flips ``yolo_mode`` back to False the first
+    # time ``time.monotonic() > yolo_until``. Lets operators opt into
+    # a time-boxed YOLO ("just for the next 30 min") without
+    # remembering to /yolo off afterwards. None = permanent until
+    # manual toggle. We use monotonic, not wall-clock, so an NTP
+    # step-back / DST shift / manual clock edit can never extend a
+    # privileged window. Persistence is in-memory only — restart
+    # resets the TTL, which is the right security default anyway.
+    yolo_until: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +807,47 @@ class Agent:
         self.registry = registry
         self.cfg = config or AgentConfig()
         self._active_tool_tasks: list[asyncio.Task] = []
+        # Monotonically-increasing fallback counter for tool calls that
+        # arrive without a provider-supplied tool_call_id. The previous
+        # `f"call_{len(pending)}"` scheme could collide: pending shrinks
+        # when an entry is popped on TOOL_CALL_DONE, so the *next*
+        # idless tool call would reuse the same synthetic id and clobber
+        # the live entry of a still-streaming tool call. The counter is
+        # per-Agent-instance and never decreases.
+        self._tool_call_seq: int = 0
+        # Per-call_id futures for approval routing. The approval queue
+        # was FIFO-only, which silently swapped decisions when the
+        # model emitted multiple medium/danger tools in one batch and
+        # the user responded out of order (B-then-A in the UI but the
+        # agent paired the decisions in arrival order, not by call_id).
+        # Each pending approval now has its own Future keyed by
+        # ToolCallPart.id; consumers route by call_id. The
+        # `_approval_queue` attribute is still set as a non-None marker
+        # so the gating logic in _execute_tool stays a one-line check;
+        # actual decision routing is done via the futures map.
+        self._approval_futures: dict[str, asyncio.Future] = {}
+        # F3 fix: tool_call ids whose JSON arguments failed to parse on
+        # the wire. ``_execute_tool`` short-circuits with the stored
+        # error string and skips ``registry.execute`` so a malformed
+        # arguments blob never reaches a real side-effect. Cleared per
+        # turn (the ``run()`` loop owns the lifecycle).
+        self._malformed_tool_call_ids: dict[str, str] = {}
+        # Reference to the event loop the agent is running in. Captured
+        # lazily on the first ``run()`` call (loop only exists then) so
+        # cross-thread ``submit_approval`` callers (Telegram, Discord
+        # gateway threads) can safely route ``set_result`` via
+        # ``loop.call_soon_threadsafe`` instead of silently no-op-ing
+        # against a Future bound to a different loop.
+        self._main_loop: asyncio.AbstractEventLoop | None = None
+
+        # Serialises the two paths that mutate ``messages`` from outside
+        # the same loop iteration: the in-run ``_compact_context`` call
+        # and the manual ``compact_now`` triggered by /compact while
+        # ``run()`` is still streaming. Without the lock, both paths
+        # could compute compaction against different snapshots of the
+        # buffer and the next ``AgentTurnPersist`` would race the
+        # manual replace_messages on disk.
+        self._compact_lock = asyncio.Lock()
 
         # Wire the Legion worker once per Agent instance. The worker
         # callable closes over this agent's mesh + registry so every
@@ -729,9 +870,121 @@ class Agent:
             )
         )
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    async def aclose(self) -> None:
+        """Tear down per-Agent state safely.
+
+        Cancels every pending approval future so any tool-call coroutine
+        still suspended in ``await fut`` wakes up with CancelledError
+        instead of dangling forever — that path was leaking tasks on
+        TUI exit / TG ``bot.stop()`` because ``_approval_futures`` was
+        only ever pruned when a decision arrived. Idempotent: safe to
+        call twice during shutdown sequences.
+        """
+        # Snapshot first — cancelling a future can synchronously trigger
+        # callbacks that mutate the dict (the awaiter pops its own entry).
+        for call_id, fut in list(self._approval_futures.items()):
+            if fut is None or fut.done():
+                continue
+            try:
+                fut.cancel()
+            except Exception:
+                log.debug(
+                    "aclose: cancel failed for %s", call_id, exc_info=True,
+                )
+        self._approval_futures.clear()
+
+    def submit_approval(self, call_id: str, decision: str) -> bool:
+        """Route a user's approval decision to the waiting tool call.
+
+        Replaces the old FIFO `_approval_queue.put(...)` contract.
+        Decisions are paired with their request by `call_id`, not by
+        arrival order — so when the model emits two medium/danger
+        tools in parallel and the user clicks B-approve, A-reject in
+        any order, each decision still lands on the right call.
+
+        Returns True if a pending approval was found and routed; False
+        if the call_id is unknown (stale, already-resolved, or never
+        existed) or the decision string is malformed. Stale callbacks
+        from previous turns are ignored rather than corrupting future
+        approvals.
+
+        ``decision`` MUST be one of:
+          - ``"approve"``        — execute as-is
+          - ``"reject"``         — return REJECTED to the model
+          - ``"modify:<json>"``  — execute with the JSON-decoded args
+
+        Anything else returns False and logs a warning. This guard
+        protects against typos ("approbe"), kept-going UI contracts
+        ("yes"), or third-party gateways shoving raw user text in.
+
+        Thread-safety: safe to call from any thread. If invoked from a
+        thread other than the agent's main event loop (e.g. a Telegram
+        callback handler running in its own thread), the actual
+        ``Future.set_result`` is dispatched through
+        ``loop.call_soon_threadsafe`` so it lands on the right loop.
+        Cross-thread calls return True optimistically (the dispatch was
+        scheduled); the result is delivered asynchronously.
+        """
+        # Type guards: callback_data from Telegram (or any other gateway)
+        # can deliver None, dict, bytes, or other unexpected types if a
+        # caller skips proper deserialization. Reject anything that isn't
+        # a real string before touching string-only operations like
+        # `.startswith` so we fail closed instead of crashing the loop.
+        if not isinstance(call_id, str) or not isinstance(decision, str):
+            log.warning(
+                "submit_approval: non-string args call_id=%r decision=%r; ignoring",
+                call_id, decision,
+            )
+            return False
+        if not (
+            decision == "approve"
+            or decision == "reject"
+            or decision.startswith("modify:")
+        ):
+            log.warning(
+                "submit_approval: invalid decision=%r for call_id=%s; ignoring",
+                decision, call_id,
+            )
+            return False
+        fut = self._approval_futures.get(call_id)
+        if fut is None or fut.done():
+            return False
+
+        # Cross-thread routing. ``set_result`` on a Future bound to
+        # another loop is a silent no-op (the awaiter never wakes), so
+        # we MUST hop loops via ``call_soon_threadsafe`` when we detect
+        # the call originated from a non-main thread.
+        loop = self._main_loop
+        if loop is not None and loop.is_running():
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is not loop:
+                # Different loop (or no loop on this thread at all):
+                # marshal the resolution back to the agent's loop.
+                def _resolve() -> None:
+                    f = self._approval_futures.get(call_id)
+                    if f is None or f.done():
+                        return
+                    try:
+                        f.set_result(decision)
+                    except asyncio.InvalidStateError:
+                        # Concurrent resolver beat us — benign.
+                        pass
+                loop.call_soon_threadsafe(_resolve)
+                return True
+
+        try:
+            fut.set_result(decision)
+        except asyncio.InvalidStateError:
+            # Single-loop callers can't race here, but a TUI/TG dispatch
+            # arriving via ``loop.call_soon_threadsafe`` from another
+            # thread can land a second set_result between our ``done()``
+            # check and the call below. Treat it as a no-op rather than
+            # crashing the gateway/TUI handler.
+            return False
+        return True
 
     async def run(
         self,
@@ -759,13 +1012,16 @@ class Agent:
             loop finishes). This lets the TUI feed queued messages to the
             agent mid-turn.
         approval_queue : asyncio.Queue[str] | None
-            If provided, medium/danger tool calls emit AgentApprovalRequest
-            and wait for a decision string: ``"approve"``, ``"reject"``,
-            or ``"modify:<new_args_json>"``. The call_id is NOT part of
-            the payload — each agent run owns one queue and decisions are
-            consumed FIFO, so ordering pairs them with the corresponding
-            request automatically. If None, all tools execute without
-            approval.
+            Marker for "approval gating is active". When non-None,
+            medium/danger tool calls emit AgentApprovalRequest and
+            block until the user responds. When None, all tools
+            execute without approval.
+
+            Decisions are NOT routed through this queue — they go via
+            ``Agent.submit_approval(call_id, decision)`` which pairs
+            each user reply with the right pending tool by ``call_id``.
+            The queue parameter is kept as a non-None gating marker
+            for backward compatibility; nothing is ever read from it.
 
         Returns
         -------
@@ -774,6 +1030,21 @@ class Agent:
         """
         q = queue or asyncio.Queue()
         self._approval_queue = approval_queue
+        # Capture the running loop for cross-thread ``submit_approval``
+        # routing. Re-captured every run() in case the agent is reused
+        # across loops (rare, but harmless to refresh).
+        try:
+            self._main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._main_loop = None
+        # R3 fix (audit gap #10): clear stale parse-err entries from a
+        # previous run that may have been cancelled mid-stream BEFORE
+        # _execute_tool got a chance to pop the id. Otherwise a provider
+        # that uses sequential ids (vLLM-style call_0, call_1, ...) on a
+        # fresh run could collide with a stale id and have its first
+        # legitimate tool call short-circuited with a misleading parse
+        # error. This dict is per-run state, never per-Agent.
+        self._malformed_tool_call_ids.clear()
         messages: list[Message] = list(history or [])
 
         total_usage: Usage | None = None
@@ -825,7 +1096,12 @@ class Agent:
                 if (context_window > 0
                         and effective_tokens >= int(context_window * _CONTEXT_FILL_THRESHOLD)):
                     msgs_before = len(messages)
-                    messages = await self._compact_context(messages, q)
+                    # Hold the compaction lock so a manual /compact
+                    # racing in via compact_now can't snapshot the
+                    # buffer mid-rewrite. compact_now bails early
+                    # ('busy') when this is held.
+                    async with self._compact_lock:
+                        messages = await self._compact_context(messages, q)
                     accumulated_tokens = 0  # reset after compaction
                     after_tokens = self._estimate_prompt_tokens(messages)
                     await q.put(AgentCompacted(
@@ -883,18 +1159,55 @@ class Agent:
                     elif chunk.kind == ChunkKind.THINKING:
                         delta = chunk.thinking
                         await q.put(AgentThinking(delta=delta, turn=iteration))
+                        # P0-3 fix (audit_tools_history.md): Anthropic
+                        # streams thinking content and its cryptographic
+                        # signature as separate chunks — text deltas
+                        # arrive with signature=None, and the signature
+                        # itself comes in a final ``signature_delta``
+                        # block with empty text. Naively overwriting
+                        # ``signature`` on every chunk meant any
+                        # text-delta arriving after the signature_delta
+                        # (or a None-signature chunk landing later in
+                        # the merge) wiped the signature. Without it,
+                        # ``normalize_messages_anthropic`` drops the
+                        # whole thinking block and Anthropic refuses
+                        # to validate the model's prior reasoning on
+                        # follow-up turns. We now preserve the
+                        # signature once we've seen one, only updating
+                        # when a new non-empty signature arrives.
+                        new_sig = chunk.thinking_signature or None
+                        # GAP-9 fix (audit_r2_history.md): tag the
+                        # thinking with the model that produced it so
+                        # ``normalize_messages_anthropic`` can drop
+                        # stale signatures after a /model switch.
+                        # Anthropic binds signatures cryptographically
+                        # to a specific model — replaying a signature
+                        # from claude-3-5-sonnet against claude-opus-4
+                        # produces HTTP 400.
+                        cur_model = self.cfg.model or None
                         if assistant_thinking_parts:
+                            prev = assistant_thinking_parts[-1]
+                            kept_sig = new_sig if new_sig else prev.signature
                             assistant_thinking_parts[-1] = ThinkingPart(
-                                text=assistant_thinking_parts[-1].text + delta,
-                                signature=chunk.thinking_signature,
+                                text=prev.text + delta,
+                                signature=kept_sig,
+                                model=prev.model or cur_model,
                             )
                         else:
                             assistant_thinking_parts.append(
-                                ThinkingPart(text=delta, signature=chunk.thinking_signature)
+                                ThinkingPart(
+                                    text=delta,
+                                    signature=new_sig,
+                                    model=cur_model,
+                                )
                             )
 
                     elif chunk.kind == ChunkKind.TOOL_CALL_DELTA:
-                        cid = chunk.tool_call_id or f"call_{len(pending)}"
+                        if chunk.tool_call_id:
+                            cid = chunk.tool_call_id
+                        else:
+                            cid = f"call_{self._tool_call_seq}"
+                            self._tool_call_seq += 1
                         if cid not in pending:
                             pending[cid] = {
                                 "name": chunk.tool_call_name or "",
@@ -922,13 +1235,32 @@ class Agent:
                                 "name": chunk.tool_call_name or "",
                                 "args_buf": "",
                             }
-                        # prefer fully-parsed args if provider sent them
-                        if chunk.tool_call_args is not None:
+                        # F3 fix: provider parsers signal a JSON decode
+                        # failure with ``tool_call_args=None`` plus a
+                        # human-readable error string in
+                        # ``tool_call_args_delta``. Record the call_id
+                        # in ``self._malformed_tool_call_ids`` so
+                        # ``_execute_tool`` skips registry execution
+                        # and returns the ERROR straight to the model.
+                        # The args themselves default to ``{}`` for
+                        # downstream wire-shape (the tool_call still
+                        # has to appear in the assistant message so
+                        # the paired tool_result has a valid id).
+                        parse_err: str | None = None
+                        if chunk.tool_call_args is None and chunk.tool_call_args_delta:
+                            parse_err = chunk.tool_call_args_delta
+                            args = {}
+                        elif chunk.tool_call_args is not None:
                             args = chunk.tool_call_args
                         else:
                             try:
                                 args = json.loads(tc_info["args_buf"] or "{}")
-                            except json.JSONDecodeError:
+                            except json.JSONDecodeError as exc:
+                                preview = (tc_info["args_buf"] or "")[:200]
+                                parse_err = (
+                                    f"ERROR: invalid JSON in tool arguments: "
+                                    f"{exc.msg} | preview: {preview}"
+                                )
                                 args = {}
 
                         tc_part = ToolCallPart(
@@ -937,6 +1269,8 @@ class Agent:
                             arguments=args,
                         )
                         assistant_tool_calls.append(tc_part)
+                        if parse_err:
+                            self._malformed_tool_call_ids[cid] = parse_err
 
                         # Classify danger level
                         from cogitum.core.builtin_tools import classify_danger
@@ -981,12 +1315,26 @@ class Agent:
 
                 # flush any pending tool calls that never got TOOL_CALL_DONE
                 for cid, tc_info in pending.items():
+                    parse_err: str | None = None
                     try:
                         args = json.loads(tc_info["args_buf"] or "{}")
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as exc:
+                        # F3 fix (flush path): a stream that aborted mid
+                        # tool_call leaves args_buf as a truncated JSON
+                        # fragment. Falling back to ``{}`` would let the
+                        # tool execute with empty kwargs (e.g. ``git
+                        # status`` runs unintentionally). Mark malformed
+                        # so ``_execute_tool`` returns ERROR instead.
+                        preview = (tc_info["args_buf"] or "")[:200]
+                        parse_err = (
+                            f"ERROR: invalid JSON in tool arguments: "
+                            f"{exc.msg} | preview: {preview}"
+                        )
                         args = {}
                     tc_part = ToolCallPart(id=cid, name=tc_info["name"], arguments=args)
                     assistant_tool_calls.append(tc_part)
+                    if parse_err:
+                        self._malformed_tool_call_ids[cid] = parse_err
                     await q.put(AgentToolCall(
                         tool_name=tc_info["name"],
                         arguments=args,
@@ -1041,56 +1389,11 @@ class Agent:
                     break
 
                 # ── execute tools in parallel (cancellable) ────────────────
-                tool_tasks = [
-                    asyncio.create_task(self._execute_tool_indexed(i, tc, iteration, queue=q))
-                    for i, tc in enumerate(assistant_tool_calls)
-                ]
-                # Expose tasks so TUI can cancel them on Esc
-                self._active_tool_tasks = tool_tasks
-
-                # Collect results as they complete (stream to UI immediately)
-                tool_result_parts: list[ToolResultPart] = [None] * len(assistant_tool_calls)
-
-                try:
-                    for coro in asyncio.as_completed(tool_tasks):
-                        idx, result = await coro
-                        tc = assistant_tool_calls[idx]
-                        content = str(result)
-                        is_error = content.startswith("ERROR:")
-
-                        # Handle async-dispatched tool sentinels.
-                        # legion is the only one going forward; the
-                        # DELEGATE_* sentinels are kept ONLY because some
-                        # third-party MCP tools or legacy skills may still
-                        # emit them — new code should not.
-                        if content.startswith("LEGION_RUN:"):
-                            content = await self._run_legion(content[11:])
-                            is_error = content.startswith("ERROR:")
-                        elif content.startswith("DELEGATE_WORKERS:"):
-                            content = await self._run_delegate_workers(content[17:])
-                            is_error = False
-                        elif content.startswith("DELEGATE_EXPERTS:"):
-                            content = await self._run_delegate_experts(content[17:])
-                            is_error = False
-
-                        tool_result_parts[idx] = ToolResultPart(
-                            tool_call_id=tc.id,
-                            content=content,
-                            is_error=is_error,
-                        )
-                        # Stream result to UI immediately
-                        await q.put(AgentToolResult(
-                            tool_name=tc.name,
-                            call_id=tc.id,
-                            result=content,
-                            error=is_error,
-                            turn=iteration,
-                        ))
-                finally:
-                    self._active_tool_tasks = []
-
-                # Filter out None (shouldn't happen but safety)
-                tool_result_parts = [p for p in tool_result_parts if p is not None]
+                final_parts = await self._dispatch_tool_calls(
+                    assistant_tool_calls=assistant_tool_calls,
+                    queue=q,
+                    iteration=iteration,
+                )
 
                 # tool results go in as a "tool" role message — but
                 # only if we actually have results. Empty parts list
@@ -1098,9 +1401,9 @@ class Agent:
                 # signals every tool was cancelled mid-flight before
                 # producing anything; persisting an empty tool turn
                 # would leave the session in that wire-illegal state.
-                if tool_result_parts:
+                if final_parts:
                     messages.append(
-                        Message(role="tool", parts=tool_result_parts)
+                        Message(role="tool", parts=final_parts)
                     )
                     # Persist after tool results land: this is the
                     # most expensive thing we want crash-safe — a long
@@ -1164,76 +1467,17 @@ class Agent:
             # the canonical record of "what happened in this turn"
             # and operators rely on its presence.
             try:
-                # ── Fallback summary on no-text exits ────────────
-                # If the loop ended without producing a final
-                # assistant text response, ask the model for one
-                # extra closing turn WITHOUT tools so the user
-                # always gets a coherent end to the conversation.
-                # Hermes-agent does the same via
-                # ``_handle_max_iterations``.
-                #
-                # Trigger conditions (in priority order):
-                #   - turn_exit_reason in {max_turns_reached*,
-                #     empty_response, thinking_only_response}
-                #   - last_msg_role == "tool" (loop ended after a
-                #     tool batch and the model never got to comment
-                #     on it)
-                #
-                # Do NOT trigger on:
-                #   - end_turn — we already have a final response
-                #   - cancelled — user explicitly aborted
-                #   - exception:* — AgentError event already fired;
-                #     a second stream call risks the same exception
-                #
-                # Wrapped in try/except so a fallback failure can
-                # never mask the original exit. CancelledError
-                # propagates (not caught here) but the OUTER
-                # finally's nested try ensures the diagnostic still
-                # fires before propagation.
                 if not _suppress_fallback_summary:
                     try:
-                        needs_fallback = (
-                            (
-                                turn_exit_reason.startswith("max_turns_reached")
-                                or turn_exit_reason in (
-                                    "empty_response",
-                                    "thinking_only_response",
-                                )
-                                or (messages and messages[-1].role == "tool")
-                            )
-                            and not turn_exit_reason.startswith("exception:")
-                            and turn_exit_reason != "cancelled"
-                        )
-                        if needs_fallback:
-                            summary_text = await self._emit_fallback_summary(
-                                messages=list(messages),
+                        turn_exit_reason, final_response_len = (
+                            await self._run_fallback_summary_if_needed(
+                                messages=messages,
                                 queue=q,
                                 iteration=iteration,
-                                reason=turn_exit_reason,
+                                turn_exit_reason=turn_exit_reason,
+                                final_response_len=final_response_len,
                             )
-                            if summary_text:
-                                messages.append(Message(
-                                    role="assistant",
-                                    parts=[TextPart(text=summary_text)],
-                                ))
-                                final_response_len = len(summary_text)
-                                turn_exit_reason = (
-                                    f"{turn_exit_reason}+fallback_summary"
-                                )
-                                # Persist the fallback summary too —
-                                # it's the user-visible final answer.
-                                # Wrapped in try/except so a queue
-                                # rejection can't poison the run.
-                                try:
-                                    await q.put(AgentTurnPersist(
-                                        messages=list(messages),
-                                        iteration=iteration,
-                                    ))
-                                except Exception:
-                                    log.exception(
-                                        "AgentTurnPersist after fallback "
-                                        "failed (suppressed)"
-                                    )
+                        )
                     except asyncio.CancelledError:
                         # User cancelled mid-fallback. Mark and let
                         # it propagate AFTER the diagnostic in the
@@ -1244,10 +1488,6 @@ class Agent:
                             else turn_exit_reason
                         )
                         raise
-                    except Exception:
-                        log.exception(
-                            "Fallback summary failed (suppressed)"
-                        )
 
                 # ── AgentDone ────────────────────────────────────
                 # Emitted AFTER the fallback so the UI sees its
@@ -1269,63 +1509,403 @@ class Agent:
                             "AgentDone emission failed (suppressed)"
                         )
             finally:
-                # ── Turn-exit diagnostic ─────────────────────────
-                # Always logged, on EVERY exit path including
-                # cancellation that may have raised inside the
-                # fallback. WARNING level when the last message is
-                # a tool result — that's the "agent stopped
-                # mid-work" pattern users report as "model didn't
-                # see tool feedback". Hermes-agent uses the same
-                # shape.
-                #
-                # Wrapped in its own try/except so a malformed
-                # Message in ``messages`` can never poison
-                # Agent.run()'s return value (or, in the cancel
-                # path, mask the CancelledError).
-                try:
-                    last_msg_role = (
-                        messages[-1].role if messages else None
-                    )
-                    last_tool_name: str | None = None
-                    if last_msg_role == "tool":
-                        for m in reversed(messages):
-                            if m.role == "assistant" and m.tool_calls:
-                                last_tool_name = m.tool_calls[-1].name
-                                break
-                    tool_turns = sum(
-                        1 for m in messages
-                        if m.role == "assistant" and m.tool_calls
-                    )
-
-                    diag = (
-                        "Turn ended: reason=%s model=%s iterations=%d "
-                        "tool_turns=%d last_msg_role=%s last_tool=%s "
-                        "response_len=%d messages=%d"
-                    )
-                    level = (
-                        logging.WARNING
-                        if last_msg_role == "tool"
-                        else logging.INFO
-                    )
-                    log.log(
-                        level,
-                        diag,
-                        turn_exit_reason,
-                        self.cfg.model or "?",
-                        iteration,
-                        tool_turns,
-                        last_msg_role,
-                        last_tool_name
-                        or ("?" if last_msg_role == "tool" else "—"),
-                        final_response_len,
-                        len(messages),
-                    )
-                except Exception:
-                    log.exception(
-                        "Turn-exit diagnostic failed (suppressed)"
-                    )
+                self._emit_turn_exit_diagnostic(
+                    messages=messages,
+                    turn_exit_reason=turn_exit_reason,
+                    iteration=iteration,
+                    final_response_len=final_response_len,
+                )
 
         return messages
+
+    async def _dispatch_tool_calls(
+        self,
+        *,
+        assistant_tool_calls: list[ToolCallPart],
+        queue: asyncio.Queue[AgentEvent],
+        iteration: int,
+    ) -> list[ToolResultPart]:
+        """Run every ``assistant_tool_calls`` entry in parallel, collect results, repair wire shape.
+
+        Extracted from ``run()``'s per-iteration body. Mirrors the
+        original control flow exactly:
+
+          1. Spawn one task per tool_call via
+             ``_execute_tool_indexed`` and pin them on
+             ``self._active_tool_tasks`` so the TUI can cancel them on
+             ``Esc`` / ``/stop``.
+          2. As tasks complete, dispatch sentinel results
+             (``LEGION_RUN``, ``DELEGATE_WORKERS``, ``DELEGATE_EXPERTS``)
+             through the matching helper, classify the result via
+             ``_result_indicates_error`` for the legion/delegate paths
+             and ``startswith("ERROR:")`` for plain tool calls, and
+             stream each ``AgentToolResult`` to ``queue`` immediately
+             so the UI sees results as they arrive.
+          3. ``finally``: cancel any still-running tasks (with a
+             bounded 10s drain) so a misbehaving tool that ignores
+             ``CancelledError`` cannot wedge the run.
+          4. Wire-shape repair: synthesize a placeholder
+             ``ToolResultPart`` for every slot left ``None`` (cancel /
+             crash mid-flight) so the next provider request never
+             rejects the turn for "tool_use ids without matching
+             tool_result".
+
+        Returns the post-repair list of ``ToolResultPart`` entries.
+        Length is ALWAYS equal to ``len(assistant_tool_calls)`` —
+        this is the wire-shape invariant the caller depends on.
+
+        Cancellation
+        ------------
+        ``asyncio.CancelledError`` from the outer run (user
+        ``/stop``) propagates through this method so the run unwinds
+        cleanly. Sibling-cancel of an individual child task does
+        NOT propagate — its slot is repaired with a placeholder.
+        """
+        tool_tasks = [
+            asyncio.create_task(self._execute_tool_indexed(i, tc, iteration, queue=queue))
+            for i, tc in enumerate(assistant_tool_calls)
+        ]
+        # Expose tasks so TUI can cancel them on Esc
+        self._active_tool_tasks = tool_tasks
+
+        # Collect results as they complete (stream to UI immediately).
+        # Slots stay None until populated; the wire-shape contract
+        # requires len(parts) == len(assistant_tool_calls), so any
+        # surviving None is replaced with a synthesized error part
+        # in the finally block below.
+        tool_result_parts: list[ToolResultPart | None] = [None] * len(assistant_tool_calls)
+
+        try:
+            # NOTE (UX, audit M3): this loop awaits each completed
+            # task sequentially. Workers run in parallel via
+            # asyncio.create_task above, so wall-clock latency is
+            # unaffected — but the per-result postprocessing
+            # (LEGION_RUN/DELEGATE_*, queue emit, error
+            # classification) blocks the next iteration until done.
+            # In practice each branch is sub-millisecond unless a
+            # legion sub-run is invoked, in which case the whole
+            # sub-run is awaited inline and other completed
+            # workers wait. Acceptable for now: the legion path
+            # is the only one that can stall, and parallelising
+            # it would require restructuring the wire-shape
+            # repair (slot indices have to land in
+            # tool_result_parts in deterministic order).
+            for coro in asyncio.as_completed(tool_tasks):
+                try:
+                    idx, result = await coro
+                except asyncio.CancelledError:
+                    # Distinguish "outer run cancelled" (user
+                    # /stop) from "this child was cancelled
+                    # externally" (sibling-cancel after error,
+                    # explicit cancel of one task). On the
+                    # outer-cancel path we MUST re-raise so
+                    # the run unwinds. On the child-cancel
+                    # path we leave the slot as None and let
+                    # the placeholder synthesis below repair
+                    # the wire shape.
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling() > 0:
+                        raise
+                    continue
+                except BaseException:
+                    # Catastrophic child failure that bypassed
+                    # _execute_tool's broad Exception catch
+                    # (e.g. KeyboardInterrupt-derived). Leave
+                    # the slot None — synthesized below.
+                    continue
+                tc = assistant_tool_calls[idx]
+                content = str(result)
+                is_error = content.startswith("ERROR:")
+
+                # Handle async-dispatched tool sentinels.
+                # legion is the only one going forward; the
+                # DELEGATE_* sentinels are kept ONLY because some
+                # third-party MCP tools or legacy skills may still
+                # emit them — new code should not.
+                if content.startswith("LEGION_RUN:"):
+                    content = await self._run_legion(content[11:])
+                    # Use the shared classifier so a swarm that
+                    # came back with "Workers completed (0/N …)"
+                    # or a leaked traceback is still flagged.
+                    is_error = _result_indicates_error(content)
+                elif content.startswith("DELEGATE_WORKERS:"):
+                    content = await self._run_delegate_workers(content[17:])
+                    # Mirror LEGION_RUN: failures inside the delegated
+                    # subagent come back as "ERROR:" / "REJECTED:" /
+                    # "Internal error" prefixes, plus the
+                    # "Workers completed (0/…)" formatter signal
+                    # and bare-traceback leak. Hardcoding
+                    # is_error=False silently swallowed those — the
+                    # parent model couldn't tell a 50-worker swarm
+                    # crashed.
+                    is_error = _result_indicates_error(content)
+                elif content.startswith("DELEGATE_EXPERTS:"):
+                    content = await self._run_delegate_experts(content[17:])
+                    is_error = _result_indicates_error(content)
+
+                tool_result_parts[idx] = ToolResultPart(
+                    tool_call_id=tc.id,
+                    content=content,
+                    is_error=is_error,
+                )
+                # Stream result to UI immediately. Wrapped in
+                # suppress: a closed/overflowed consumer queue
+                # must not crash the run loop — the wire-shape
+                # repair below depends on tool_result_parts being
+                # appended to messages, not on the UI seeing it.
+                with contextlib.suppress(Exception):
+                    await queue.put(AgentToolResult(
+                        tool_name=tc.name,
+                        call_id=tc.id,
+                        result=content,
+                        error=is_error,
+                        turn=iteration,
+                    ))
+        finally:
+            # Cancel any tasks still running. Reaches this branch on:
+            #   (1) outer CancelledError (user /stop) — propagates after cleanup
+            #   (2) one task raised an unexpected BaseException — siblings
+            #       would otherwise keep running with no consumer (memory +
+            #       provider-cost leak, race with next turn's batch)
+            # We MUST drain so cancelled tasks don't surface as "Task was
+            # destroyed but it is pending!" warnings on shutdown.
+            pending = [t for t in tool_tasks if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                # Bounded drain. A misbehaving tool that ignores
+                # CancelledError (e.g. `try: await sleep(60); except
+                # CancelledError: continue`, or a sync subprocess.wait
+                # without timeout in a thread executor) would otherwise
+                # block this gather forever and the entire run would
+                # be unkillable until process restart. 10s is generous
+                # for any well-behaved cleanup path; anything beyond
+                # that is a tool bug we surface and move on from.
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*pending, return_exceptions=True),
+                        timeout=10.0,
+                    )
+                except asyncio.TimeoutError:
+                    log.warning(
+                        "tool task drain timed out (10s); %d tasks "
+                        "still pending after cancel — proceeding "
+                        "without them. Likely a tool that ignores "
+                        "CancelledError; check for sync subprocess "
+                        "or shielded sleep in the tool implementation.",
+                        sum(1 for t in pending if not t.done()),
+                    )
+            self._active_tool_tasks = []
+
+        # Wire-shape repair: every assistant tool_call MUST have a
+        # matching tool_result on the next turn or Anthropic/OpenAI
+        # reject the request with "tool_use ids without matching
+        # tool_result". Slots may stay None if the task was cancelled
+        # mid-flight before populating, or if a BaseException leaked
+        # past _execute_tool's try/except. Synthesize an error part
+        # so the wire stays legal.
+        for i, p in enumerate(tool_result_parts):
+            if p is None:
+                tc = assistant_tool_calls[i]
+                # Include the tool name so the model can pick a
+                # smarter retry strategy (re-run vs alternate tool)
+                # — generic "[Result unavailable]" is too thin a
+                # signal when 8 tools ran in parallel.
+                placeholder_text = (
+                    f"[Result unavailable for {tc.name} — tool "
+                    "execution was cancelled or crashed before "
+                    "producing a result. Re-run the tool if the "
+                    "data is still needed.]"
+                )
+                tool_result_parts[i] = ToolResultPart(
+                    tool_call_id=tc.id,
+                    content=placeholder_text,
+                    is_error=True,
+                )
+                # Emit a synthetic AgentToolResult so the UI shows
+                # the missing slot rather than a phantom in-flight tool.
+                # Wrapped in suppress for the same reason as the
+                # streaming emit above: the run loop must not die
+                # because a consumer dropped its queue.
+                with contextlib.suppress(Exception):
+                    await queue.put(AgentToolResult(
+                        tool_name=tc.name,
+                        call_id=tc.id,
+                        result=placeholder_text,
+                        error=True,
+                        turn=iteration,
+                    ))
+
+        # After repair, every slot is non-None. Narrow the type
+        # so downstream Message(parts=...) doesn't carry the
+        # `| None` union (mypy/pyright would flag the original).
+        final_parts: list[ToolResultPart] = [
+            p for p in tool_result_parts if p is not None
+        ]
+        assert len(final_parts) == len(assistant_tool_calls), (
+            "wire-shape invariant: every tool_call must have a "
+            "matching tool_result after orphan-slot repair"
+        )
+        return final_parts
+
+    async def _run_fallback_summary_if_needed(
+        self,
+        *,
+        messages: list[Message],
+        queue: asyncio.Queue[AgentEvent],
+        iteration: int,
+        turn_exit_reason: str,
+        final_response_len: int,
+    ) -> tuple[str, int]:
+        """Run the closing-summary fallback when the turn produced no final text.
+
+        Extracted from ``run()``'s outer ``finally``. Mutates
+        ``messages`` in place by appending the synthesized assistant
+        message; returns the (possibly updated) ``turn_exit_reason``
+        and ``final_response_len`` so the caller can keep its
+        diagnostic accurate.
+
+        If the loop ended without producing a final assistant text
+        response, ask the model for one extra closing turn WITHOUT
+        tools so the user always gets a coherent end to the
+        conversation. Hermes-agent does the same via
+        ``_handle_max_iterations``.
+
+        Trigger conditions (in priority order):
+          * ``turn_exit_reason`` in ``{max_turns_reached*, empty_response,
+            thinking_only_response}``
+          * ``last_msg_role == "tool"`` (loop ended after a tool batch
+            and the model never got to comment on it)
+
+        Do NOT trigger on:
+          * ``end_turn`` — we already have a final response
+          * ``cancelled`` — user explicitly aborted
+          * ``exception:*`` — ``AgentError`` event already fired; a
+            second stream call risks the same exception
+
+        Wrapped in try/except so a fallback failure can never mask the
+        original exit. ``CancelledError`` is **re-raised** by this
+        helper so the caller can update ``turn_exit_reason`` with
+        ``+fallback_cancelled`` and ensure the OUTER finally's nested
+        try still fires the diagnostic before propagation.
+        """
+        try:
+            needs_fallback = (
+                (
+                    turn_exit_reason.startswith("max_turns_reached")
+                    or turn_exit_reason in (
+                        "empty_response",
+                        "thinking_only_response",
+                    )
+                    or (messages and messages[-1].role == "tool")
+                )
+                and not turn_exit_reason.startswith("exception:")
+                and turn_exit_reason != "cancelled"
+            )
+            if needs_fallback:
+                summary_text = await self._emit_fallback_summary(
+                    messages=list(messages),
+                    queue=queue,
+                    iteration=iteration,
+                    reason=turn_exit_reason,
+                )
+                if summary_text:
+                    messages.append(Message(
+                        role="assistant",
+                        parts=[TextPart(text=summary_text)],
+                    ))
+                    final_response_len = len(summary_text)
+                    turn_exit_reason = (
+                        f"{turn_exit_reason}+fallback_summary"
+                    )
+                    # Persist the fallback summary too —
+                    # it's the user-visible final answer.
+                    # Wrapped in try/except so a queue
+                    # rejection can't poison the run.
+                    try:
+                        await queue.put(AgentTurnPersist(
+                            messages=list(messages),
+                            iteration=iteration,
+                        ))
+                    except Exception:
+                        log.exception(
+                            "AgentTurnPersist after fallback "
+                            "failed (suppressed)"
+                        )
+        except asyncio.CancelledError:
+            # Caller ``run()`` updates ``turn_exit_reason`` with the
+            # ``+fallback_cancelled`` suffix in its own except handler.
+            # We just re-raise here so the diagnostic still fires
+            # before propagation.
+            raise
+        except Exception:
+            log.exception(
+                "Fallback summary failed (suppressed)"
+            )
+        return turn_exit_reason, final_response_len
+
+    def _emit_turn_exit_diagnostic(
+        self,
+        *,
+        messages: list[Message],
+        turn_exit_reason: str,
+        iteration: int,
+        final_response_len: int,
+    ) -> None:
+        """Log the per-turn diagnostic line.
+
+        Always logged, on EVERY exit path including cancellation that
+        may have raised inside the fallback. WARNING level when the
+        last message is a tool result — that's the "agent stopped
+        mid-work" pattern users report as "model didn't see tool
+        feedback". Hermes-agent uses the same shape.
+
+        Wrapped in its own try/except so a malformed Message in
+        ``messages`` can never poison Agent.run()'s return value
+        (or, in the cancel path, mask the CancelledError).
+        """
+        try:
+            last_msg_role = (
+                messages[-1].role if messages else None
+            )
+            last_tool_name: str | None = None
+            if last_msg_role == "tool":
+                for m in reversed(messages):
+                    if m.role == "assistant" and m.tool_calls:
+                        last_tool_name = m.tool_calls[-1].name
+                        break
+            tool_turns = sum(
+                1 for m in messages
+                if m.role == "assistant" and m.tool_calls
+            )
+
+            diag = (
+                "Turn ended: reason=%s model=%s iterations=%d "
+                "tool_turns=%d last_msg_role=%s last_tool=%s "
+                "response_len=%d messages=%d"
+            )
+            level = (
+                logging.WARNING
+                if last_msg_role == "tool"
+                else logging.INFO
+            )
+            log.log(
+                level,
+                diag,
+                turn_exit_reason,
+                self.cfg.model or "?",
+                iteration,
+                tool_turns,
+                last_msg_role,
+                last_tool_name
+                or ("?" if last_msg_role == "tool" else "—"),
+                final_response_len,
+                len(messages),
+            )
+        except Exception:
+            log.exception(
+                "Turn-exit diagnostic failed (suppressed)"
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1664,7 +2244,12 @@ class Agent:
                 elif isinstance(part, ToolCallPart):
                     # arguments dump approximates wire size
                     try:
-                        total_chars += len(json.dumps(part.arguments))
+                        # ``ensure_ascii=False`` matches the wire serializer
+                        # used elsewhere in this file. The default escapes
+                        # every non-ASCII char as ``\uXXXX`` (~6× per glyph),
+                        # which inflates the count for Russian/CJK args and
+                        # triggers compaction prematurely on those locales.
+                        total_chars += len(json.dumps(part.arguments, ensure_ascii=False))
                     except (TypeError, ValueError):
                         total_chars += 64
                     total_chars += len(part.name) + 16  # name + framing
@@ -1746,7 +2331,33 @@ class Agent:
         # generous cap (vs the old 4 KB) so the summarizer actually
         # sees the substance instead of guessing from a truncated
         # snippet.
+        #
+        # P0-2 fix (audit_tools_history.md): each ToolResultPart carries
+        # its tool_call_id, but the structural pairing with the
+        # originating ToolCallPart was previously dropped — the
+        # summarizer saw "[tool_result]: 42" without knowing which
+        # tool produced it or with which arguments. We now walk the
+        # head once to build a tool_call_id → (name, args) map and
+        # render results as
+        #   [tool_result for <name>(<short_args>)]: <body>
+        # so the summary preserves "what was called" alongside "what
+        # came back".
         _HEAD_TOOL_RESULT_CAP = 16_000
+        _ARGS_PREVIEW_CAP = 200
+        tool_call_index: dict[str, tuple[str, str]] = {}
+        for msg in head:
+            for part in msg.parts:
+                if isinstance(part, ToolCallPart):
+                    args_repr = json.dumps(
+                        part.arguments, ensure_ascii=False, default=str
+                    )
+                    if len(args_repr) > _ARGS_PREVIEW_CAP:
+                        args_repr = (
+                            args_repr[:_ARGS_PREVIEW_CAP]
+                            + f"…[+{len(args_repr) - _ARGS_PREVIEW_CAP} chars]"
+                        )
+                    tool_call_index[part.id] = (part.name, args_repr)
+
         conversation_text_parts: list[str] = []
         for msg in head:
             role = msg.role
@@ -1759,9 +2370,16 @@ class Agent:
                     # Skip them to keep the summary focused.
                     continue
                 elif isinstance(part, ToolCallPart):
+                    args_repr = tool_call_index.get(
+                        part.id,
+                        (
+                            part.name,
+                            json.dumps(part.arguments, ensure_ascii=False, default=str),
+                        ),
+                    )[1]
                     conversation_text_parts.append(
-                        f"[{role}]: tool_call({part.name}, "
-                        f"{json.dumps(part.arguments, ensure_ascii=False)})"
+                        f"[{role}]: tool_call {part.name}(id={part.id}, "
+                        f"args={args_repr})"
                     )
                 elif isinstance(part, ToolResultPart):
                     body = part.content
@@ -1772,7 +2390,18 @@ class Agent:
                             + f"\n…[truncated {omitted} chars; "
                             f"full result was {len(part.content)} chars]"
                         )
-                    conversation_text_parts.append(f"[tool_result]: {body}")
+                    matching = tool_call_index.get(part.tool_call_id)
+                    if matching is not None:
+                        call_name, call_args = matching
+                        header = (
+                            f"[tool_result for {call_name}({call_args}) "
+                            f"id={part.tool_call_id}]"
+                        )
+                    else:
+                        # Orphaned result — keep id so the summarizer
+                        # still has something to anchor on.
+                        header = f"[tool_result id={part.tool_call_id}]"
+                    conversation_text_parts.append(f"{header}: {body}")
 
         conversation_dump = "\n".join(conversation_text_parts)
         compaction_prompt = (
@@ -1861,16 +2490,79 @@ class Agent:
         an ``AgentCompacted`` event on ``queue`` if provided so the
         TUI can refresh its inspector counters.
 
+        ``AgentCompacted.status`` distinguishes four outcomes for
+        UX clarity:
+          * ``not_needed`` — buffer ≤ ``_COMPACTION_KEEP_TAIL`` so
+            compaction would be a no-op. Consumer should tell the
+            user "history is small, nothing to compact" instead of
+            the misleading "context compacted (~X → ~X tokens, N → N
+            messages)" they got before.
+          * ``no_change`` — compaction ran but produced an identical
+            buffer (summarizer empty/error fallback). Consumer
+            should tell the user "compaction didn't reduce size".
+          * ``ok`` — buffer actually shrank.
+          * ``busy`` — a concurrent in-run compaction is already
+            holding the lock; we refuse rather than racing it. The
+            consumer should retry once the run is idle.
+
         Distinct from the in-loop trigger so the TUI can call this
         from the main coroutine while the agent is idle (no live
         ``run()`` task), without having to fake a turn.
         """
         msgs_before = len(messages)
         before_tokens = self._estimate_prompt_tokens(messages)
-        new_messages = await self._compact_context(
-            messages, queue or asyncio.Queue()
-        )
+
+        # Pre-flight: compaction is a no-op when the whole buffer
+        # already fits in the keep-tail window. Surface that clearly
+        # via status='not_needed' instead of doing the work and
+        # showing "X → X" deltas.
+        if msgs_before <= _COMPACTION_KEEP_TAIL:
+            if queue is not None:
+                await queue.put(AgentCompacted(
+                    before_tokens=before_tokens,
+                    after_tokens=before_tokens,
+                    messages_before=msgs_before,
+                    messages_after=msgs_before,
+                    manual=True,
+                    status="not_needed",
+                ))
+            return messages, before_tokens, before_tokens
+
+        # Refuse to race an in-run auto-compaction. The lock is held
+        # by run() during _compact_context; if we can't grab it
+        # immediately, the next AgentTurnPersist would clobber our
+        # snapshot anyway, so bail with a 'busy' status the consumer
+        # can surface as "agent busy, try again".
+        if self._compact_lock.locked():
+            if queue is not None:
+                await queue.put(AgentCompacted(
+                    before_tokens=before_tokens,
+                    after_tokens=before_tokens,
+                    messages_before=msgs_before,
+                    messages_after=msgs_before,
+                    manual=True,
+                    status="busy",
+                ))
+            return messages, before_tokens, before_tokens
+
+        async with self._compact_lock:
+            new_messages = await self._compact_context(
+                messages, queue or asyncio.Queue()
+            )
         after_tokens = self._estimate_prompt_tokens(new_messages)
+
+        # Post-flight: did the work actually do anything? An empty
+        # summarizer response or a stream error makes _compact_context
+        # return the original buffer unchanged. The user shouldn't
+        # see "compacted ~X → ~X" in that case either.
+        if (
+            len(new_messages) == msgs_before
+            and after_tokens == before_tokens
+        ):
+            status = "no_change"
+        else:
+            status = "ok"
+
         if queue is not None:
             await queue.put(AgentCompacted(
                 before_tokens=before_tokens,
@@ -1878,6 +2570,7 @@ class Agent:
                 messages_before=msgs_before,
                 messages_after=len(new_messages),
                 manual=True,
+                status=status,
             ))
         return new_messages, before_tokens, after_tokens
 
@@ -1899,56 +2592,315 @@ class Agent:
         queue: asyncio.Queue | None = None,
     ) -> str:
         """Execute a single tool call and return its string result.
-        
-        If approval_queue is set and tool is medium/danger, waits for approval.
+
+        Gating
+        ------
+        When ``self._approval_queue`` is non-None AND
+        ``classify_danger`` reports medium/danger AND
+        ``self.cfg.yolo_mode`` is False, this method:
+          1. Registers a per-call_id Future in ``self._approval_futures``.
+          2. Emits an ``AgentApprovalRequest`` on the event queue.
+          3. Blocks on ``asyncio.wait_for(fut, timeout=300.0)``.
+          4. Cleans up the future in ``finally`` (only if still ours).
+        Decisions are routed by ``Agent.submit_approval(call_id, decision)``.
+
+        Returns
+        -------
+        ``"REJECTED: ..."``
+            User rejected, modify-payload malformed, modify-payload not
+            a JSON object, approval timed out (300s), or duplicate
+            call_id pre-empted by a newer one.
+        ``"ERROR: ..."``
+            Tool raised, KeyError (unknown tool), TypeError (bad args),
+            or 300s execution timeout.
+        ``str(result)``
+            Happy path — the tool's stringified return value.
+
+        Raises
+        ------
+        asyncio.CancelledError
+            Propagates from ``registry.execute`` when the user
+            initiates a /stop or Esc. We deliberately do NOT catch it
+            here: catching CancelledError and returning a string would
+            let the agent loop happily continue past a cancellation
+            into the next turn. The parallel batch caller has a
+            ``finally`` block that cancels siblings and synthesizes
+            placeholder ToolResultParts to keep the wire shape legal.
         """
         from cogitum.core.builtin_tools import classify_danger
 
+        # F3 fix: short-circuit before any approval / registry call when
+        # the streamed arguments JSON failed to parse. Returning the
+        # ERROR string here means the model sees an explicit
+        # "your arguments were malformed" diagnostic instead of either
+        # (a) silently running the tool with an empty {} (truncated
+        # stream → unintended ``git status`` etc.) or (b) the older
+        # ``_raw=...`` injection that crashed strict-signature tools
+        # with TypeError. Once consumed, the entry is popped so a
+        # legitimate retry on the same call_id (provider replay) can
+        # execute normally.
+        parse_err = self._malformed_tool_call_ids.pop(tc.id, None)
+        if parse_err:
+            return parse_err
+
+        # Default exec args. Approval-modify path may override below;
+        # the gating block is the only place that can change this.
+        exec_args = tc.arguments
+
         # Check danger level and request approval if needed.
-        # YOLO mode short-circuits the gate entirely — the user has
-        # opted into "no questions asked" autonomy for this run.
-        danger = classify_danger(tc.name, tc.arguments)
-        if (danger in ("medium", "danger")
-                and self._approval_queue is not None
-                and not self.cfg.yolo_mode):
-            # Emit approval request
-            if queue:
-                await queue.put(AgentApprovalRequest(
-                    tool_name=tc.name,
-                    arguments=tc.arguments,
-                    call_id=tc.id,
-                    danger_level=danger,
-                    turn=turn,
-                ))
-            # Wait for approval decision
-            try:
-                decision = await asyncio.wait_for(
-                    self._approval_queue.get(), timeout=300.0  # 5 min to decide
-                )
-                if decision == "reject":
-                    return f"REJECTED: user denied execution of {tc.name}"
-                elif decision.startswith("modify:"):
-                    # User modified the arguments
-                    import json as _json
-                    try:
-                        tc.arguments = _json.loads(decision[7:])
-                    except _json.JSONDecodeError:
-                        pass  # keep original args
-                # "approve" or modified — proceed with execution
-            except asyncio.TimeoutError:
-                return f"REJECTED: approval timed out for {tc.name}"
+        early_return, exec_args = await self._acquire_tool_approval(
+            tc=tc,
+            turn=turn,
+            queue=queue,
+            exec_args=exec_args,
+        )
+        if early_return is not None:
+            return early_return
 
         try:
             result = await asyncio.wait_for(
-                self.registry.execute(tc.name, tc.arguments),
+                self.registry.execute(tc.name, exec_args),
                 timeout=300.0,  # 5 min max per tool (background can be long)
             )
-            return str(result)
+            # F6 + F7 fix: route every successful return through the
+            # central formatter so dict/list/None/empty-string results
+            # arrive at the model in predictable text. ``str(result)``
+            # used to emit "None", Python repr ({'a': 1}) and "" — all
+            # of which the model misreads as "tool produced nothing"
+            # and re-calls the same tool.
+            return _format_tool_result_for_model(result)
         except asyncio.TimeoutError:
             return f"ERROR: tool '{tc.name}' timed out after 300s. Try mode='background' for long-running commands."
-        except asyncio.CancelledError:
-            return "ERROR: tool execution cancelled by user"
-        except KeyError:
+        # NOTE: asyncio.CancelledError MUST propagate. Catching it here
+        # would turn a user-initiated /stop or Esc into a normal tool
+        # result string, and the agent loop would happily continue into
+        # the next turn instead of unwinding. The parallel batch finally
+        # block at the call site is responsible for cancelling siblings
+        # and synthesizing placeholder ToolResultParts for the wire.
+        except KeyError as exc:
+            return self._format_tool_error(exc, tc)
+        except TypeError as exc:
+            return self._format_tool_error(exc, tc)
+        except Exception as exc:
+            return self._format_tool_error(exc, tc)
+
+    async def _acquire_tool_approval(
+        self,
+        *,
+        tc: ToolCallPart,
+        turn: int,
+        queue: asyncio.Queue | None,
+        exec_args: dict,
+    ) -> tuple[str | None, dict]:
+        """Run the danger-gate / YOLO-TTL / approval flow for one tool call.
+
+        Extracted from ``_execute_tool``. Returns
+        ``(early_return, exec_args)``:
+          * ``early_return`` is ``None`` when the call should proceed
+            to actual execution. The caller passes ``exec_args`` to
+            ``registry.execute``.
+          * ``early_return`` is a non-None string when the call must
+            short-circuit (rejection, malformed modify payload,
+            duplicate-id preempt, approval timeout). The caller
+            returns it directly to the agent loop.
+
+        Behaviour mirrors the original inline block:
+
+          * YOLO TTL expiry is checked **before** danger
+            classification; an expired window is auto-disabled and
+            logged once (``time.monotonic`` so an NTP step-back can't
+            silently extend the privileged window).
+          * Per-``call_id`` futures: a duplicate id pre-empts the
+            in-flight waiter with ``_DUPLICATE_ID_SENTINEL`` so the
+            old waiter unwinds with an honest "preempted" diagnostic
+            rather than a misleading "user denied" string.
+          * The cleanup ``finally`` only pops the futures map slot
+            when it still holds **our** future, so a duplicate-id
+            replacement stays addressable.
+        """
+        from cogitum.core.builtin_tools import classify_danger
+
+        # YOLO mode short-circuits the gate entirely — the user has
+        # opted into "no questions asked" autonomy for this run.
+        # F38: if a TTL was set on /yolo on <minutes>, expire it lazily
+        # the first time the gate fires past the deadline. Logged once
+        # per expiry so the operator sees the auto-disable in the daemon
+        # log even if the chat session itself doesn't surface it. We use
+        # time.monotonic() rather than time.time() so an NTP step-back
+        # (or DST/clock-edit) can't silently extend a privileged window.
+        # yolo_until is set on /yolo on <minutes> from monotonic + ttl
+        # and never persisted across restarts, so monotonic semantics
+        # are safe (TTL resets on process restart, which is the right
+        # security default anyway).
+        if (
+            self.cfg.yolo_mode
+            and self.cfg.yolo_until
+            and time.monotonic() > self.cfg.yolo_until
+        ):
+            self.cfg.yolo_mode = False
+            self.cfg.yolo_until = None
+            log.info("/yolo expired — TTL elapsed, approval prompts restored")
+        danger = classify_danger(tc.name, tc.arguments)
+        if not (
+            danger in ("medium", "danger")
+            and self._approval_queue is not None
+            and not self.cfg.yolo_mode
+        ):
+            # Security guard: silent auto-approve when the gating
+            # condition above falls through. The most dangerous case is
+            # ``_approval_queue is None`` AND the tool is non-low — that
+            # means a headless or mis-wired front-end is executing
+            # medium/danger tools without ever showing the user a
+            # confirmation. Don't BLOCK (preserves existing batch /
+            # script behavior), but make the gap loud in the log so
+            # operators notice the missing approval consumer.
+            if (
+                danger != "low"
+                and self._approval_queue is None
+                and not self.cfg.yolo_mode
+            ):
+                log.warning(
+                    "No approval queue wired, auto-approving %s tool %s",
+                    danger, tc.name,
+                )
+            return None, exec_args
+
+        # Per-call_id approval: register a Future, emit the
+        # request, wait for our specific decision (NOT the next
+        # one off a shared queue — that path swapped decisions
+        # when the user replied out of order in a parallel batch).
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        # Defensive: collision on call_id MUST be loud, not silent.
+        # If a duplicate id arrives (provider replay, MCP server
+        # emitting non-unique ids, our own stream parser not
+        # filtering dupes), the new entry would otherwise overwrite
+        # the live future and the original call would hang for the
+        # full 300s timeout. Reject the orphan immediately so it
+        # unwinds with a clear REJECTED message instead.
+        existing = self._approval_futures.get(tc.id)
+        if existing is not None and not existing.done():
+            log.warning(
+                "approval future collision on call_id=%s — "
+                "preempting the stale call so it unwinds",
+                tc.id,
+            )
+            # Use a distinct sentinel so the OLD waiter can render
+            # an honest user-facing message ("preempted by duplicate
+            # call_id") instead of "user denied execution" — the
+            # operator never actually denied anything.
+            existing.set_result(_DUPLICATE_ID_SENTINEL)
+        self._approval_futures[tc.id] = fut
+        # Emit approval request
+        if queue:
+            await queue.put(AgentApprovalRequest(
+                tool_name=tc.name,
+                arguments=tc.arguments,
+                call_id=tc.id,
+                danger_level=danger,
+                turn=turn,
+            ))
+        # Wait for approval decision
+        try:
+            decision = await asyncio.wait_for(fut, timeout=300.0)
+            if decision == _DUPLICATE_ID_SENTINEL:
+                # The provider issued a *new* tool_use with the
+                # same call_id while this one was still pending.
+                # The new call took our slot in
+                # ``_approval_futures``. Return an honest
+                # diagnostic so the model sees what happened
+                # rather than a misleading "user denied" string.
+                return (
+                    f"ERROR: tool call {tc.name} was preempted "
+                    f"by a duplicate call_id from the provider"
+                ), exec_args
+            if decision == "reject":
+                return f"REJECTED: user denied execution of {tc.name}", exec_args
+            elif decision.startswith("modify:"):
+                # User modified the arguments. We do NOT mutate `tc` in
+                # place: it is shared with `messages` and with every
+                # AgentTurnPersist snapshot already emitted this turn.
+                # Mutating it would retroactively alter audit history.
+                # Instead, override exec_args locally for this run only.
+                import json as _json
+                payload = decision.removeprefix("modify:")
+                try:
+                    parsed = _json.loads(payload)
+                except _json.JSONDecodeError:
+                    # Malformed JSON in modify payload. Falling back to
+                    # the original args would silently turn "modify"
+                    # into "approve" — that's a contract violation:
+                    # the user explicitly chose modify, not approve.
+                    # Reject loudly so the model retries instead of
+                    # executing the original (possibly dangerous) args.
+                    log.warning(
+                        "submit_approval modify payload had invalid "
+                        "JSON for call_id=%s; rejecting rather than "
+                        "silently approving original args",
+                        tc.id,
+                    )
+                    return (
+                        f"REJECTED: modify payload for {tc.name} was malformed JSON",
+                        exec_args,
+                    )
+                if not isinstance(parsed, dict):
+                    # Modify payload must be an object — anything else
+                    # (list, scalar) is malformed and reaches the same
+                    # contract violation as bad JSON.
+                    log.warning(
+                        "submit_approval modify payload was not a "
+                        "dict for call_id=%s (got %s); rejecting",
+                        tc.id, type(parsed).__name__,
+                    )
+                    return (
+                        f"REJECTED: modify payload for {tc.name} was not a JSON object",
+                        exec_args,
+                    )
+                exec_args = parsed
+            # decision == "approve" path: exec_args stays as-is (default).
+            # submit_approval already filters anything that's not one
+            # of {"approve", "reject", "modify:<json>"} so we can't
+            # land here with garbage.
+        except asyncio.TimeoutError:
+            return f"REJECTED: approval timed out for {tc.name}", exec_args
+        finally:
+            # Always clean up the future, even on cancel/timeout, so
+            # a late `submit_approval` call from a stale UI click
+            # cannot resolve a future that's no longer being awaited.
+            #
+            # IMPORTANT: only pop if the map slot still holds OUR
+            # future. A duplicate-id call may have already replaced
+            # us with a different future (with the old one resolved
+            # to "reject" so it unwinds). Popping unconditionally
+            # would orphan that replacement future and the second
+            # call would hang forever.
+            if self._approval_futures.get(tc.id) is fut:
+                self._approval_futures.pop(tc.id, None)
+
+        return None, exec_args
+
+    def _format_tool_error(
+        self,
+        exc: BaseException,
+        tc: ToolCallPart,
+    ) -> str:
+        """Format a tool execution exception into the agent-facing ``ERROR:`` string.
+
+        Dispatches on ``type(exc)``:
+          * ``KeyError`` — unknown tool. Suggests close matches and lists
+            the first 20 known tool names.
+          * ``TypeError`` — usually wrong/missing kwarg. Extracts the bad
+            argument name from the exception message and emits a FIX hint.
+          * Any other ``Exception`` — generic failure with type name and
+            the args the model passed.
+
+        ``KeyError`` and ``TypeError`` paths preserve the same
+        ``log.warning(...)`` calls the inline branches used to make so
+        operator log shape is unchanged. ``KeyError`` was previously
+        unlogged on the inline path; that's preserved here too — the
+        \"unknown tool\" string fed back to the model is the diagnostic.
+        """
+        if isinstance(exc, KeyError):
             # Suggest similar tool names
             available = list(self.registry._tools.keys()) if hasattr(self.registry, '_tools') else []
             from difflib import get_close_matches
@@ -1959,7 +2911,7 @@ class Agent:
                 f"Available tools: {', '.join(sorted(available)[:20])}. "
                 f"DO NOT call this tool again. Pick a real one from the list above."
             )
-        except TypeError as exc:
+        if isinstance(exc, TypeError):
             # Most common: wrong argument names
             msg = str(exc)
             hint = ""
@@ -1974,14 +2926,13 @@ class Agent:
                 hint = f"\nFIX: You forgot a required argument for '{tc.name}'."
             log.warning("Tool %s TypeError: %s | args=%s", tc.name, exc, tc.arguments)
             return f"ERROR: TypeError in '{tc.name}': {exc}{hint}\nDO NOT repeat the same call. Read the error and fix the arguments."
-        except Exception as exc:
-            log.warning("Tool %s raised: %s | args=%s", tc.name, exc, tc.arguments)
-            return (
-                f"ERROR: {type(exc).__name__} in '{tc.name}': {exc}\n"
-                f"Args you passed: {tc.arguments}\n"
-                f"DO NOT repeat the same call with the same args. "
-                f"Either fix the arguments or try a different approach."
-            )
+        log.warning("Tool %s raised: %s | args=%s", tc.name, exc, tc.arguments)
+        return (
+            f"ERROR: {type(exc).__name__} in '{tc.name}': {exc}\n"
+            f"Args you passed: {tc.arguments}\n"
+            f"DO NOT repeat the same call with the same args. "
+            f"Either fix the arguments or try a different approach."
+        )
 
     # ------------------------------------------------------------------
     # Legion (recursive 2-level swarm) — supersedes delegate_task
@@ -2032,74 +2983,102 @@ class Agent:
     # ------------------------------------------------------------------
 
     async def _run_delegate_workers(self, payload_json: str) -> str:
-        """Execute parallel worker agents."""
-        import json
-        from .delegate import run_workers, WorkerTask
-        from .tools import REGISTRY
+        """Execute parallel worker agents.
 
+        Wrapped in a top-level try/except so any exception leaking out
+        of the delegate machinery (JSON edge cases, mesh failures,
+        registry import errors, asyncio cancellation paths) becomes an
+        ``ERROR: …`` string the dispatcher classifier flags as failure
+        instead of bubbling up and killing the run loop. The previous
+        behaviour terminated the entire agent run on a single bad
+        worker payload — confirmed via M1 audit.
+        """
         try:
-            task_list = json.loads(payload_json)
-        except json.JSONDecodeError as e:
-            return f"ERROR: invalid delegate payload: {e}"
+            import json
+            from .delegate import run_workers, WorkerTask
+            from .tools import REGISTRY
 
-        tasks = []
-        for t in task_list:
-            tasks.append(WorkerTask(
-                id=t.get("id", f"task-{len(tasks)}"),
-                goal=t.get("goal", ""),
-                context=t.get("context", ""),
-                model=t.get("model", "") or (self.cfg.model or ""),
-            ))
+            try:
+                task_list = json.loads(payload_json)
+            except json.JSONDecodeError as e:
+                return f"ERROR: invalid delegate payload: {e}"
 
-        results = await run_workers(
-            tasks, mesh=self.mesh, max_concurrent=10,
-            max_tokens=self.cfg.max_tokens,
-            tools_registry=REGISTRY,
-        )
+            tasks = []
+            for t in task_list:
+                tasks.append(WorkerTask(
+                    id=t.get("id", f"task-{len(tasks)}"),
+                    goal=t.get("goal", ""),
+                    context=t.get("context", ""),
+                    model=t.get("model", "") or (self.cfg.model or ""),
+                ))
 
-        # Format results
-        lines = []
-        for r in results:
-            status = "✓" if r.success else "✗"
-            lines.append(f"[{status}] {r.task_id} ({r.elapsed:.1f}s):")
-            if r.success:
-                lines.append(r.output[:2000])
-            else:
-                lines.append(f"  ERROR: {r.error}")
-            lines.append("")
+            results = await run_workers(
+                tasks, mesh=self.mesh, max_concurrent=10,
+                max_tokens=self.cfg.max_tokens,
+                tools_registry=REGISTRY,
+            )
 
-        return f"Workers completed ({sum(1 for r in results if r.success)}/{len(results)} success):\n\n" + "\n".join(lines)
+            # Format results
+            lines = []
+            for r in results:
+                status = "✓" if r.success else "✗"
+                lines.append(f"[{status}] {r.task_id} ({r.elapsed:.1f}s):")
+                if r.success:
+                    lines.append(r.output[:2000])
+                else:
+                    lines.append(f"  ERROR: {r.error}")
+                lines.append("")
+
+            return f"Workers completed ({sum(1 for r in results if r.success)}/{len(results)} success):\n\n" + "\n".join(lines)
+        except asyncio.CancelledError:
+            # Cancellation must propagate — the run loop is responsible
+            # for cleaning up, never us.
+            raise
+        except Exception as e:
+            log.exception("delegate_workers crashed")
+            return f"ERROR: delegate_workers crashed: {type(e).__name__}: {e}"
 
     async def _run_delegate_experts(self, payload_json: str) -> str:
-        """Execute expert review board."""
-        import json
-        from .delegate import run_expert_review
-        from .tools import REGISTRY
+        """Execute expert review board.
 
+        Same top-level guard as ``_run_delegate_workers``: any exception
+        becomes an ``ERROR: …`` string so M1's classifier surfaces it
+        and the run loop survives.
+        """
         try:
-            payload = json.loads(payload_json)
-        except json.JSONDecodeError as e:
-            return f"ERROR: invalid delegate payload: {e}"
+            import json
+            from .delegate import run_expert_review
+            from .tools import REGISTRY
 
-        content = payload.get("content", "")
-        experts = payload.get("experts", [])
-        # Use model from payload, fall back to agent's configured model
-        model = payload.get("model", "") or (self.cfg.model or "")
+            try:
+                payload = json.loads(payload_json)
+            except json.JSONDecodeError as e:
+                return f"ERROR: invalid delegate payload: {e}"
 
-        results = await run_expert_review(
-            content=content,
-            experts=experts or None,
-            mesh=self.mesh,
-            model=model,
-            max_tokens=2048,
-            tools_registry=REGISTRY,
-        )
+            content = payload.get("content", "")
+            experts = payload.get("experts", [])
+            # Use model from payload, fall back to agent's configured model
+            model = payload.get("model", "") or (self.cfg.model or "")
 
-        # Format results
-        lines = ["Expert Review Board Results:", ""]
-        for role, feedback in results.items():
-            lines.append(f"━━━ {role.upper()} ━━━")
-            lines.append(feedback[:1500])
-            lines.append("")
+            results = await run_expert_review(
+                content=content,
+                experts=experts or None,
+                mesh=self.mesh,
+                model=model,
+                max_tokens=2048,
+                tools_registry=REGISTRY,
+            )
 
-        return "\n".join(lines)
+            # Format results
+            lines = ["Expert Review Board Results:", ""]
+            for role, feedback in results.items():
+                lines.append(f"━━━ {role.upper()} ━━━")
+                lines.append(feedback[:1500])
+                lines.append("")
+
+            return "\n".join(lines)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("delegate_experts crashed")
+            return f"ERROR: delegate_experts crashed: {type(e).__name__}: {e}"

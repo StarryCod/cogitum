@@ -185,29 +185,79 @@ def split_message(text: str, max_len: int = 4096) -> list[str]:
     """Split a message into chunks that fit Telegram's limit.
 
     Tries to split on paragraph boundaries, then line boundaries.
+    If a chunk boundary lands inside a fenced code block, the fence is
+    re-balanced: the current chunk gets a closing ``` appended and the
+    next chunk gets ```<lang> prepended (language tag preserved from
+    the opening fence). Without this, a single split would emit
+    chunk-A with an unterminated fence and chunk-B with naked source
+    starting mid-line — Telegram renders the second one as plain text
+    with stray backticks.
     """
     if len(text) <= max_len:
         return [text]
 
     chunks = []
     remaining = text
+    # State: when a chunk leaves a fence open, the next chunk must
+    # be opened with this fence header (``` plus language tag).
+    pending_open_fence: str | None = None
+
+    fence_re = re.compile(r"^```([^\n`]*)$")
+
+    def fence_state(s: str) -> tuple[bool, str | None]:
+        """Return (is_open_at_end, last_open_fence_header_or_None).
+
+        Tracks `^```...$` toggles line-by-line. The header (``` plus
+        language tag, no trailing newline) of the most recent
+        unmatched opener is returned so the next chunk can re-open
+        with the same language.
+        """
+        open_header: str | None = None
+        is_open = False
+        for line in s.split("\n"):
+            m = fence_re.match(line.rstrip("\r"))
+            if not m:
+                continue
+            if is_open:
+                is_open = False
+                open_header = None
+            else:
+                is_open = True
+                lang = m.group(1).strip()
+                open_header = f"```{lang}" if lang else "```"
+        return is_open, open_header
 
     while remaining:
-        if len(remaining) <= max_len:
-            chunks.append(remaining)
+        prefix = pending_open_fence + "\n" if pending_open_fence else ""
+        budget = max_len - len(prefix)
+        # Reserve room for a possible closing fence (\n```), so a
+        # forced split inside a fence still fits under max_len.
+        budget_with_close = budget - 4
+
+        if len(remaining) <= budget:
+            chunks.append(prefix + remaining)
             break
 
-        # Try to split at paragraph boundary
-        split_at = remaining.rfind("\n\n", 0, max_len)
-        if split_at == -1 or split_at < max_len // 2:
-            # Try line boundary
-            split_at = remaining.rfind("\n", 0, max_len)
-        if split_at == -1 or split_at < max_len // 2:
-            # Force split at max_len
-            split_at = max_len
+        # Try paragraph, then line boundary, then hard split.
+        split_at = remaining.rfind("\n\n", 0, budget_with_close)
+        if split_at == -1 or split_at < budget_with_close // 2:
+            split_at = remaining.rfind("\n", 0, budget_with_close)
+        if split_at == -1 or split_at < budget_with_close // 2:
+            split_at = budget_with_close
 
-        chunks.append(remaining[:split_at])
-        remaining = remaining[split_at:].lstrip("\n")
+        head = remaining[:split_at]
+        tail = remaining[split_at:].lstrip("\n")
+
+        is_open, open_header = fence_state(prefix + head)
+        if is_open:
+            chunk = prefix + head.rstrip("\n") + "\n```"
+            pending_open_fence = open_header or "```"
+        else:
+            chunk = prefix + head
+            pending_open_fence = None
+
+        chunks.append(chunk)
+        remaining = tail
 
     return chunks
 

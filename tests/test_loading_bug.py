@@ -109,7 +109,7 @@ def test_agent_done_handler_sweeps_pending_cards():
 
 
 def test_agent_error_handler_sweeps_pending_cards():
-    block = _section_text("isinstance(event, AgentError)", "# Run agent")
+    block = _section_text("isinstance(event, AgentError)", "# rich tool cards")
     assert "mark_interrupted" in block, (
         "AgentError handler must sweep pending tool cards (regression: C1, C7)"
     )

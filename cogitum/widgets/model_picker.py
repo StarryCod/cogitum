@@ -216,6 +216,20 @@ class ModelPicker(ModalScreen[ResolvedModel | None]):
         scrollbar-background-active: {SURFACE};
         scrollbar-background-hover: {SURFACE};
     }}
+    /* Narrow terminals: drop the detail panel — the list alone gets
+       full width. The user can still see model info via Tab/Enter
+       which selects + dismisses; pressing Escape cancels. */
+    App.-narrow ModelPicker #picker-detail-scroll {{
+        display: none;
+    }}
+    App.-narrow ModelPicker #picker-list {{
+        width: 100%;
+    }}
+    App.-narrow ModelPicker #picker-shell {{
+        width: 100%;
+        height: 100%;
+        max-width: 100%;
+    }}
     #picker-detail {{
         height: auto;
     }}

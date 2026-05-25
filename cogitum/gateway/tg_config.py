@@ -5,11 +5,14 @@ Telegram gateway configuration — load/save telegram.toml.
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core.platform_paths import get_config_dir
+
+log = logging.getLogger(__name__)
 
 _CONFIG_DIR = get_config_dir()
 
@@ -67,18 +70,64 @@ class TelegramConfig:
         return False
 
 
+def _enforce_secure_perms(path: Path) -> None:
+    """Ensure telegram.toml is not readable by group or other.
+
+    The token is the bot's only credential — a stray ``chmod 644``
+    (e.g. by a backup tool, an editor, or a hand-edit) would expose
+    it to every local user. We re-tighten to 0600 on every load and
+    log a WARNING describing what we did, so the operator notices
+    that something dropped the perms.
+
+    POSIX-only by virtue of stat().st_mode bits; a no-op on Windows
+    (chmod is best-effort there too).
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return
+    if st.st_mode & 0o077:
+        log.warning(
+            "telegram.toml at %s has overly-permissive mode %#o; "
+            "tightening to 0600 (was group/other readable).",
+            path, st.st_mode & 0o777,
+        )
+        try:
+            path.chmod(0o600)
+        except OSError as e:
+            log.warning("Failed to chmod %s to 0600: %s", path, e)
+
+
 def load_tg_config() -> TelegramConfig:
-    """Load telegram.toml, return defaults if missing."""
+    """Load telegram.toml, return defaults if missing or unreadable.
+
+    A corrupted config (Ctrl+C mid-save before the atomic-write fix
+    that ships in this commit, manual hand-edit gone wrong, partial
+    write from a power loss) used to bubble tomllib.TOMLDecodeError
+    straight up to the caller — the bot would refuse to start with
+    an opaque traceback. We now log a warning and fall back to a
+    blank config so ``cog tg setup`` can rewrite a clean file
+    instead of demanding the user fix the corruption by hand.
+    """
     if not TG_CONFIG_PATH.exists():
         return TelegramConfig()
+    _enforce_secure_perms(TG_CONFIG_PATH)
     import sys
     if sys.version_info >= (3, 11):
         import tomllib
     else:
         import tomli as tomllib  # type: ignore[no-redef]
-    with open(TG_CONFIG_PATH, "rb") as f:
-        data = f.read()
-    raw = tomllib.loads(data.decode())
+    try:
+        with open(TG_CONFIG_PATH, "rb") as f:
+            data = f.read()
+        raw = tomllib.loads(data.decode())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        log.warning(
+            "telegram.toml at %s is unreadable or malformed (%s); "
+            "falling back to defaults. Run `cog tg setup` to rewrite.",
+            TG_CONFIG_PATH, e,
+        )
+        return TelegramConfig()
     tg = raw.get("telegram", raw)
     return TelegramConfig(
         bot_token=str(tg.get("bot_token", "")),
@@ -93,7 +142,18 @@ def load_tg_config() -> TelegramConfig:
 
 
 def save_tg_config(cfg: TelegramConfig) -> None:
-    """Write telegram.toml."""
+    """Write telegram.toml atomically.
+
+    Plain ``write_text`` left a window where Ctrl+C between
+    file-open-truncate and write-completion would corrupt the TOML
+    on disk — next ``load_tg_config`` then bombed with a parser
+    error and the bot wouldn't start. ``atomic_write_text`` writes
+    to a sibling ``.tmp`` and ``os.replace``s into place, so a
+    crash mid-save leaves either the previous content or the new
+    one — never a half-written file.
+    """
+    from ..core.atomic_io import atomic_write_text
+
     TG_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     chat_ids_repr = "[" + ", ".join(str(x) for x in cfg.allowed_chat_ids) + "]"
     lines = [
@@ -110,7 +170,7 @@ def save_tg_config(cfg: TelegramConfig) -> None:
         f'default_skill = "{cfg.default_skill}"',
         "",
     ]
-    TG_CONFIG_PATH.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(TG_CONFIG_PATH, "\n".join(lines))
     try:
         TG_CONFIG_PATH.chmod(0o600)
     except OSError:

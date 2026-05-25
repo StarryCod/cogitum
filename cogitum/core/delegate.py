@@ -27,6 +27,7 @@ from .events import (
     Message, TextPart, ToolCallPart, ToolResultPart,
     ChunkKind,
 )
+from .tool_result_format import format_tool_result_for_model
 
 log = logging.getLogger(__name__)
 
@@ -244,12 +245,19 @@ async def run_workers(
         return "".join(output_parts), tool_calls, error_parts
 
     async def _execute_tool(name: str, arguments: dict) -> str:
-        """Execute a tool and return string result."""
+        """Execute a tool and return string result.
+
+        Routes the registry return value through the shared
+        ``format_tool_result_for_model`` so a delegate subworker sees
+        the same shape the primary agent does — JSON for dict/list,
+        base64 for non-text bytes, "(no output)" for blanks, and an
+        "ERROR:" prefix for BaseException returns.
+        """
         if tools_registry is None:
             return "ERROR: no tools available"
         try:
             result = await tools_registry.execute(name, arguments)
-            return str(result) if result is not None else "(no output)"
+            return format_tool_result_for_model(result)
         except Exception as e:
             return f"ERROR: {type(e).__name__}: {e}"
 

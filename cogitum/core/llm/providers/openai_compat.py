@@ -333,16 +333,42 @@ class OpenAICompatProvider(Provider):
                     stop_reason = fr
                     # Emit completed tool calls.
                     for buf in tool_buffers.values():
+                        # F3 fix: never inject a synthetic `_raw` argument
+                        # into the tool's kwargs on JSONDecodeError. The
+                        # tool would either reject the unexpected kwarg
+                        # with TypeError or — worse — accept it via
+                        # **kwargs and run with garbled state. Instead
+                        # signal the parse failure via tool_call_args=None
+                        # plus an explicit error string carried in
+                        # tool_call_args_delta so the agent loop can emit
+                        # an ERROR ToolResultPart and skip execution.
+                        raw_args = buf["args"] or ""
+                        parse_error: str | None = None
                         try:
-                            args_obj = json.loads(buf["args"]) if buf["args"] else {}
-                        except json.JSONDecodeError:
-                            args_obj = {"_raw": buf["args"]}
+                            args_obj = json.loads(raw_args) if raw_args else {}
+                        except json.JSONDecodeError as exc:
+                            args_obj = None
+                            preview = raw_args[:200]
+                            parse_error = (
+                                f"ERROR: invalid JSON in tool arguments: "
+                                f"{exc.msg} | preview: {preview}"
+                            )
                         yield StreamChunk(
                             kind=ChunkKind.TOOL_CALL_DONE,
                             tool_call_id=buf["id"],
                             tool_call_name=buf["name"],
                             tool_call_args=args_obj,
+                            tool_call_args_delta=parse_error,
                         )
+                    # F16 fix: drop the buffer entries we just emitted.
+                    # Some providers send finish_reason on the same chunk
+                    # that carries the final tool_calls delta AND on a
+                    # follow-up empty chunk; without clearing, the second
+                    # finish_reason would re-emit every TOOL_CALL_DONE,
+                    # leading to duplicate assistant tool_use entries
+                    # (provider returns 400 "duplicate tool_use_id") or,
+                    # worse, double-execution of side-effectful tools.
+                    tool_buffers.clear()
 
         if total_usage.total:
             yield StreamChunk(kind=ChunkKind.USAGE, usage=total_usage)
@@ -399,10 +425,19 @@ class OpenAICompatProvider(Provider):
             idx = int(match.group(2)) if match.group(2) else len(tool_buffers)
             raw_args = match.group(3).strip()
 
+            # F3 fix: same as the streaming path — never inject `_raw`.
+            # Signal the parse failure with args=None plus a preview in
+            # the delta field so the agent loop skips execution and
+            # emits an ERROR result.
+            parse_error: str | None = None
             try:
                 args_obj = json.loads(raw_args) if raw_args else {}
-            except json.JSONDecodeError:
-                args_obj = {"_raw": raw_args}
+            except json.JSONDecodeError as exc:
+                args_obj = None
+                parse_error = (
+                    f"ERROR: invalid JSON in tool arguments: "
+                    f"{exc.msg} | preview: {raw_args[:200]}"
+                )
 
             # Generate a call ID if not provided
             call_id = f"call_inline_{name}_{idx}"
@@ -415,6 +450,7 @@ class OpenAICompatProvider(Provider):
                 tool_call_id=call_id,
                 tool_call_name=name,
                 tool_call_args=args_obj,
+                tool_call_args_delta=parse_error,
             ))
 
         return chunks

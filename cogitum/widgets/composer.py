@@ -47,6 +47,11 @@ COMMANDS: list[CommandDef] = [
     CommandDef("godmode", "Jailbreak prompt: /godmode [on|off|list|<preset>]", aliases=["gm"]),
     CommandDef("yolo", "Auto-approve all tools (autonomous mode): /yolo [on|off|toggle|status]", aliases=["y"]),
     CommandDef("compact", "Compact context now (free up tokens)", aliases=[]),
+    CommandDef(
+        "codegraph",
+        "Code intelligence graph: init/index/query/callers/callees/context/status",
+        aliases=["cg"],
+    ),
     CommandDef("clear", "Clear feed display", aliases=["cls", "c"]),
     CommandDef("help", "Show all commands", aliases=["h", "?"]),
     CommandDef("quit", "Exit Cogitum", aliases=["q", "exit"], shortcut="Ctrl+Q"),
@@ -88,6 +93,11 @@ class CommandMenu(Static):
         background: {BG_SOFT};
         border: round {RULE};
         padding: 0 1;
+    }}
+    /* On short terminals (≤24 rows) the dropdown overlay would devour
+       the feed pane — keep it small. */
+    App.-short CommandMenu {{
+        max-height: 4;
     }}
     CommandMenu.visible {{
         display: block;
@@ -244,6 +254,14 @@ class Composer(Widget):
         max-height: 20;
         width: 100%;
         layout: vertical;
+    }}
+    /* Short terminals: shrink the composer hard so the feed pane keeps
+       breathing room. ComposerArea below also collapses to 3 rows. */
+    App.-short Composer {{
+        max-height: 5;
+    }}
+    App.-short ComposerArea {{
+        max-height: 3;
     }}
     ComposerArea {{
         height: auto;

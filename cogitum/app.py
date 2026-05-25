@@ -5,14 +5,18 @@ from typing import ClassVar
 
 import asyncio
 
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.widgets import Static
 
 from .core.agent import Agent, AgentApprovalRequest, AgentCompacted, AgentConfig, AgentDone, AgentError, AgentInjected, AgentRetry, AgentRetryConfirm, AgentText, AgentThinking, AgentToolCall, AgentToolResult, AgentTurnPersist
-from .core.builtin_tools import *
+# builtin_tools is imported solely for the side-effect of registering all
+# @tool-decorated functions into REGISTRY at import time. Replacing the
+# previous `from ... import *` form prevents leaking the module's 60+
+# private names (including `subprocess`, `signal`, etc.) into this namespace.
+import cogitum.core.builtin_tools  # noqa: F401
 from .widgets.approval import ApprovalWidget
 from .core.llm.loader import load_mesh, load_settings, write_settings
 from .core.llm.refresh import refresh_all_providers
@@ -105,13 +109,17 @@ class CogitumApp(App):
     # ------------------------------------------------------------------
 
     def on_mount(self) -> None:
+        # Responsive: compute screen-class on first mount so widgets that
+        # read `app.has_class('-narrow')` have a defined truth even before
+        # the first resize event fires.
+        self._apply_screen_classes(self.size.width, self.size.height)
         feed = self.query_one("#feed-pane", Feed)
         _seed(feed)
         self._load_mesh_async()
         # Kick off model auto-discovery in the background. We MUST keep a
         # hard reference (asyncio runs may GC tasks otherwise — RUF006), so
         # the task lives in self._bg_tasks until its done-callback removes it.
-        bg = asyncio.ensure_future(self._auto_refresh_models())
+        bg = asyncio.create_task(self._auto_refresh_models())
         self._bg_tasks.add(bg)
         bg.add_done_callback(self._bg_tasks.discard)
 
@@ -119,7 +127,7 @@ class CogitumApp(App):
         # timeout, 12h cache), so it never blocks TUI startup. If it
         # finds a newer version on origin/master, it mounts an
         # UpdateBanner card in the feed.
-        upd_bg = asyncio.ensure_future(self._check_update_async())
+        upd_bg = asyncio.create_task(self._check_update_async())
         self._bg_tasks.add(upd_bg)
         upd_bg.add_done_callback(self._bg_tasks.discard)
 
@@ -139,8 +147,79 @@ class CogitumApp(App):
             log.debug("mcp watcher start failed", exc_info=True)
             self._mcp_watcher_task = None
 
+    # ------------------------------------------------------------------
+    # responsive screen-class plumbing
+    # ------------------------------------------------------------------
+
+    # Width thresholds (cols). Anything <= NARROW gets the '-narrow'
+    # class; anything between NARROW+1 and MEDIUM gets '-medium'; rest
+    # gets '-wide'. Matches the audit's «80 / 80-120 / >120» breakpoints.
+    _NARROW_W = 80
+    _MEDIUM_W = 120
+    # Height threshold for the '-short' class — drives banner/composer
+    # compaction on cramped terminals (default 24 rows or less).
+    _SHORT_H = 24
+
+    @classmethod
+    def screen_class_for(cls, width: int, height: int) -> tuple[str, bool]:
+        """Pure helper used by tests and the resize handler.
+
+        Returns ``(width_class, is_short)`` where ``width_class`` is one
+        of ``'-narrow' | '-medium' | '-wide'`` and ``is_short`` is True
+        when ``height <= _SHORT_H``.
+        """
+        if width <= cls._NARROW_W:
+            wcls = "-narrow"
+        elif width <= cls._MEDIUM_W:
+            wcls = "-medium"
+        else:
+            wcls = "-wide"
+        return wcls, height <= cls._SHORT_H
+
+    def _apply_screen_classes(self, width: int, height: int) -> None:
+        """Sync the App's `-narrow / -medium / -wide / -short` classes."""
+        wcls, is_short = self.screen_class_for(width, height)
+        for c in ("-narrow", "-medium", "-wide"):
+            if c == wcls:
+                self.add_class(c)
+            else:
+                self.remove_class(c)
+        if is_short:
+            self.add_class("-short")
+        else:
+            self.remove_class("-short")
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Recompute responsive classes whenever the terminal resizes."""
+        try:
+            w = event.size.width
+            h = event.size.height
+        except Exception:
+            w, h = self.size.width, self.size.height
+        self._apply_screen_classes(w, h)
+
     async def on_unmount(self) -> None:
         """Clean up resources on exit."""
+        # F35: cancel the MCP file watcher task before tearing down the
+        # mesh so it can't fire a rebuild against a half-closed agent.
+        # Without this, the watcher kept the file-watch handle alive
+        # until GC, leaking on every TUI restart.
+        watcher = getattr(self, "_mcp_watcher_task", None)
+        if watcher is not None and not watcher.done():
+            watcher.cancel()
+            try:
+                await asyncio.gather(watcher, return_exceptions=True)
+            except Exception:
+                log.debug("mcp watcher cancel failed", exc_info=True)
+        # F4: Cancel any pending tool-approval futures the user never
+        # answered — they'd otherwise leak as orphan asyncio tasks
+        # after the app loop tears down.
+        agent = getattr(self, "_agent", None)
+        if agent is not None:
+            try:
+                await agent.aclose()
+            except Exception:
+                log.debug("agent aclose failed", exc_info=True)
         mesh = getattr(self, "mesh", None)
         if mesh is not None:
             await mesh.aclose()
@@ -219,7 +298,7 @@ class CogitumApp(App):
         # Close old mesh if reloading (prevents httpx client leaks)
         old_mesh = getattr(self, "mesh", None)
         if old_mesh is not None:
-            asyncio.ensure_future(old_mesh.aclose())
+            asyncio.create_task(old_mesh.aclose())
         try:
             self.mesh = load_mesh()
             self.settings = load_settings()
@@ -502,7 +581,7 @@ class CogitumApp(App):
             )
             return
         # Kick off live refresh in background; doesn't block the picker.
-        bg = asyncio.ensure_future(self._refresh_then_reload())
+        bg = asyncio.create_task(self._refresh_then_reload())
         self._bg_tasks.add(bg)
         bg.add_done_callback(self._bg_tasks.discard)
         picker = ModelPicker(self.mesh, current=self.current_model)
@@ -524,7 +603,7 @@ class CogitumApp(App):
         """
         feed = self.query_one("#feed-pane", Feed)
         feed.append_system("refreshing models…", "setup closed")
-        bg = asyncio.ensure_future(self._refresh_then_reload())
+        bg = asyncio.create_task(self._refresh_then_reload())
         self._bg_tasks.add(bg)
         bg.add_done_callback(self._bg_tasks.discard)
 
@@ -606,9 +685,28 @@ class CogitumApp(App):
 
     @on(ApprovalWidget.Decided)
     def _on_approval_widget_decided(self, event: ApprovalWidget.Decided) -> None:
-        """Handle approval decision from TUI widget."""
-        if self._approval_queue:
-            self._approval_queue.put_nowait(event.decision)
+        """Route the user's decision to the specific tool call.
+
+        Each ApprovalWidget carries the `call_id` of its request, so
+        we route by call_id via Agent.submit_approval — never by the
+        old FIFO queue, which silently swapped decisions when the
+        user clicked widgets out of order in a parallel batch.
+
+        Stale clicks (call_id no longer pending — run ended, future
+        cancelled, double-click) are silently dropped: submit_approval
+        returns False and we log debug. We do NOT fall back to writing
+        into self._approval_queue: nothing reads from it anymore,
+        so a put_nowait there leaks bytes for nothing and confuses
+        future readers.
+        """
+        if self._agent is not None:
+            routed = self._agent.submit_approval(event.call_id, event.decision)
+            if not routed:
+                log.debug(
+                    "stale approval click for call_id=%s ignored "
+                    "(no live future)",
+                    event.call_id,
+                )
 
     # ------------------------------------------------------------------
 
@@ -629,11 +727,6 @@ class CogitumApp(App):
             self.query_one("#queue-bar", QueueBar).add(text)
             # Also push to inject_queue so agent picks it up between tool iterations
             self._inject_queue.put_nowait(text)
-            return
-
-        # Normal flow continues below
-        if False:
-            pass  # placeholder to keep elif chain valid
             return
 
         # Don't allow concurrent runs
@@ -724,293 +817,14 @@ class CogitumApp(App):
             log.debug("swallowed exception", exc_info=True)
 
         async def drain_queue() -> None:
-            nonlocal agent_block, thinking_block, waiting
-            while True:
-                event = await queue.get()
-
-                if isinstance(event, AgentText):
-                    # Stop waiting animation on first content
-                    if waiting is not None:
-                        waiting.stop()
-                        waiting = None
-                    if agent_block is None:
-                        agent_block = feed.append_agent()
-                    agent_block.append_delta(event.delta)
-                    self._streamed_text += event.delta
-                    # Realtime inspector update
-                    try:
-                        self.query_one("#inspector-widget", Inspector).stream_delta(len(event.delta))
-                    except Exception:
-                        log.debug("swallowed exception", exc_info=True)
-
-                elif isinstance(event, AgentThinking):
-                    # Stop waiting animation on first thinking
-                    if waiting is not None:
-                        waiting.stop()
-                        waiting = None
-                    if thinking_block is None:
-                        thinking_block = feed.append_thinking()
-                    thinking_block.append_delta(event.delta)
-                    # Realtime inspector update (thinking counts too)
-                    try:
-                        self.query_one("#inspector-widget", Inspector).stream_delta(len(event.delta))
-                    except Exception:
-                        log.debug("swallowed exception", exc_info=True)
-
-                elif isinstance(event, AgentRetry):
-                    # Show/restore friendly waiting indicator during retry
-                    # Pick a rotating label based on attempt number
-                    labels = WaitingIndicator._RETRY_LABELS
-                    label = labels[event.attempt % len(labels)]
-                    if waiting is None:
-                        waiting = feed.append_waiting()
-                    waiting.set_status(label)
-
-                elif isinstance(event, AgentRetryConfirm):
-                    # Fire-and-forget. Modal pops in parallel with the
-                    # agent's backoff sleep. Abort calls
-                    # ``action_cancel_agent`` directly from inside the
-                    # modal — no signaling back, cancellation
-                    # propagates through asyncio. Continue just closes
-                    # the modal and the agent's backoff finishes on
-                    # its own. We don't await push_screen_wait because
-                    # blocking drain_queue while the modal is open
-                    # would freeze TEXT/THINKING/RETRY events that the
-                    # agent might emit in the background.
-                    from .widgets.retry_confirm import RetryConfirmModal
-
-                    modal = RetryConfirmModal(
-                        attempt=event.attempt,
-                        max_attempts=event.max_attempts,
-                        error_class=event.error_class,
-                        error_message=event.error_message,
-                        auto_continue_in=event.auto_continue_in,
-                    )
-                    self.push_screen(modal)
-
-                elif isinstance(event, AgentTurnPersist):
-                    # Mid-run persistence checkpoint. The agent
-                    # finished some atomic state change (assistant
-                    # commit, tool results landed, fallback summary
-                    # appended) and wants the buffer flushed to disk.
-                    # If the run dies after this point, /resume picks
-                    # up exactly what was committed.
-                    #
-                    # event.messages is a SHARED reference to the
-                    # agent's internal buffer (see AgentTurnPersist
-                    # docstring). We update self._history to that
-                    # state and persist immediately. SessionStore.
-                    # replace_messages writes via temp+rename so an
-                    # interrupted disk write can't corrupt the file.
-                    try:
-                        self._history = list(event.messages)
-                        if self._session_id:
-                            from .core.sessions import get_store
-                            get_store().replace_messages(
-                                self._session_id, self._history,
-                            )
-                            self._session_msg_count = len(self._history)
-                    except Exception:
-                        log.debug(
-                            "mid-run persist failed (will retry on AgentDone)",
-                            exc_info=True,
-                        )
-
-                elif isinstance(event, AgentCompacted):
-                    # Compaction freed context — reset the inspector's
-                    # cumulative tokens_used to the new authoritative
-                    # estimate so the bar actually shows the recovered
-                    # space. Without this it keeps growing forever and
-                    # the user can't tell compaction did anything.
-                    try:
-                        inspector = self.query_one("#inspector-widget", Inspector)
-                        inspector.update_state(
-                            tokens_used=event.after_tokens,
-                            messages=event.messages_after,
-                        )
-                    except Exception:
-                        log.debug("swallowed exception", exc_info=True)
-                    feed.append_system(
-                        f"context compacted "
-                        f"(~{event.before_tokens} → ~{event.after_tokens} tokens · "
-                        f"{event.messages_before} → {event.messages_after} messages"
-                        + (" · manual" if event.manual else "")
-                        + ")",
-                        "compact",
-                    )
-
-                elif isinstance(event, AgentInjected):
-                    # A queued message was consumed mid-turn — remove from
-                    # _pending_messages so it isn't re-sent after AgentDone.
-                    try:
-                        self._pending_messages.remove(event.text)
-                    except ValueError:
-                        pass
-                    queue_bar = self.query_one("#queue-bar", QueueBar)
-                    queue_bar.clear()
-                    for msg in self._pending_messages:
-                        queue_bar.add(msg)
-                    # Render the injected message as a standalone user bubble,
-                    # then close the current agent block so the response
-                    # starts fresh in a new block.
-                    feed.append_user(event.text)
-                    if agent_block is not None:
-                        agent_block.finish_streaming()
-                        agent_block = None
-                    if thinking_block is not None:
-                        thinking_block.finish()
-                        thinking_block = None
-                    # Kill any lingering waiting indicator from the previous
-                    # turn so it doesn't stick around when the agent starts
-                    # responding to the injected message.
-                    if waiting is not None:
-                        waiting.stop()
-                        waiting = None
-                    # Show a fresh waiting indicator for the new response.
-                    waiting = feed.append_waiting()
-
-                elif isinstance(event, AgentToolCall):
-                    # Stop waiting on first tool call
-                    if waiting is not None:
-                        waiting.stop()
-                        waiting = None
-                    # Finish thinking block if open
-                    if thinking_block is not None:
-                        thinking_block.finish()
-                        thinking_block = None
-                    # New turn → new agent block next time
-                    agent_block = None
-
-                    if getattr(event, "preliminary", False):
-                        # Show "preparing..." card immediately
-                        card = feed.append_tool_call(
-                            event.tool_name, {}, event.call_id, preparing=True
-                        )
-                        tool_cards[event.call_id] = card
-                    else:
-                        # Full tool call — update existing card or create new
-                        existing = tool_cards.get(event.call_id)
-                        if existing:
-                            existing.set_arguments(event.arguments)
-                        else:
-                            card = feed.append_tool_call(
-                                event.tool_name, event.arguments, event.call_id
-                            )
-                            tool_cards[event.call_id] = card
-                        tool_calls_data[event.call_id] = event
-
-                elif isinstance(event, AgentApprovalRequest):
-                    # Show approval widget and wait for user decision
-                    from .widgets.approval import ApprovalWidget
-                    approval_widget = ApprovalWidget(
-                        tool_name=event.tool_name,
-                        arguments=event.arguments,
-                        call_id=event.call_id,
-                        danger_level=event.danger_level,
-                    )
-                    feed.mount(approval_widget)
-                    approval_widget.focus()
-
-                elif isinstance(event, AgentToolResult):
-                    card = tool_cards.get(event.call_id)
-                    # Replace generic card with a beautiful typed card
-                    tool_event = tool_calls_data.get(event.call_id)
-                    if card and tool_event:
-                        rich_card = self._make_rich_card(
-                            tool_event.tool_name,
-                            tool_event.arguments,
-                            event.result,
-                            event.error,
-                        )
-                        if rich_card:
-                            card.remove()
-                            feed.append_card(rich_card)
-                        else:
-                            card.set_result(event.result, error=event.error)
-                    elif card:
-                        card.set_result(event.result, error=event.error)
-                    # New agent block for next response
-                    agent_block = None
-                    # Show waiting indicator while agent processes results
-                    if waiting is None:
-                        waiting = feed.append_waiting()
-                        waiting.set_status("thinking…")
-
-                elif isinstance(event, AgentDone):
-                    if waiting is not None:
-                        waiting.stop()
-                        waiting = None
-                    if thinking_block is not None:
-                        thinking_block.finish()
-                    if agent_block is not None:
-                        agent_block.finish_streaming()
-                    # Final-sweep: any tool card still pending at AgentDone
-                    # means the agent finished without ever sending a result
-                    # for that call — rare, but if it happens the card would
-                    # otherwise stay on "running…" forever.
-                    for cid, card in tool_cards.items():
-                        card.mark_interrupted("(agent finished without sending result)")
-                    if waiting is not None:
-                        waiting.stop()
-                        waiting = None
-                    # H12: belt-and-suspenders — kill any stray
-                    # WaitingIndicator widgets that might have been mounted
-                    # via paths the local `waiting` variable doesn't track.
-                    for w in feed.query("WaitingIndicator"):
-                        try:
-                            w.stop()
-                        except Exception:
-                            log.debug("waiting.stop failed", exc_info=True)
-                    usage = event.usage
-                    # Approximate token count from streamed text if no usage reported
-                    approx_out = len(self._streamed_text) // 4 if not usage else 0
-                    approx_in = len(user_message) // 4 if not usage else 0
-
-                    in_tokens = usage.input_tokens if usage else approx_in
-                    out_tokens = usage.output_tokens if usage else approx_out
-                    cache_read = usage.cache_read_tokens if usage else 0
-                    cache_write = usage.cache_write_tokens if usage else 0
-
-                    feed.append_system(
-                        f"done · {event.turns} turn(s) · "
-                        f"in≈{in_tokens} out≈{out_tokens}",
-                        "usage",
-                    )
-                    # Update inspector with final counts + end streaming
-                    try:
-                        inspector = self.query_one("#inspector-widget", Inspector)
-                        inspector.stream_end()
-                        inspector.update_state(
-                            tokens_in=inspector.state.tokens_in + in_tokens,
-                            tokens_out=inspector.state.tokens_out + out_tokens,
-                            tokens_used=inspector.state.tokens_used + in_tokens + out_tokens,
-                            cache_read=inspector.state.cache_read + cache_read,
-                            cache_write=inspector.state.cache_write + cache_write,
-                            turns=inspector.state.turns + event.turns,
-                            messages=len(self._history),
-                        )
-                    except Exception:
-                        log.debug("swallowed exception", exc_info=True)
-                    return
-
-                elif isinstance(event, AgentError):
-                    if waiting is not None:
-                        waiting.stop()
-                        waiting = None
-                    # Final-sweep: an error tore the run mid-flight; any
-                    # tool card still in pending/preparing/running state will
-                    # never get its real result, so show the user it was
-                    # interrupted instead of a frozen spinner.
-                    for cid, card in tool_cards.items():
-                        card.mark_interrupted(f"(interrupted: {event.message[:60]})")
-                    feed.append_error(event.message, meta="agent")
-                    try:
-                        inspector = self.query_one("#inspector-widget", Inspector)
-                        inspector.stream_end()
-                        inspector.update_state(last_error=event.message)
-                    except Exception:
-                        log.debug("swallowed exception", exc_info=True)
-                    return
+            await self._drain_event_queue(
+                queue=queue,
+                feed=feed,
+                user_message=user_message,
+                tool_cards=tool_cards,
+                tool_calls_data=tool_calls_data,
+                initial_waiting=waiting,
+            )
 
         # Run agent + drain concurrently
         agent_coro = self._agent.run(
@@ -1091,6 +905,380 @@ class CogitumApp(App):
             self._agent_task = asyncio.create_task(
                 self._run_agent(next_msg, feed)
             )
+
+    async def _drain_event_queue(
+        self,
+        *,
+        queue: "asyncio.Queue",
+        feed: Feed,
+        user_message: str,
+        tool_cards: dict,
+        tool_calls_data: dict,
+        initial_waiting: "WaitingIndicator | None",
+    ) -> None:
+        """Drain agent events into the TUI feed.
+
+        Lifted from the inline ``drain_queue`` closure inside
+        ``_run_agent`` so the per-event branches are easier to read
+        and override. Behaviour is unchanged — every branch matches
+        the original closure exactly:
+
+          * ``AgentText`` / ``AgentThinking`` stop the waiting
+            indicator on first content and stream deltas into the
+            current ``AgentBlock`` / ``ThinkingBlock``.
+          * ``AgentRetry`` reattaches the friendly waiting label.
+          * ``AgentRetryConfirm`` pushes the modal fire-and-forget so
+            the drain isn't blocked while it's open.
+          * ``AgentTurnPersist`` checkpoints the buffer to disk so a
+            crash mid-run doesn't lose the assistant's commitment.
+          * ``AgentCompacted`` updates the inspector and prints a
+            status-specific UX message.
+          * ``AgentInjected`` removes the consumed message from the
+            queue bar and resets the agent block so the response
+            starts fresh.
+          * ``AgentToolCall`` / ``AgentApprovalRequest`` /
+            ``AgentToolResult`` manage the tool-card lifecycle and
+            approval-modal display (auto-approving when YOLO is on).
+          * ``AgentDone`` / ``AgentError`` finalise the run and exit.
+
+        Returns when ``AgentDone`` or ``AgentError`` arrives.
+        """
+        agent_block: AgentBlock | None = None
+        thinking_block: ThinkingBlock | None = None
+        waiting: WaitingIndicator | None = initial_waiting
+        while True:
+            event = await queue.get()
+
+            if isinstance(event, AgentText):
+                # Stop waiting animation on first content
+                if waiting is not None:
+                    waiting.stop()
+                    waiting = None
+                if agent_block is None:
+                    agent_block = feed.append_agent()
+                agent_block.append_delta(event.delta)
+                self._streamed_text += event.delta
+                # Realtime inspector update
+                try:
+                    self.query_one("#inspector-widget", Inspector).stream_delta(len(event.delta))
+                except Exception:
+                    log.debug("swallowed exception", exc_info=True)
+
+            elif isinstance(event, AgentThinking):
+                # Stop waiting animation on first thinking
+                if waiting is not None:
+                    waiting.stop()
+                    waiting = None
+                if thinking_block is None:
+                    thinking_block = feed.append_thinking()
+                thinking_block.append_delta(event.delta)
+                # Realtime inspector update (thinking counts too)
+                try:
+                    self.query_one("#inspector-widget", Inspector).stream_delta(len(event.delta))
+                except Exception:
+                    log.debug("swallowed exception", exc_info=True)
+
+            elif isinstance(event, AgentRetry):
+                # Show/restore friendly waiting indicator during retry
+                # Pick a rotating label based on attempt number
+                labels = WaitingIndicator._RETRY_LABELS
+                label = labels[event.attempt % len(labels)]
+                if waiting is None:
+                    waiting = feed.append_waiting()
+                waiting.set_status(label)
+
+            elif isinstance(event, AgentRetryConfirm):
+                # Fire-and-forget. Modal pops in parallel with the
+                # agent's backoff sleep. Abort calls
+                # ``action_cancel_agent`` directly from inside the
+                # modal — no signaling back, cancellation
+                # propagates through asyncio. Continue just closes
+                # the modal and the agent's backoff finishes on
+                # its own. We don't await push_screen_wait because
+                # blocking drain_queue while the modal is open
+                # would freeze TEXT/THINKING/RETRY events that the
+                # agent might emit in the background.
+                from .widgets.retry_confirm import RetryConfirmModal
+
+                modal = RetryConfirmModal(
+                    attempt=event.attempt,
+                    max_attempts=event.max_attempts,
+                    error_class=event.error_class,
+                    error_message=event.error_message,
+                    auto_continue_in=event.auto_continue_in,
+                )
+                self.push_screen(modal)
+
+            elif isinstance(event, AgentTurnPersist):
+                # Mid-run persistence checkpoint. The agent
+                # finished some atomic state change (assistant
+                # commit, tool results landed, fallback summary
+                # appended) and wants the buffer flushed to disk.
+                # If the run dies after this point, /resume picks
+                # up exactly what was committed.
+                #
+                # event.messages is a SHARED reference to the
+                # agent's internal buffer (see AgentTurnPersist
+                # docstring). We update self._history to that
+                # state and persist immediately. SessionStore.
+                # replace_messages writes via temp+rename so an
+                # interrupted disk write can't corrupt the file.
+                try:
+                    self._history = list(event.messages)
+                    if self._session_id:
+                        from .core.sessions import get_store
+                        get_store().replace_messages(
+                            self._session_id, self._history,
+                        )
+                        self._session_msg_count = len(self._history)
+                except Exception:
+                    log.debug(
+                        "mid-run persist failed (will retry on AgentDone)",
+                        exc_info=True,
+                    )
+
+            elif isinstance(event, AgentCompacted):
+                # Compaction freed context — reset the inspector's
+                # cumulative tokens_used to the new authoritative
+                # estimate so the bar actually shows the recovered
+                # space. Without this it keeps growing forever and
+                # the user can't tell compaction did anything.
+                try:
+                    inspector = self.query_one("#inspector-widget", Inspector)
+                    inspector.update_state(
+                        tokens_used=event.after_tokens,
+                        messages=event.messages_after,
+                    )
+                except Exception:
+                    log.debug("swallowed exception", exc_info=True)
+                # UX-meaningful message per status. Old code always
+                # printed "context compacted (~X → ~X tokens · N → N
+                # messages · manual)" even when nothing changed —
+                # users read that as "compaction broken". Three
+                # branches now match the three real outcomes.
+                status = getattr(event, "status", "ok")
+                suffix = " · manual" if event.manual else ""
+                if status == "not_needed":
+                    feed.append_system(
+                        f"history is small — nothing to compact "
+                        f"({event.messages_before} messages, "
+                        f"~{event.before_tokens} tokens)"
+                        + suffix,
+                        "compact",
+                    )
+                elif status == "no_change":
+                    feed.append_system(
+                        f"compaction ran but didn't reduce size "
+                        f"(~{event.before_tokens} tokens unchanged); "
+                        f"the summarizer may have errored — try /compact "
+                        f"again or check agent.log"
+                        + suffix,
+                        "compact",
+                    )
+                else:
+                    feed.append_system(
+                        f"context compacted "
+                        f"(~{event.before_tokens} → ~{event.after_tokens} tokens · "
+                        f"{event.messages_before} → {event.messages_after} messages"
+                        + suffix
+                        + ")",
+                        "compact",
+                    )
+
+            elif isinstance(event, AgentInjected):
+                # A queued message was consumed mid-turn — remove from
+                # _pending_messages so it isn't re-sent after AgentDone.
+                try:
+                    self._pending_messages.remove(event.text)
+                except ValueError:
+                    pass
+                queue_bar = self.query_one("#queue-bar", QueueBar)
+                queue_bar.clear()
+                for msg in self._pending_messages:
+                    queue_bar.add(msg)
+                # Render the injected message as a standalone user bubble,
+                # then close the current agent block so the response
+                # starts fresh in a new block.
+                feed.append_user(event.text)
+                if agent_block is not None:
+                    agent_block.finish_streaming()
+                    agent_block = None
+                if thinking_block is not None:
+                    thinking_block.finish()
+                    thinking_block = None
+                # Kill any lingering waiting indicator from the previous
+                # turn so it doesn't stick around when the agent starts
+                # responding to the injected message.
+                if waiting is not None:
+                    waiting.stop()
+                    waiting = None
+                # Show a fresh waiting indicator for the new response.
+                waiting = feed.append_waiting()
+
+            elif isinstance(event, AgentToolCall):
+                # Stop waiting on first tool call
+                if waiting is not None:
+                    waiting.stop()
+                    waiting = None
+                # Finish thinking block if open
+                if thinking_block is not None:
+                    thinking_block.finish()
+                    thinking_block = None
+                # New turn → new agent block next time
+                agent_block = None
+
+                if getattr(event, "preliminary", False):
+                    # Show "preparing..." card immediately
+                    card = feed.append_tool_call(
+                        event.tool_name, {}, event.call_id, preparing=True
+                    )
+                    tool_cards[event.call_id] = card
+                else:
+                    # Full tool call — update existing card or create new
+                    existing = tool_cards.get(event.call_id)
+                    if existing:
+                        existing.set_arguments(event.arguments)
+                    else:
+                        card = feed.append_tool_call(
+                            event.tool_name, event.arguments, event.call_id
+                        )
+                        tool_cards[event.call_id] = card
+                    tool_calls_data[event.call_id] = event
+
+            elif isinstance(event, AgentApprovalRequest):
+                # Defense-in-depth: the agent's _execute_tool
+                # already short-circuits the approval gate when
+                # yolo_mode is on (cogitum/core/agent.py).
+                # However, race conditions can let a stale
+                # approval event slip through:
+                #   1. Tool A starts executing.
+                #   2. _execute_tool emits AgentApprovalRequest
+                #      (queued, not yet drained).
+                #   3. User types /yolo on between the emit and
+                #      the drain.
+                #   4. Drain pulls the stale request, draws a
+                #      modal — user sees "yolo doesn't work".
+                # Auto-approve here when yolo is currently on.
+                # We route via submit_approval (per-call_id
+                # future) — NOT via the legacy _approval_queue,
+                # which the agent no longer reads from.
+                if (
+                    self._agent
+                    and self._agent.cfg.yolo_mode
+                ):
+                    self._agent.submit_approval(event.call_id, "approve")
+                    continue
+                # Show approval widget and wait for user decision
+                from .widgets.approval import ApprovalWidget
+                approval_widget = ApprovalWidget(
+                    tool_name=event.tool_name,
+                    arguments=event.arguments,
+                    call_id=event.call_id,
+                    danger_level=event.danger_level,
+                )
+                feed.mount(approval_widget)
+                approval_widget.focus()
+
+            elif isinstance(event, AgentToolResult):
+                card = tool_cards.get(event.call_id)
+                # Replace generic card with a beautiful typed card
+                tool_event = tool_calls_data.get(event.call_id)
+                if card and tool_event:
+                    rich_card = self._make_rich_card(
+                        tool_event.tool_name,
+                        tool_event.arguments,
+                        event.result,
+                        event.error,
+                    )
+                    if rich_card:
+                        card.remove()
+                        feed.append_card(rich_card)
+                    else:
+                        card.set_result(event.result, error=event.error)
+                elif card:
+                    card.set_result(event.result, error=event.error)
+                # New agent block for next response
+                agent_block = None
+                # Show waiting indicator while agent processes results
+                if waiting is None:
+                    waiting = feed.append_waiting()
+                    waiting.set_status("thinking…")
+
+            elif isinstance(event, AgentDone):
+                if waiting is not None:
+                    waiting.stop()
+                    waiting = None
+                if thinking_block is not None:
+                    thinking_block.finish()
+                if agent_block is not None:
+                    agent_block.finish_streaming()
+                # Final-sweep: any tool card still pending at AgentDone
+                # means the agent finished without ever sending a result
+                # for that call — rare, but if it happens the card would
+                # otherwise stay on "running…" forever.
+                for cid, card in tool_cards.items():
+                    card.mark_interrupted("(agent finished without sending result)")
+                if waiting is not None:
+                    waiting.stop()
+                    waiting = None
+                # H12: belt-and-suspenders — kill any stray
+                # WaitingIndicator widgets that might have been mounted
+                # via paths the local `waiting` variable doesn't track.
+                for w in feed.query("WaitingIndicator"):
+                    try:
+                        w.stop()
+                    except Exception:
+                        log.debug("waiting.stop failed", exc_info=True)
+                usage = event.usage
+                # Approximate token count from streamed text if no usage reported
+                approx_out = len(self._streamed_text) // 4 if not usage else 0
+                approx_in = len(user_message) // 4 if not usage else 0
+
+                in_tokens = usage.input_tokens if usage else approx_in
+                out_tokens = usage.output_tokens if usage else approx_out
+                cache_read = usage.cache_read_tokens if usage else 0
+                cache_write = usage.cache_write_tokens if usage else 0
+
+                feed.append_system(
+                    f"done · {event.turns} turn(s) · "
+                    f"in≈{in_tokens} out≈{out_tokens}",
+                    "usage",
+                )
+                # Update inspector with final counts + end streaming
+                try:
+                    inspector = self.query_one("#inspector-widget", Inspector)
+                    inspector.stream_end()
+                    inspector.update_state(
+                        tokens_in=inspector.state.tokens_in + in_tokens,
+                        tokens_out=inspector.state.tokens_out + out_tokens,
+                        tokens_used=inspector.state.tokens_used + in_tokens + out_tokens,
+                        cache_read=inspector.state.cache_read + cache_read,
+                        cache_write=inspector.state.cache_write + cache_write,
+                        turns=inspector.state.turns + event.turns,
+                        messages=len(self._history),
+                    )
+                except Exception:
+                    log.debug("swallowed exception", exc_info=True)
+                return
+
+            elif isinstance(event, AgentError):
+                if waiting is not None:
+                    waiting.stop()
+                    waiting = None
+                # Final-sweep: an error tore the run mid-flight; any
+                # tool card still in pending/preparing/running state will
+                # never get its real result, so show the user it was
+                # interrupted instead of a frozen spinner.
+                for cid, card in tool_cards.items():
+                    card.mark_interrupted(f"(interrupted: {event.message[:60]})")
+                feed.append_error(event.message, meta="agent")
+                try:
+                    inspector = self.query_one("#inspector-widget", Inspector)
+                    inspector.stream_end()
+                    inspector.update_state(last_error=event.message)
+                except Exception:
+                    log.debug("swallowed exception", exc_info=True)
+                return
 
     # ------------------------------------------------------------------
     # rich tool cards
@@ -1243,6 +1431,7 @@ class CogitumApp(App):
                 "/godmode [on|off|list|<preset>] — jailbreak prompt · "
                 "/yolo [on|off|status] — auto-approve all tools · "
                 "/compact — compact context now · "
+                "/codegraph [init|index|query|callers|callees|context|status] — code graph · "
                 "/clear — clear feed · /quit — exit",
                 "commands",
             )
@@ -1253,169 +1442,19 @@ class CogitumApp(App):
             return
 
         if cmd == "compact":
-            # Manual context compaction. Useful when the user knows
-            # they're about to start a new sub-task and wants to free
-            # the buffer without waiting for the 80% threshold.
-            if not self._history:
-                feed.append_system("nothing to compact — history is empty", "compact")
-                return
-            if self._agent_task and not self._agent_task.done():
-                feed.append_system(
-                    "agent is busy — wait for the current turn to finish",
-                    "compact",
-                )
-                return
-            if self._agent is None:
-                feed.append_error("no agent — pick a model first")
-                return
+            self._cmd_compact(feed)
+            return
 
-            async def _do_compact() -> None:
-                event_q: asyncio.Queue = asyncio.Queue()
-
-                async def _drain() -> None:
-                    try:
-                        while True:
-                            ev = await event_q.get()
-                            if isinstance(ev, AgentCompacted):
-                                try:
-                                    inspector = self.query_one(
-                                        "#inspector-widget", Inspector
-                                    )
-                                    inspector.update_state(
-                                        tokens_used=ev.after_tokens,
-                                        messages=ev.messages_after,
-                                    )
-                                except Exception:
-                                    log.debug("swallowed exception", exc_info=True)
-                                feed.append_system(
-                                    f"context compacted "
-                                    f"(~{ev.before_tokens} → ~{ev.after_tokens} tokens · "
-                                    f"{ev.messages_before} → {ev.messages_after} messages"
-                                    + (" · manual" if ev.manual else "")
-                                    + ")",
-                                    "compact",
-                                )
-                                return
-                    except asyncio.CancelledError:
-                        return
-
-                drain_task = asyncio.create_task(_drain())
-                try:
-                    new_msgs, before, after = await self._agent.compact_now(
-                        self._history, queue=event_q
-                    )
-                    self._history = new_msgs
-                    # Compaction shrinks the buffer in-place — append-only
-                    # session save would leave the old long form on disk
-                    # and /resume would just pull all of it back. Rewrite
-                    # the file atomically and resync the message counter.
-                    if self._session_id:
-                        from .core.sessions import get_store
-                        get_store().replace_messages(self._session_id, new_msgs)
-                        self._session_msg_count = len(new_msgs)
-                    if before == after:
-                        feed.append_system(
-                            "compaction made no change "
-                            f"(buffer already small: ~{after} tokens)",
-                            "compact",
-                        )
-                except Exception as exc:
-                    feed.append_error(f"compact failed: {exc}", meta="compact")
-                finally:
-                    # give drain a chance to flush, then cancel
-                    await asyncio.sleep(0.05)
-                    drain_task.cancel()
-
-            asyncio.create_task(_do_compact())
+        if cmd in ("codegraph", "cg"):
+            self._cmd_codegraph(rest, feed)
             return
 
         if cmd == "yolo":
-            sub = (rest or "").strip().lower()
-            if sub in ("", "on", "toggle"):
-                # bare /yolo = toggle; /yolo on = force-on
-                if sub == "on":
-                    self._agent.cfg.yolo_mode = True
-                else:
-                    self._agent.cfg.yolo_mode = not self._agent.cfg.yolo_mode
-                if self._agent.cfg.yolo_mode:
-                    feed.append_system(
-                        "yolo: ENABLED — agent runs autonomously, "
-                        "no approval prompts. Press Esc to abort.",
-                        "yolo",
-                    )
-                else:
-                    feed.append_system(
-                        "yolo: disabled — approval prompts restored",
-                        "yolo",
-                    )
-            elif sub == "off":
-                self._agent.cfg.yolo_mode = False
-                feed.append_system(
-                    "yolo: disabled — approval prompts restored",
-                    "yolo",
-                )
-            elif sub == "status":
-                state = "ON" if self._agent.cfg.yolo_mode else "OFF"
-                feed.append_system(f"yolo: {state}", "yolo")
-            else:
-                feed.append_error(
-                    "usage: /yolo [on|off|toggle|status]"
-                )
+            self._cmd_yolo(rest, feed)
             return
 
         if cmd == "godmode":
-            from .core.godmode import (
-                get_preset, list_presets, auto_pick_preset, DEFAULT_PRESET,
-            )
-            # Remember the current system prompt the first time we enable
-            # godmode in this session so /godmode off restores exactly
-            # what the user had — not the AgentConfig class default
-            # (which would clobber any per-session customisation).
-            if not hasattr(self, "_pre_godmode_system"):
-                self._pre_godmode_system: str | None = None
-
-            current_model = getattr(self, "current_model", None) or ""
-
-            if not rest or rest == "on" or rest == "auto":
-                preset_name = auto_pick_preset(current_model)
-                preset = get_preset(preset_name)
-                if self._pre_godmode_system is None:
-                    self._pre_godmode_system = self._agent.cfg.system
-                self._agent.cfg.system = preset
-                feed.append_system(
-                    f"godmode: {preset_name} — enabled "
-                    f"(auto-picked for {current_model or 'unknown model'})",
-                    "godmode",
-                )
-            elif rest == "off":
-                if self._pre_godmode_system is not None:
-                    self._agent.cfg.system = self._pre_godmode_system
-                    self._pre_godmode_system = None
-                    feed.append_system("godmode: disabled — normal mode restored", "godmode")
-                else:
-                    feed.append_system("godmode: already off", "godmode")
-            elif rest == "list":
-                names = ", ".join(list_presets())
-                auto_name = auto_pick_preset(current_model)
-                feed.append_system(
-                    f"godmode presets: {names}  ·  "
-                    f"auto for {current_model or '(no model)'}: {auto_name}",
-                    "godmode",
-                )
-            elif rest == "status":
-                if self._pre_godmode_system is not None:
-                    feed.append_system("godmode: ON", "godmode")
-                else:
-                    feed.append_system("godmode: OFF", "godmode")
-            else:
-                preset = get_preset(rest)
-                if preset:
-                    if self._pre_godmode_system is None:
-                        self._pre_godmode_system = self._agent.cfg.system
-                    self._agent.cfg.system = preset
-                    feed.append_system(f"godmode: {rest} — enabled", "godmode")
-                else:
-                    feed.append_error(f"unknown preset: {rest} (try /godmode list)")
+            self._cmd_godmode(rest, feed)
             return
 
         if cmd in ("quit", "exit", "q"):
@@ -1423,6 +1462,276 @@ class CogitumApp(App):
             return
 
         feed.append_error(f"unknown command: /{cmd}  (try /help)")
+
+    # ------------------------------------------------------------------
+    # Per-command handlers (extracted from _handle_command for clarity)
+    # ------------------------------------------------------------------
+
+    def _cmd_compact(self, feed: Feed) -> None:
+        """Handle ``/compact`` — manual context compaction.
+
+        Extracted from ``_handle_command``. Useful when the user
+        knows they're about to start a new sub-task and wants to
+        free the buffer without waiting for the 80% threshold.
+        Spawns a background task tracked in ``self._bg_tasks`` so
+        it can't be garbage-collected mid-await; the inner drain
+        helper is cancelled in its own ``finally`` block.
+        """
+        if not self._history:
+            feed.append_system("nothing to compact — history is empty", "compact")
+            return
+        if self._agent_task and not self._agent_task.done():
+            feed.append_system(
+                "agent is busy — wait for the current turn to finish",
+                "compact",
+            )
+            return
+        if self._agent is None:
+            feed.append_error("no agent — pick a model first")
+            return
+
+        async def _do_compact() -> None:
+            event_q: asyncio.Queue = asyncio.Queue()
+
+            async def _drain() -> None:
+                try:
+                    while True:
+                        ev = await event_q.get()
+                        if isinstance(ev, AgentCompacted):
+                            try:
+                                inspector = self.query_one(
+                                    "#inspector-widget", Inspector
+                                )
+                                inspector.update_state(
+                                    tokens_used=ev.after_tokens,
+                                    messages=ev.messages_after,
+                                )
+                            except Exception:
+                                log.debug("swallowed exception", exc_info=True)
+                            # Per-status UX message — same three
+                            # branches as the main drain handler.
+                            status = getattr(ev, "status", "ok")
+                            suffix = " · manual" if ev.manual else ""
+                            if status == "not_needed":
+                                feed.append_system(
+                                    f"history is small — nothing to compact "
+                                    f"({ev.messages_before} messages, "
+                                    f"~{ev.before_tokens} tokens)"
+                                    + suffix,
+                                    "compact",
+                                )
+                            elif status == "no_change":
+                                feed.append_system(
+                                    f"compaction ran but didn't reduce size "
+                                    f"(~{ev.before_tokens} tokens unchanged); "
+                                    f"the summarizer may have errored — try "
+                                    f"/compact again or check agent.log"
+                                    + suffix,
+                                    "compact",
+                                )
+                            else:
+                                feed.append_system(
+                                    f"context compacted "
+                                    f"(~{ev.before_tokens} → ~{ev.after_tokens} tokens · "
+                                    f"{ev.messages_before} → {ev.messages_after} messages"
+                                    + suffix
+                                    + ")",
+                                    "compact",
+                                )
+                            return
+                except asyncio.CancelledError:
+                    return
+
+            drain_task = asyncio.create_task(_drain())
+            try:
+                new_msgs, before, after = await self._agent.compact_now(
+                    self._history, queue=event_q
+                )
+                self._history = new_msgs
+                # Compaction shrinks the buffer in-place — append-only
+                # session save would leave the old long form on disk
+                # and /resume would just pull all of it back. Rewrite
+                # the file atomically and resync the message counter.
+                if self._session_id:
+                    from .core.sessions import get_store
+                    get_store().replace_messages(self._session_id, new_msgs)
+                    self._session_msg_count = len(new_msgs)
+                # No "before == after" message here — the
+                # AgentCompacted event handler above covers all
+                # three outcomes (ok / not_needed / no_change)
+                # with status-specific text.
+            except Exception as exc:
+                feed.append_error(f"compact failed: {exc}", meta="compact")
+            finally:
+                # give drain a chance to flush, then cancel
+                await asyncio.sleep(0.05)
+                drain_task.cancel()
+
+        # F33/F51: track this task in self._bg_tasks so it can't be
+        # garbage-collected mid-await. Drain helper inside _do_compact
+        # is cancelled in its own `finally` block — only the outer
+        # task needed referencing.
+        compact_task = asyncio.create_task(_do_compact())
+        self._bg_tasks.add(compact_task)
+        compact_task.add_done_callback(self._bg_tasks.discard)
+
+    def _cmd_yolo(self, rest: str, feed: Feed) -> None:
+        """Handle ``/yolo [on|off|toggle|status] [<ttl_minutes>]``.
+
+        Extracted from ``_handle_command`` to keep the dispatch table
+        readable. Behaviour matches the inline block exactly:
+
+          * ``/yolo on <minutes>`` arms a TTL using ``time.monotonic``
+            (NTP step-back / DST edits cannot extend the privileged
+            window). The deadline lives in process memory only —
+            restart resets it, which is the correct security default.
+          * Bare ``/yolo`` toggles. ``off`` clears both flag and TTL.
+          * ``/yolo status`` reports remaining minutes when armed.
+        """
+        # F4 None-agent guard.
+        if self._agent is None or self._agent.cfg is None:
+            feed.append_error("No active model. Run /setup first.")
+            return
+        sub = (rest or "").strip().lower()
+        # F38 TTL parsing — accept "/yolo on <minutes>".
+        tokens = (rest or "").strip().split()
+        ttl_minutes: float | None = None
+        if tokens and tokens[0].lower() == "on" and len(tokens) > 1:
+            try:
+                ttl_minutes = float(tokens[1])
+                if ttl_minutes <= 0:
+                    ttl_minutes = None
+            except ValueError:
+                feed.append_error(
+                    f"usage: /yolo on <minutes>  (got {tokens[1]!r})"
+                )
+                return
+            sub = "on"
+        if sub in ("", "on", "toggle"):
+            # bare /yolo = toggle; /yolo on = force-on
+            if sub == "on":
+                self._agent.cfg.yolo_mode = True
+            else:
+                self._agent.cfg.yolo_mode = not self._agent.cfg.yolo_mode
+            if self._agent.cfg.yolo_mode:
+                if ttl_minutes is not None:
+                    import time as _time
+                    # F38: monotonic clock — wall-clock step-back
+                    # (NTP, DST, manual edit) must NOT extend a
+                    # privileged window. yolo_until lives in process
+                    # memory only; restart resets it, which is the
+                    # right security default anyway.
+                    self._agent.cfg.yolo_until = (
+                        _time.monotonic() + ttl_minutes * 60.0
+                    )
+                    feed.append_system(
+                        f"yolo: ENABLED for {ttl_minutes:g} min — "
+                        "agent runs autonomously, no approval prompts. "
+                        "Press Esc to abort.",
+                        "yolo",
+                    )
+                else:
+                    self._agent.cfg.yolo_until = None
+                    feed.append_system(
+                        "yolo: ENABLED — agent runs autonomously, "
+                        "no approval prompts. Press Esc to abort.",
+                        "yolo",
+                    )
+            else:
+                self._agent.cfg.yolo_until = None
+                feed.append_system(
+                    "yolo: disabled — approval prompts restored",
+                    "yolo",
+                )
+        elif sub == "off":
+            self._agent.cfg.yolo_mode = False
+            self._agent.cfg.yolo_until = None
+            feed.append_system(
+                "yolo: disabled — approval prompts restored",
+                "yolo",
+            )
+        elif sub == "status":
+            state = "ON" if self._agent.cfg.yolo_mode else "OFF"
+            until = getattr(self._agent.cfg, "yolo_until", None)
+            if state == "ON" and until:
+                import time as _time
+                remain = max(0.0, until - _time.monotonic())
+                feed.append_system(
+                    f"yolo: {state} (auto-off in {remain/60:.1f} min)",
+                    "yolo",
+                )
+            else:
+                feed.append_system(f"yolo: {state}", "yolo")
+        else:
+            feed.append_error(
+                "usage: /yolo [on|off|toggle|status] [<ttl_minutes>]"
+            )
+
+    def _cmd_godmode(self, rest: str, feed: Feed) -> None:
+        """Handle ``/godmode [on|off|list|status|<preset>]``.
+
+        Extracted from ``_handle_command``. Remembers the pre-godmode
+        ``cfg.system`` on first activation so ``/godmode off``
+        restores exactly what the user had — not the AgentConfig
+        class default (which would clobber any per-session
+        customisation).
+        """
+        # F4 None-agent guard.
+        if self._agent is None or self._agent.cfg is None:
+            feed.append_error("No active model. Run /setup first.")
+            return
+        from .core.godmode import (
+            get_preset, list_presets, auto_pick_preset, DEFAULT_PRESET,
+        )
+        # Remember the current system prompt the first time we enable
+        # godmode in this session so /godmode off restores exactly
+        # what the user had — not the AgentConfig class default
+        # (which would clobber any per-session customisation).
+        if not hasattr(self, "_pre_godmode_system"):
+            self._pre_godmode_system: str | None = None
+
+        current_model = getattr(self, "current_model", None) or ""
+
+        if not rest or rest == "on" or rest == "auto":
+            preset_name = auto_pick_preset(current_model)
+            preset = get_preset(preset_name)
+            if self._pre_godmode_system is None:
+                self._pre_godmode_system = self._agent.cfg.system
+            self._agent.cfg.system = preset
+            feed.append_system(
+                f"godmode: {preset_name} — enabled "
+                f"(auto-picked for {current_model or 'unknown model'})",
+                "godmode",
+            )
+        elif rest == "off":
+            if self._pre_godmode_system is not None:
+                self._agent.cfg.system = self._pre_godmode_system
+                self._pre_godmode_system = None
+                feed.append_system("godmode: disabled — normal mode restored", "godmode")
+            else:
+                feed.append_system("godmode: already off", "godmode")
+        elif rest == "list":
+            names = ", ".join(list_presets())
+            auto_name = auto_pick_preset(current_model)
+            feed.append_system(
+                f"godmode presets: {names}  ·  "
+                f"auto for {current_model or '(no model)'}: {auto_name}",
+                "godmode",
+            )
+        elif rest == "status":
+            if self._pre_godmode_system is not None:
+                feed.append_system("godmode: ON", "godmode")
+            else:
+                feed.append_system("godmode: OFF", "godmode")
+        else:
+            preset = get_preset(rest)
+            if preset:
+                if self._pre_godmode_system is None:
+                    self._pre_godmode_system = self._agent.cfg.system
+                self._agent.cfg.system = preset
+                feed.append_system(f"godmode: {rest} — enabled", "godmode")
+            else:
+                feed.append_error(f"unknown preset: {rest} (try /godmode list)")
 
     # ------------------------------------------------------------------
     # Session persistence

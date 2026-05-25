@@ -69,6 +69,10 @@ def _kv(label: str, value: str, value_style: str = TXT) -> Table:
 
 
 def _bar(pct: float, width: int = 18, full: str = GOLD, empty: str = MUTED) -> Text:
+    # Width can be passed as 0 (extreme narrow inspector). Clamp to ≥1
+    # so we never construct a zero-cell bar (Rich would still render an
+    # empty Text but the surrounding label_kv would look orphaned).
+    width = max(1, width)
     n = max(0, min(width, int(round(pct * width))))
     t = Text()
     t.append(GLYPH_BAR_FULL * n, style=full)
@@ -114,9 +118,44 @@ class Inspector(Static):
         self.state.streaming_chars = 0
         self.refresh()
 
+    # ── Responsive helpers ──────────────────────────────────────────
+    @staticmethod
+    def _adaptive_bar_width(pane_width: int) -> int:
+        """Pick a context bar width that fits the inspector pane.
+
+        Rule: ¼ of pane width, clamped to [8, 24]. Default 18 was fine
+        on 36-col panes but clipped on tighter splits and looked silly
+        on very wide ones.
+        """
+        if pane_width <= 0:
+            return 18
+        return max(8, min(24, pane_width // 4))
+
+    @staticmethod
+    def _adaptive_error_budget(pane_width: int) -> int:
+        """How many chars of `last_error` to render."""
+        if pane_width <= 0:
+            return 80
+        # Leave 4 cols for padding/indent. Hard floor at 40 so a
+        # one-word error is never reduced to "Error: e…".
+        return max(40, pane_width - 4)
+
+    def on_resize(self, event) -> None:  # textual.events.Resize
+        """Re-render so adaptive widths kick in on terminal resize."""
+        self.refresh()
+
     def render(self):
         st = self.state
         rows: list = []
+
+        # Pull current pane width once — used for both the context bar
+        # and the last_error budget so they react in sync to resize.
+        try:
+            pane_w = self.size.width
+        except Exception:
+            pane_w = 36
+        bar_w = self._adaptive_bar_width(pane_w)
+        err_budget = self._adaptive_error_budget(pane_w)
 
         # ── MODEL ────────────────────────────────────────────────────────
         rows.append(_h("MODEL"))
@@ -126,7 +165,7 @@ class Inspector(Static):
         pct = st.tokens_used / max(st.context_window, 1)
         ctx = Table.grid(expand=True, padding=(0, 0))
         ctx.add_column(ratio=1); ctx.add_column(ratio=2, justify="right")
-        ctx.add_row(Text("context", style=GOLD_DIM), _bar(pct))
+        ctx.add_row(Text("context", style=GOLD_DIM), _bar(pct, width=bar_w))
         rows.append(ctx)
         rows.append(
             Text.assemble(
@@ -191,7 +230,7 @@ class Inspector(Static):
             rows.append(Rule(style=RULE))
             rows.append(_h("LAST ERROR"))
             rows.append(Text(""))
-            err_text = st.last_error[:80]
+            err_text = st.last_error[:err_budget]
             rows.append(Text(f"  {err_text}", style=RUST))
 
         return Group(*rows)

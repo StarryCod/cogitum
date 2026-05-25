@@ -47,6 +47,7 @@ from .core.auth.types import OAuthAuthInfo, OAuthCredentials, OAuthPrompt
 from .core.llm.config_writer import ConfigWriter
 from .core.llm.loader import _PROVIDERS_PATH, _SETTINGS_PATH, load_mesh, load_settings, write_settings
 from .core.llm.presets import PROVIDER_PRESETS, ProviderPreset, by_id as preset_by_id
+from .core.redact import format_bot_token_display
 from .design import (
     BRONZE,
     COPPER,
@@ -86,7 +87,8 @@ class MessageModal(ModalScreen[None]):
     DEFAULT_CSS = f"""
     MessageModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
     #msg-shell {{
-        width: 60; padding: 1 2;
+        width: 60; max-width: 90%; min-width: 36;
+        padding: 1 2;
         background: {BG_SOFT}; border: round {GOLD_DIM};
     }}
     #msg-title {{ color: {GOLD_HI}; text-style: bold; }}
@@ -120,7 +122,7 @@ class MessageModal(ModalScreen[None]):
 class ConfirmModal(ModalScreen[bool]):
     DEFAULT_CSS = f"""
     ConfirmModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
-    #conf-shell {{ width: 64; padding: 1 2; background: {BG_SOFT}; border: round {BRONZE}; }}
+    #conf-shell {{ width: 64; max-width: 90%; min-width: 36; padding: 1 2; background: {BG_SOFT}; border: round {BRONZE}; }}
     #conf-title {{ color: {GOLD_HI}; text-style: bold; }}
     #conf-body  {{ color: {TXT}; padding: 1 0; }}
     #conf-foot  {{ height: 3; align: right middle; }}
@@ -177,7 +179,8 @@ class MaxTokensModal(ModalScreen[int | None]):
     DEFAULT_CSS = f"""
     MaxTokensModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
     #mt-shell {{
-        width: 70; padding: 1 2;
+        width: 70; max-width: 95%; min-width: 40;
+        padding: 1 2;
         background: {BG_SOFT}; border: round {GOLD_DIM};
     }}
     #mt-title  {{ color: {GOLD_HI}; text-style: bold; height: 1; margin-bottom: 1; }}
@@ -274,7 +277,8 @@ class KeyEntryModal(ModalScreen[KeyEntryResult | None]):
     DEFAULT_CSS = f"""
     KeyEntryModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
     #key-shell {{
-        width: 78; padding: 1 2;
+        width: 78; max-width: 95%; min-width: 44;
+        padding: 1 2;
         background: {BG_SOFT}; border: round {GOLD_DIM};
     }}
     #key-title  {{ color: {GOLD_HI}; text-style: bold; height: 1; margin-bottom: 1; }}
@@ -621,7 +625,9 @@ class AddProviderModal(ModalScreen[ProviderPreset | str | None]):
     DEFAULT_CSS = f"""
     AddProviderModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
     #ap-shell {{
-        width: 84; height: 32; padding: 1 2;
+        width: 84; max-width: 95%; min-width: 50;
+        height: 32; max-height: 95%; min-height: 16;
+        padding: 1 2;
         background: {BG_SOFT}; border: round {GOLD_DIM};
     }}
     #ap-title {{ color: {GOLD_HI}; text-style: bold; height: 1; }}
@@ -717,7 +723,7 @@ class CustomProviderModal(ModalScreen[ProviderPreset | None]):
 
     DEFAULT_CSS = f"""
     CustomProviderModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
-    #cp-shell {{ width: 78; padding: 1 2; background: {BG_SOFT}; border: round {GOLD_DIM}; }}
+    #cp-shell {{ width: 78; max-width: 95%; min-width: 44; padding: 1 2; background: {BG_SOFT}; border: round {GOLD_DIM}; }}
     #cp-title {{ color: {GOLD_HI}; text-style: bold; height: 1; margin-bottom: 1; }}
     .cprow {{ height: 4; margin-bottom: 0; }}
     .cprow Label {{ width: 16; color: {TXT_DIM}; content-align: left middle; height: 100%; padding: 0 1 0 0; }}
@@ -795,7 +801,9 @@ class KeyManagerModal(ModalScreen[str]):
     DEFAULT_CSS = f"""
     KeyManagerModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
     #km-shell {{
-        width: 88; height: 32; padding: 1 2;
+        width: 88; max-width: 95%; min-width: 48;
+        height: 32; max-height: 95%; min-height: 16;
+        padding: 1 2;
         background: {BG_SOFT}; border: round {GOLD_DIM};
     }}
     #km-title {{ color: {GOLD_HI}; text-style: bold; height: 1; }}
@@ -857,7 +865,7 @@ class KeyManagerModal(ModalScreen[str]):
 
     def _refresh_list(self) -> None:
         """Sync wrapper — kicks off the async refresh as a task."""
-        asyncio.ensure_future(self._refresh_list_async())
+        asyncio.create_task(self._refresh_list_async())
 
     def _render_key_row(self, kid: str, kdata) -> Text:
         out = Text()
@@ -931,7 +939,9 @@ class ManageModelsModal(ModalScreen[bool]):
     DEFAULT_CSS = f"""
     ManageModelsModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
     #mm-shell {{
-        width: 96; height: 36; padding: 1 2;
+        width: 96; max-width: 95%; min-width: 48;
+        height: 36; max-height: 95%; min-height: 16;
+        padding: 1 2;
         background: {BG_SOFT}; border: round {GOLD_DIM};
     }}
     #mm-title {{ color: {GOLD_HI}; text-style: bold; height: 1; }}
@@ -984,7 +994,7 @@ class ManageModelsModal(ModalScreen[bool]):
                 yield Button("Close", id="mm-close", variant="primary")
 
     def on_mount(self) -> None:
-        asyncio.ensure_future(self._refresh_async())
+        asyncio.create_task(self._refresh_async())
 
     async def _refresh_async(self) -> None:
         lv = self.query_one("#mm-list", ListView)
@@ -1116,7 +1126,7 @@ def _infer_caps(mid: str) -> list[str]:
 class OAuthLoginModal(ModalScreen[OAuthCredentials | None]):
     DEFAULT_CSS = f"""
     OAuthLoginModal {{ align: center middle; background: rgba(0,0,0,0.55); }}
-    #oa-shell {{ width: 86; padding: 1 2; background: {BG_SOFT}; border: round {GOLD_DIM}; }}
+    #oa-shell {{ width: 86; max-width: 95%; min-width: 50; padding: 1 2; background: {BG_SOFT}; border: round {GOLD_DIM}; }}
     #oa-title {{ color: {GOLD_HI}; text-style: bold; height: 1; }}
     #oa-sub {{ color: {TXT_DIM}; padding-bottom: 1; }}
     #oa-url {{
@@ -1273,6 +1283,14 @@ class SetupScreen(Screen):
         width: 28; min-width: 24;
         background: {BG_SOFT}; border-right: vkey {RULE};
         padding: 1 1;
+    }}
+    /* Narrow terminals: collapse the rail to a slim icon strip so the
+       content pane keeps usable width. */
+    App.-narrow SetupScreen #setup-rail {{
+        width: 12; min-width: 12;
+    }}
+    App.-narrow SetupScreen #setup-rail > .rail-item {{
+        padding: 0 1;
     }}
     #setup-rail > .rail-item {{
         height: 3; padding: 1 1;
@@ -1734,7 +1752,7 @@ class SetupScreen(Screen):
         status_card.mount(_Static(Text(f"  Enabled: {status.get('enabled', '?')}", style=TXT_DIM)))
 
         if cfg.is_valid():
-            token_display = f"{cfg.bot_token[:8]}...{cfg.bot_token[-4:]}"
+            token_display = format_bot_token_display(cfg.bot_token)
             status_card.mount(_Static(Text(f"  Token: {token_display}", style=TXT_DIM)))
             status_card.mount(_Static(Text(f"  User ID: {cfg.allowed_user_id}", style=TXT_DIM)))
         else:
@@ -2694,7 +2712,13 @@ class SetupScreen(Screen):
             cmd = [ed, "-w", str(_PROVIDERS_PATH)]
         # We need to suspend the textual app briefly.
         with self.app.suspend():
-            subprocess.call(cmd, timeout=3600)
+            # 1h timeout: this is an interactive editor, so the cap
+            # only fires if the user walked away. Already explicit; the
+            # try/except keeps a stuck VS Code from pinning the wizard.
+            try:
+                subprocess.call(cmd, timeout=3600)
+            except subprocess.TimeoutExpired:
+                pass
         self._writer = ConfigWriter()
         self._render_section()
 

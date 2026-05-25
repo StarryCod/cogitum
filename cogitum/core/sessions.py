@@ -10,6 +10,7 @@ Each session = one conversation. Stored as:
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,11 @@ def _part_to_dict(p: ContentPart) -> dict[str, Any]:
         d: dict[str, Any] = {"kind": "thinking", "text": p.text}
         if p.signature:
             d["signature"] = p.signature
+        # GAP-9: persist which model produced the thinking so a
+        # /resume into a different model can drop stale signatures
+        # at wire-encode time (see normalize_messages_anthropic).
+        if p.model:
+            d["model"] = p.model
         return d
     elif isinstance(p, ImagePart):
         d = {"kind": "image", "mime": p.mime}
@@ -67,7 +73,11 @@ def _dict_to_part(d: dict[str, Any]) -> ContentPart:
     if kind == "text":
         return TextPart(text=d["text"])
     elif kind == "thinking":
-        return ThinkingPart(text=d["text"], signature=d.get("signature"))
+        return ThinkingPart(
+            text=d["text"],
+            signature=d.get("signature"),
+            model=d.get("model"),
+        )
     elif kind == "image":
         return ImagePart(url=d.get("url"), data=d.get("data"), mime=d.get("mime", "image/png"))
     elif kind == "tool_call":
@@ -139,18 +149,25 @@ class SessionStore:
         if not self._index_path.exists():
             return []
         try:
-            data = json.loads(self._index_path.read_text())
+            data = json.loads(self._index_path.read_text(encoding="utf-8"))
             return [SessionMeta(**item) for item in data]
         except (json.JSONDecodeError, TypeError, KeyError):
             return []
 
     def _save_index(self) -> None:
+        # Atomic write + parent-dir fsync (Tier-4): a crash between
+        # os.replace and the next directory metadata flush could
+        # otherwise leave the new inode written but the directory
+        # entry still pointing at the prior name. atomic_write_text()
+        # encapsulates the full tmp+rename+fsync+dir-fsync recipe.
         data = [
             {"id": s.id, "title": s.title, "created_at": s.created_at,
              "updated_at": s.updated_at, "model": s.model, "count": s.count}
             for s in self._index
         ]
-        self._index_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+        payload = json.dumps(data, ensure_ascii=False, indent=2)
+        from .atomic_io import atomic_write_text
+        atomic_write_text(self._index_path, payload)
 
     def list_sessions(self, limit: int = 50) -> list[SessionMeta]:
         """Return sessions sorted by updated_at (newest first)."""
@@ -243,11 +260,17 @@ class SessionStore:
                     session_id, existing_count,
                 )
                 return
-        tmp = path.with_suffix(".jsonl.tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            for msg in messages:
-                f.write(message_to_json(msg) + "\n")
-        tmp.replace(path)
+        # Build payload in memory, then drive the full atomic recipe via
+        # ``atomic_write_text`` (tmp+fsync+replace+parent-dir-fsync). The
+        # legacy hand-rolled ``tmp.replace(path)`` skipped the parent
+        # directory fsync, so a power loss between rename and FS commit
+        # could revert the .jsonl to its bloated pre-compaction content
+        # while ``index.json`` already reported the new short count —
+        # leaving the two stores out of sync.
+        from .atomic_io import atomic_write_text
+
+        payload = "".join(message_to_json(msg) + "\n" for msg in messages)
+        atomic_write_text(path, payload)
 
         for meta in self._index:
             if meta.id == session_id:

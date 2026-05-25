@@ -44,9 +44,16 @@ class ThinkingPart:
     `signature` carries provider-specific opaque data needed to round-trip
     thinking back into a follow-up request (Anthropic uses it; OpenAI's
     o-series passes it through `reasoning_content`).
+
+    `model` records the model id that produced this thinking. Anthropic
+    binds signatures cryptographically to a specific model — switching
+    via /model mid-conversation invalidates prior signatures, so we use
+    this field to drop stale signatures at wire-encode time. Default
+    None for backward compat with older sessions on disk.
     """
     text: str
     signature: str | None = None
+    model: str | None = None
     kind: Literal["thinking"] = "thinking"
 
 

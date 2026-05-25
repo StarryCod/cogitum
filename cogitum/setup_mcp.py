@@ -27,6 +27,7 @@ Buttons emit `Button.Pressed` events whose ids are routed in
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Awaitable, Callable
 
 from rich.text import Text
@@ -60,12 +61,26 @@ from .design import (
 )
 
 
+log = logging.getLogger(__name__)
+
+
 # Risk → glyph + tone
 _RISK_STYLE = {
     "low":    (OK,    "▪"),
     "medium": (BRONZE, "◆"),
     "danger": (RUST,  "◉"),
 }
+
+
+# Background tasks spawned by the setup wizard (currently the "Test"
+# button on an MCP server). asyncio only holds a weak reference to the
+# task returned by ``create_task``, so an unstored fire-and-forget task
+# can be GC'd mid-flight, producing a "Task was destroyed but it is
+# pending!" warning. We hold a strong reference here and clear each
+# task via ``add_done_callback`` once it completes. Same pattern used
+# by ``gateway/telegram.py`` for ``shutdown_tasks``.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
 
 _STATE_STYLE = {
     "connected":    (OK,    "●"),
@@ -520,11 +535,24 @@ async def handle_mcp_button(
                 if getattr(app, "mesh", None) and getattr(app, "current_model", None):
                     try:
                         cb = build_sampling_callback(app.mesh, app.current_model)
-                    except Exception:
+                    except Exception as e:
+                        # F37: surface sampling-callback failure to operator —
+                        # silently nulling it left MCP servers thinking sampling
+                        # was unavailable, and the user never knew why.
+                        log.exception("build_sampling_callback failed during reload")
+                        setup_screen.notify(
+                            f"sampling disabled: {e}", severity="warning",
+                        )
                         cb = None
                 discover_mcp_tools(_REG, cfg, sampling_callback=cb)
-        except Exception:
-            pass
+        except Exception as e:
+            # F36: was `except Exception: pass` — operator clicked "⟳ Reload"
+            # and got "reloaded" toast even when the live config didn't take.
+            log.exception("MCP reload (push live config / discover) failed")
+            setup_screen.notify(
+                f"reload failed: {e}", severity="error",
+            )
+            return False
         setup_screen.notify("mcp config reloaded", severity="information")
         return True
 
@@ -634,7 +662,7 @@ async def _server_action(setup_screen, action: str, name: str) -> None:
             one.servers[name] = cfg.servers[name]
             try:
                 mgr.start(one)
-                await asyncio.get_event_loop().run_in_executor(
+                await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: _wait_for_initial_connections(mgr, one, max_wait=30.0),
                 )
@@ -654,7 +682,11 @@ async def _server_action(setup_screen, action: str, name: str) -> None:
                 # ↑ keep alive so other servers keep working
                 pass
 
-        asyncio.create_task(_run_test())
+        _t = asyncio.create_task(_run_test())
+        # Hold a strong ref so the task isn't GC'd mid-flight, then drop
+        # it once it's done. See module-level note on ``_BACKGROUND_TASKS``.
+        _BACKGROUND_TASKS.add(_t)
+        _t.add_done_callback(_BACKGROUND_TASKS.discard)
         setup_screen.notify(f"testing {name}…", severity="information")
         return
 
@@ -665,7 +697,9 @@ def _push_live_config(cfg: MCPConfig) -> None:
         from .core.mcp import discovery
         discovery._LIVE_CONFIG = cfg  # type: ignore[attr-defined]
     except Exception:
-        pass
+        # F36: surface this — silently swallowing meant a stale live
+        # config kept routing tool calls with the old risk policy.
+        log.exception("Failed to push live MCP config to discovery._LIVE_CONFIG")
 
 
 # ---------------------------------------------------------------------------

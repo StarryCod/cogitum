@@ -579,19 +579,57 @@ def _server_needs_reconnect(old: MCPServerConfig, new: MCPServerConfig) -> bool:
 
 
 def _call_tool_result_to_text(result: Any) -> str:
-    """Render a CallToolResult as plain text for the LLM."""
+    """Render a CallToolResult as plain text for the LLM.
+
+    Empty content + isError=False used to return "" — model thought the
+    call succeeded with nothing to say. We now return "(no output)" so
+    the model has an explicit success-but-empty signal AND so downstream
+    LLM adapters never see an empty tool_result block (which Anthropic
+    rejects with HTTP 400). Empty content + isError=True returns an
+    explicit error placeholder for the same reason.
+    """
     if result is None:
         return ""
     parts: list[str] = []
     content = getattr(result, "content", None) or []
     is_error = bool(getattr(result, "isError", False))
+    if not content:
+        if is_error:
+            return "ERROR: tool returned an error with no message"
+        return "(no output)"
     for item in content:
         text = getattr(item, "text", None)
         if text:
             parts.append(text)
             continue
-        # Image / resource fallbacks — just describe
         item_type = getattr(item, "type", "unknown")
+        # Image / audio / blob: preserve enough metadata so the model
+        # can reason about it. Collapsing to a bare "[image content]"
+        # token discarded the base64 payload AND the mime type, so a
+        # screenshot tool round-tripped as a content-free placeholder
+        # the model couldn't act on.
+        if item_type in ("image", "audio"):
+            data = getattr(item, "data", None) or ""
+            mime = getattr(item, "mimeType", None) or "application/octet-stream"
+            try:
+                size = len(data)
+            except Exception:
+                size = 0
+            parts.append(
+                f"[{item_type} content: {size} bytes, type {mime}]"
+            )
+            continue
+        # Embedded resource — try to surface the uri.
+        if item_type == "resource":
+            resource = getattr(item, "resource", None)
+            uri = getattr(resource, "uri", None) if resource else None
+            mime = (
+                getattr(resource, "mimeType", None) if resource else None
+            ) or "unknown"
+            parts.append(
+                f"[resource content: uri={uri or 'n/a'}, type {mime}]"
+            )
+            continue
         parts.append(f"[{item_type} content]")
     body = "\n".join(parts).strip()
     if is_error:

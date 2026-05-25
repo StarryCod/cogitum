@@ -237,14 +237,25 @@ function ensureClone() {
     // Repo already cloned. Sync with origin so a stale clone (left
     // over from a previous npm-package version, or from a manual
     // git clone the user did months ago) doesn't make the new
-    // wrapper run against ancient code.
-    log(`Existing clone found — syncing with origin/${BRANCH} ...`);
-    let r = run('git', ['-C', dir, 'fetch', '--all', '--quiet']);
+    // wrapper run against ancient code. Tier-4 hardening: prefer
+    // the latest signed semver tag over origin/<branch> HEAD —
+    // master may carry mid-development commits, while tags mark
+    // the release line the wrapper version was tested against.
+    log('Existing clone found — syncing with latest release tag ...');
+    let r = run('git', ['-C', dir, 'fetch', '--all', '--tags', '--quiet']);
     if (r.status !== 0) {
       warn('git fetch failed; proceeding with whatever is on disk.');
       return;
     }
-    r = run('git', ['-C', dir, 'reset', '--hard', `origin/${BRANCH}`, '--quiet']);
+    const tag = findLatestSemverTag();
+    const target = tag || `origin/${BRANCH}`;
+    if (!tag) {
+      warn(`No semver tag (v*.*.*) found — falling back to origin/${BRANCH}.`);
+    } else {
+      log(`Pinning to release tag ${tag}`);
+      verifyTag(tag);
+    }
+    r = run('git', ['-C', dir, 'reset', '--hard', target, '--quiet']);
     if (r.status !== 0) {
       warn('git reset failed; proceeding with whatever is on disk.');
     }
@@ -254,13 +265,35 @@ function ensureClone() {
   log(`Cloning Cogitum to ${dir} ...`);
   // depth=1 keeps clone fast (~2-3s on a decent connection) but still
   // gives ``git fetch + reset`` enough history to update against any
-  // origin commit later.
-  const r = run('git', ['clone', '--depth', '1', '--branch', BRANCH, REPO, dir]);
+  // origin commit later. Initial clone fetches the branch tip; we
+  // then immediately fetch tags and reset to the latest release tag
+  // so first-run installs match what `cog --update` would land on.
+  let r = run('git', ['clone', '--depth', '1', '--branch', BRANCH, REPO, dir]);
   if (r.status !== 0) {
     err('git clone failed.');
     err('Is git installed and on PATH?');
     err(`Manual fallback: git clone ${REPO_HTTP} '${dir}'`);
     process.exit(1);
+  }
+  // Fetch tags and pin to the latest release. A shallow clone has no
+  // tags by default, so fetch them explicitly. Best-effort: if the
+  // user is offline after the initial clone, we just stay on branch
+  // HEAD rather than bailing out.
+  r = run('git', ['-C', dir, 'fetch', '--tags', '--quiet']);
+  if (r.status !== 0) {
+    warn('Could not fetch tags after clone — staying on branch HEAD.');
+    return;
+  }
+  const tag = findLatestSemverTag();
+  if (!tag) {
+    warn(`No semver tag (v*.*.*) on origin — staying on origin/${BRANCH}.`);
+    return;
+  }
+  log(`Pinning fresh clone to release tag ${tag}`);
+  verifyTag(tag);
+  r = run('git', ['-C', dir, 'reset', '--hard', tag, '--quiet']);
+  if (r.status !== 0) {
+    warn(`Could not reset to ${tag} — staying on branch HEAD.`);
   }
 }
 
@@ -437,14 +470,24 @@ function _gitUpdateInPlace() {
     ensureInstalled();
     return;
   }
-  log('Fetching latest from origin ...');
-  let r = run('git', ['-C', getInstallDir(), 'fetch', '--all', '--quiet']);
+  log('Fetching latest from origin (with tags) ...');
+  let r = run('git', ['-C', getInstallDir(), 'fetch', '--all', '--tags', '--quiet']);
   if (r.status !== 0) throw new Error('git fetch failed');
-  log(`Resetting to origin/${BRANCH} ...`);
-  r = run('git', ['-C', getInstallDir(), 'reset', '--hard', `origin/${BRANCH}`, '--quiet']);
+  // Tier-4: pin auto-update to the latest semver tag too, matching
+  // the explicit `cog --update` default. Falls back to origin/master
+  // only if the upstream has no tags at all.
+  const tag = findLatestSemverTag();
+  const target = tag || `origin/${BRANCH}`;
+  if (tag) {
+    log(`Resetting to release tag ${tag} ...`);
+    verifyTag(tag);
+  } else {
+    log(`Resetting to origin/${BRANCH} ...`);
+  }
+  r = run('git', ['-C', getInstallDir(), 'reset', '--hard', target, '--quiet']);
   if (r.status !== 0) throw new Error('git reset failed');
   installDeps();
-  writeMarker({ updated: true });
+  writeMarker({ updated: true, pinnedTo: target });
   const local = getLocalSha();
   if (local) writeUpdateCheckCache(local);
   ok('Auto-update complete.');
@@ -506,22 +549,119 @@ function ensureInstalled() {
   ok('Bootstrap complete. Run `cog setup` to configure providers.');
 }
 
-function update() {
+// ─────────────────────────────────────────────────────────────────────────
+// Tag pinning — used by `cog --update`. Default behaviour is to reset
+// to the latest signed (or unsigned, with a warning) `vX.Y.Z` tag rather
+// than `origin/master`. A user who explicitly wants HEAD can pass
+// `--branch master`, which falls back to the historical fetch+reset path.
+// ─────────────────────────────────────────────────────────────────────────
+
+function _semverTagSort(a, b) {
+  // Strip leading 'v' and compare numerically component-by-component.
+  // Falls back to string compare on non-numeric pre-release suffixes so
+  // 'v1.2.3-rc1' sorts before 'v1.2.3'.
+  const norm = (t) => t.replace(/^v/, '').split(/[-+]/, 1)[0].split('.').map(n => parseInt(n, 10) || 0);
+  const av = norm(a), bv = norm(b);
+  for (let i = 0; i < 3; i++) {
+    if ((av[i] || 0) !== (bv[i] || 0)) return (av[i] || 0) - (bv[i] || 0);
+  }
+  return a.localeCompare(b);
+}
+
+function findLatestSemverTag() {
+  const r = run('git', ['-C', getInstallDir(), 'tag', '--list', 'v*.*.*'], { silent: true });
+  if (r.status !== 0) return null;
+  const tags = (r.stdout || '').split('\n')
+    .map(s => s.trim())
+    .filter(s => /^v\d+\.\d+\.\d+([-+].+)?$/.test(s));
+  if (!tags.length) return null;
+  tags.sort(_semverTagSort);
+  return tags[tags.length - 1];
+}
+
+function verifyTag(tag, opts = {}) {
+  // Best-effort signature check. `git verify-tag` exits 0 if the
+  // signature is good, non-zero if missing or invalid.
+  //
+  // Default policy (Tier-4 R2 hardening): an unsigned/invalid tag is
+  // a HARD STOP — supply-chain attacks would forge an unsigned `v9.9.9`
+  // tag and we'd silently jump to it. Users can override with
+  // COGITUM_ALLOW_UNSIGNED=1 (escape hatch for early adopters before
+  // every release is signed) or `--allow-unsigned` flag.
+  const allowUnsigned =
+    !!opts.allowUnsigned ||
+    process.env.COGITUM_ALLOW_UNSIGNED === '1';
+
+  const r = run('git', ['-C', getInstallDir(), 'verify-tag', tag], { silent: true });
+  if (r.status === 0) {
+    ok(`Tag ${tag} signature verified.`);
+    return;
+  }
+  if (allowUnsigned) {
+    warn(`Tag ${tag} is unsigned or signature could not be verified — proceeding because COGITUM_ALLOW_UNSIGNED is set.`);
+    return;
+  }
+  err(
+    `Tag ${tag} is unsigned or signature could not be verified.\n` +
+    `Refusing to install. Set COGITUM_ALLOW_UNSIGNED=1 to override (NOT recommended for production deploys).`
+  );
+  process.exit(1);
+}
+
+function update(opts = {}) {
+  // Parse flags. We accept either `cog --update` (legacy, no args) or
+  // `cog --update --branch master` for users who want HEAD, or
+  // `cog --update --dry-run` to see what would happen.
+  const wantBranch = !!opts.branch;
+  const dryRun = !!opts.dryRun;
+
   if (!fs.existsSync(path.join(getInstallDir(), '.git'))) {
     warn('Not installed yet. Running first-time bootstrap instead of update.');
+    if (dryRun) { log('(dry-run) would run first-time bootstrap'); return; }
     ensureInstalled();
     return;
   }
 
-  log('Fetching latest from origin ...');
-  let r = run('git', ['-C', getInstallDir(), 'fetch', '--all', '--quiet']);
-  if (r.status !== 0) {
-    err('git fetch failed.');
-    process.exit(1);
+  log('Fetching latest from origin (with tags) ...');
+  if (!dryRun) {
+    const r = run('git', ['-C', getInstallDir(), 'fetch', '--all', '--tags', '--quiet']);
+    if (r.status !== 0) {
+      err('git fetch failed.');
+      process.exit(1);
+    }
+  } else {
+    log('(dry-run) would: git fetch --all --tags');
   }
 
-  log(`Resetting to origin/${BRANCH} ...`);
-  r = run('git', ['-C', getInstallDir(), 'reset', '--hard', `origin/${BRANCH}`, '--quiet']);
+  let target;
+  if (wantBranch) {
+    target = `origin/${BRANCH}`;
+    warn(`--branch requested: pinning to HEAD of ${target} (unstable).`);
+  } else {
+    // Need tags before we can pick one; in dry-run we still try.
+    if (dryRun && !run('git', ['-C', getInstallDir(), 'tag', '--list', 'v*.*.*'], { silent: true }).stdout) {
+      log('(dry-run) note: no tags fetched yet, would resolve after `git fetch --tags`');
+    }
+    const tag = findLatestSemverTag();
+    if (!tag) {
+      warn(`No semver tag (v*.*.*) found — falling back to origin/${BRANCH}.`);
+      target = `origin/${BRANCH}`;
+    } else {
+      target = tag;
+      log(`Latest release tag: ${tag}`);
+      if (!dryRun) verifyTag(tag);
+    }
+  }
+
+  if (dryRun) {
+    log(`(dry-run) would: git reset --hard ${target}`);
+    log(`(dry-run) would: pip install -e ${getInstallDir()}[all]`);
+    ok(`Dry-run target: ${target}`);
+    return;
+  }
+
+  log(`Resetting to ${target} ...`);
+  let r = run('git', ['-C', getInstallDir(), 'reset', '--hard', target, '--quiet']);
   if (r.status !== 0) {
     err('git reset failed.');
     process.exit(1);
@@ -529,7 +669,7 @@ function update() {
 
   // Re-install deps in case pyproject.toml changed.
   installDeps();
-  writeMarker({ updated: true });
+  writeMarker({ updated: true, pinnedTo: target });
   // Refresh the update-check cache so the banner doesn't keep showing.
   const local = getLocalSha();
   if (local) writeUpdateCheckCache(local);

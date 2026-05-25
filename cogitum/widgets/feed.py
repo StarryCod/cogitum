@@ -42,6 +42,54 @@ from ..design import (
 EntryKind = Literal["user", "agent", "error", "system"]
 
 
+# ── Responsive truncation ──────────────────────────────────────────────────
+
+def _truncate(text: str, max_width: int) -> str:
+    """Trim text to ``max_width``, replacing the tail with ``…``.
+
+    Centralised so every ``[:N]`` hardcode in the cards uses the same
+    rule. Consumers should pass a viewport-derived width (see
+    ``_truncate_for_screen``), not a hard literal.
+    """
+    if max_width <= 0:
+        return ""
+    text = text or ""
+    if len(text) <= max_width:
+        return text
+    if max_width == 1:
+        return "…"
+    return text[: max_width - 1] + "…"
+
+
+def _truncate_for_screen(text: str, base_width: int = 80, *, app=None) -> str:
+    """Truncate ``text`` proportionally to the current terminal width.
+
+    ``base_width`` is the canonical 80-col limit the cards were originally
+    coded against. We scale it by the actual terminal width so a 200-col
+    monitor sees more text and a 40-col SSH session less. Falls back to
+    the base width when no app is reachable.
+    """
+    if app is None:
+        try:
+            from textual.app import active_app
+            app = active_app.get()
+        except Exception:
+            app = None
+    avail = None
+    try:
+        if app is not None:
+            avail = max(20, int(app.size.width))
+    except Exception:
+        avail = None
+    if avail is None:
+        # No running app — keep the original base_width as the limit.
+        return _truncate(text, base_width)
+    # Scale: at 80 cols → keep base_width chars (1.0x). At 40 cols → 0.5x.
+    # At 200 cols → 2.5x. Cap at 4x so we never explode for absurd widths.
+    factor = min(4.0, avail / 80.0)
+    return _truncate(text, max(8, int(base_width * factor)))
+
+
 # ── Message Viewer (copy popup) ──────────────────────────────────────────────
 
 class MessageViewer(ModalScreen):
@@ -435,6 +483,18 @@ class ToolCallCard(Static):
         return out
 
     def _get_subtitle(self) -> str:
+        # Helper for subtitle truncations — uses the running App's
+        # width via the global helper so subtitle length scales
+        # with terminal size rather than fixed at 50.
+        try:
+            from textual.app import active_app
+            _app = active_app.get()
+        except Exception:
+            _app = None
+
+        def _trunc(text: str, base: int) -> str:
+            return _truncate_for_screen(text, base_width=base, app=_app)
+
         if self._tool_name == "legion":
             tasks_raw = self._arguments.get("tasks", "")
             try:
@@ -457,7 +517,7 @@ class ToolCallCard(Static):
             return f"{action}: {label}" if label else action
         elif self._tool_name == "terminal":
             cmd = self._arguments.get("command", "")
-            return cmd[:50] + "…" if len(cmd) > 50 else cmd
+            return _trunc(cmd, 50)
         elif self._tool_name == "memory":
             return self._arguments.get("action", "")
         elif self._tool_name == "skills":
@@ -466,25 +526,30 @@ class ToolCallCard(Static):
             return f"{action}: {name}" if name else action
         elif self._tool_name == "web_search":
             query = self._arguments.get("query", "")
-            return query[:50] + "…" if len(query) > 50 else query
+            return _trunc(query, 50)
         elif self._tool_name == "browser":
             action = self._arguments.get("action", "")
             url = self._arguments.get("url", "")
             selector = self._arguments.get("selector", "")
             if action == "open" and url:
-                return f"open: {url[:45]}{'…' if len(url) > 45 else ''}"
+                return f"open: {_trunc(url, 45)}"
             elif action in ("click", "type") and selector:
-                return f"{action}: {selector[:40]}"
+                return f"{action}: {_trunc(selector, 40)}"
             return action
         return ""
 
     def _render_delegate_body(self, out: Text) -> None:
+        try:
+            from textual.app import active_app
+            _app = active_app.get()
+        except Exception:
+            _app = None
         tasks = self._arguments.get("tasks", [])
         mode = self._arguments.get("mode", "workers")
         if isinstance(tasks, list):
             for i, t in enumerate(tasks[:6]):
                 goal = t.get("goal", "") if isinstance(t, dict) else str(t)
-                goal = goal[:65] + "…" if len(goal) > 65 else goal
+                goal = _truncate_for_screen(goal, base_width=65, app=_app)
                 out.append("  │ ", style=COPPER)
                 out.append(f"  {i+1}. ", style=GOLD_DIM)
                 out.append(goal + "\n", style=TXT)
@@ -493,7 +558,7 @@ class ToolCallCard(Static):
                 out.append(f"  … +{len(tasks) - 6} more\n", style=MUTED)
         elif mode == "experts":
             content = self._arguments.get("content", "")
-            preview = content[:80] + "…" if len(content) > 80 else content
+            preview = _truncate_for_screen(content, base_width=80, app=_app)
             out.append("  │ ", style=COPPER)
             out.append("  reviewing: ", style=TXT_DIM)
             out.append(preview + "\n", style=TXT)
@@ -517,6 +582,11 @@ class ToolCallCard(Static):
             out.append("  listing checkpoints\n", style=TXT_DIM)
 
     def _render_terminal_body(self, out: Text) -> None:
+        try:
+            from textual.app import active_app
+            _app = active_app.get()
+        except Exception:
+            _app = None
         cmd = self._arguments.get("command", "")
         if cmd:
             # Show command with shell-like styling
@@ -524,20 +594,25 @@ class ToolCallCard(Static):
             for line in lines[:3]:
                 out.append("  │ ", style=COPPER)
                 out.append("  $ ", style=GOLD_DIM)
-                display = line[:70] + "…" if len(line) > 70 else line
+                display = _truncate_for_screen(line, base_width=70, app=_app)
                 out.append(display + "\n", style=TXT)
             if len(lines) > 3:
                 out.append("  │ ", style=COPPER)
                 out.append(f"  … +{len(lines) - 3} lines\n", style=MUTED)
 
     def _render_memory_body(self, out: Text) -> None:
+        try:
+            from textual.app import active_app
+            _app = active_app.get()
+        except Exception:
+            _app = None
         action = self._arguments.get("action", "")
         content = self._arguments.get("content", "")
         target = self._arguments.get("target", "memory")
         out.append("  │ ", style=COPPER)
         out.append(f"  [{target}] ", style=GOLD_DIM)
         if action == "add":
-            preview = content[:60] + "…" if len(content) > 60 else content
+            preview = _truncate_for_screen(content, base_width=60, app=_app)
             out.append(f"+ {preview}\n", style=TXT)
         elif action == "replace":
             out.append("updating entry\n", style=TXT)
@@ -563,10 +638,13 @@ class ToolCallCard(Static):
 
     def _render_args(self, out: Text) -> None:
         """Generic args rendering."""
+        try:
+            from textual.app import active_app
+            _app = active_app.get()
+        except Exception:
+            _app = None
         for k, v in list(self._arguments.items())[:4]:
-            val = str(v)
-            if len(val) > 60:
-                val = val[:57] + "…"
+            val = _truncate_for_screen(str(v), base_width=60, app=_app)
             if self._tool_name in self._SPECIAL_TOOLS:
                 out.append("  │ ", style=COPPER)
             out.append(f"    {k}: ", style=TXT_DIM)
@@ -584,6 +662,11 @@ class ToolCallCard(Static):
         message viewer for trivial calls. Truncated lines get a hint with
         the full count so it's obvious there's more.
         """
+        try:
+            from textual.app import active_app
+            _app = active_app.get()
+        except Exception:
+            _app = None
         color = RUST if self._error else COPPER
         glyph = "✗" if self._error else "✓"
         if self._tool_name in self._SPECIAL_TOOLS:
@@ -598,14 +681,14 @@ class ToolCallCard(Static):
         if not result_lines:
             out.append("done\n", style=color)
         elif len(result_lines) == 1:
-            line = result_lines[0][:80]
+            line = _truncate_for_screen(result_lines[0], base_width=80, app=_app)
             out.append(line + "\n", style=TXT_DIM)
         else:
-            out.append(result_lines[0][:80] + "\n", style=TXT_DIM)
+            out.append(_truncate_for_screen(result_lines[0], base_width=80, app=_app) + "\n", style=TXT_DIM)
             for line in result_lines[1:max_preview]:
                 prefix = "  │ " if self._tool_name in self._SPECIAL_TOOLS else "    "
                 out.append(prefix, style=COPPER)
-                out.append(f"  {line[:78]}\n", style=TXT_DIM)
+                out.append(f"  {_truncate_for_screen(line, base_width=78, app=_app)}\n", style=TXT_DIM)
             if len(result_lines) > max_preview:
                 prefix = "  │ " if self._tool_name in self._SPECIAL_TOOLS else "    "
                 out.append(prefix, style=COPPER)
@@ -850,11 +933,16 @@ class QueuedMessage(Static):
 
     @staticmethod
     def _build(text: str) -> Text:
+        try:
+            from textual.app import active_app
+            _app = active_app.get()
+        except Exception:
+            _app = None
         out = Text()
         out.append("  ⏳ ", style=MUTED)
         out.append("queued", style=f"italic {MUTED}")
         out.append("  ")
-        display = text[:80] + ("…" if len(text) > 80 else "")
+        display = _truncate_for_screen(text, base_width=80, app=_app)
         out.append(display, style=f"italic {TXT_DIM}")
         return out
 

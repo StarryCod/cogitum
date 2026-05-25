@@ -45,6 +45,13 @@ logger = logging.getLogger("cogitum.cli")
 
 
 # ---------------------------------------------------------------------------
+# Token display helpers
+# ---------------------------------------------------------------------------
+
+from cogitum.core.redact import format_bot_token_display as _format_bot_token_display  # noqa: E402,F401
+
+
+# ---------------------------------------------------------------------------
 # Setup wizard
 # ---------------------------------------------------------------------------
 
@@ -273,6 +280,25 @@ def _read_text(p: Path) -> str:
 
 def _patch_provider_secret(provider_id: str, secret_ref: str) -> None:
     """Replace the first `secret_ref = "..."` under a provider's `keys` block."""
+    # Discourage plain: — log a clear warning and point users at safer schemes.
+    # We don't refuse the write (some users genuinely have no env/keyring on
+    # locked-down machines) but we make sure the suggestion is unmissable.
+    if secret_ref.startswith("plain:"):
+        msg = (
+            f"  ⚠ writing PLAINTEXT secret to providers.toml for "
+            f"{provider_id!r}. The file is chmod 0o600 but the secret "
+            f"sits unencrypted on disk. Prefer 'env:VAR_NAME' or "
+            f"'keyring:cogitum:VAR_NAME' instead."
+        )
+        print(msg)
+        try:
+            import logging as _lg
+            _lg.getLogger("cogitum.cli").warning(
+                "plain: secret_ref written for provider %r — recommend env/keyring",
+                provider_id,
+            )
+        except Exception:
+            pass
     text = _read_text(_PROVIDERS_PATH)
     needle = f"[providers.{provider_id}.keys."
     idx = text.find(needle)
@@ -341,7 +367,14 @@ def _open_in_editor(path: Path) -> None:
     cmd = [editor, str(path)]
     if editor.endswith(("code", "code.exe", "code.cmd")):
         cmd = [editor, "-w", str(path)]
-    subprocess.call(cmd)
+    # Editor is interactive — we can't slap a tight timeout on it without
+    # killing legitimately long sessions. But we don't want a stuck
+    # editor pinning the CLI forever either, so cap at 4 hours. If it
+    # fires, the user almost certainly walked away from the keyboard.
+    try:
+        subprocess.call(cmd, timeout=14400)
+    except subprocess.TimeoutExpired:
+        print(f"  editor timed out after 4h; reopen manually: {editor} {path}")
 
 
 def _hr() -> None:
@@ -524,12 +557,17 @@ def _tg_command(args: argparse.Namespace) -> int:
         cfg = load_tg_config()
         print(f"  Config: {TG_CONFIG_PATH}")
         if cfg.bot_token:
-            print(f"  Current token: {cfg.bot_token[:8]}...{cfg.bot_token[-4:]}")
+            print(f"  Current bot ID: {_format_bot_token_display(cfg.bot_token)}")
         if cfg.allowed_user_id:
             print(f"  Current user ID: {cfg.allowed_user_id}")
         print()
 
-        token = input("  Bot token (from @BotFather): ").strip()
+        # F21: bot token is a secret — equivalent to the bot's full
+        # auth credential. Reading it through input() echoes plaintext
+        # to the terminal and persists it in shell history, screen
+        # capture buffers, and tmux scrollback. Use getpass so the
+        # token never lands in any of those.
+        token = getpass.getpass("  Bot token (hidden): ").strip()
         if not token:
             if cfg.bot_token:
                 print("  (keeping existing token)")
@@ -622,7 +660,7 @@ def _tg_command(args: argparse.Namespace) -> int:
         print(f"  Service: {status['service_path']}")
         cfg = load_tg_config()
         if cfg.is_valid():
-            print(f"  Token:   {cfg.bot_token[:8]}...{cfg.bot_token[-4:]}")
+            print(f"  Bot ID:  {_format_bot_token_display(cfg.bot_token)}")
             print(f"  User ID: {cfg.allowed_user_id}")
         else:
             print("  Config:  NOT CONFIGURED")

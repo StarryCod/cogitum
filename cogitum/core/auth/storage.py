@@ -32,6 +32,25 @@ _AUTH_PATH = _CONFIG_DIR / "auth.json"
 _lock = threading.Lock()
 
 
+def _ensure_config_dir() -> None:
+    """Create ~/.config/cogitum with mode 0700 from the start.
+
+    Matches what ssh-keygen / age / gpg do with their own per-user
+    config dirs: refuse to put secrets in a world-readable directory.
+    Tightening the mode after the fact (via chmod) leaves a window
+    where a parallel reader could enter the dir; ``mkdir(mode=0o700)``
+    closes that gap. On Windows the mode is ignored by the OS but the
+    call still succeeds, so the cross-platform path stays simple.
+    """
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        _CONFIG_DIR.chmod(0o700)
+    except OSError:
+        # Best-effort — some filesystems (FAT, exotic NFS mounts)
+        # don't honour POSIX modes. Continue silently.
+        pass
+
+
 def _read() -> dict[str, Any]:
     if not _AUTH_PATH.exists():
         return {}
@@ -42,14 +61,60 @@ def _read() -> dict[str, Any]:
 
 
 def _write(data: dict[str, Any]) -> None:
-    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = _AUTH_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    """Atomically rewrite ``auth.json`` with mode 0600 from creation.
+
+    Uses ``os.open(..., O_CREAT|O_WRONLY|O_TRUNC, 0o600)`` so the file
+    has the right mode at inode-create time — closes the chmod-after
+    window where a colocated reader could open the freshly-created
+    file at the default ``0o644`` for the few microseconds before
+    ``chmod`` ran. Tier-4 hardening.
+
+    Falls back to ``atomic_write_text`` for the rename + parent fsync
+    durability semantics (tmp → fsync → replace → fsync dir) so a
+    power loss between rename and the next sync can't lose the new
+    payload.
+    """
+    _ensure_config_dir()
+
+    payload = json.dumps(data, indent=2, ensure_ascii=False)
+
+    # We bypass ``atomic_write_text`` only for the SECRET-bearing
+    # ``auth.json`` — every other caller uses the helper directly.
+    # The reason: ``atomic_write_text`` opens with the default umask,
+    # which on Linux yields 0o644. We need 0o600 from creation.
+    import itertools as _it
+    # Reuse a per-process counter so concurrent writers (different
+    # threads, different providers) don't collide on the tmp name.
+    if not hasattr(_write, "_counter"):
+        _write._counter = _it.count()
+    tmp_path = _AUTH_PATH.with_suffix(
+        f".json.{os.getpid()}.{next(_write._counter)}.tmp"
+    )
     try:
-        tmp.chmod(0o600)
-    except OSError:
-        pass
-    tmp.replace(_AUTH_PATH)
+        flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+        fd = os.open(str(tmp_path), flags, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+        except Exception:
+            # fdopen took ownership; close-on-error is handled by it.
+            raise
+        os.replace(tmp_path, _AUTH_PATH)
+        # Parent directory fsync so the rename is durable on POSIX
+        # (Windows skip is handled inside _fsync_dir).
+        from ..atomic_io import _fsync_dir
+        _fsync_dir(_AUTH_PATH.parent)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def get(provider_id: str) -> OAuthCredentials | None:

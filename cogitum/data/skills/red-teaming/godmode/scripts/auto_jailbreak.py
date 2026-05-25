@@ -15,11 +15,45 @@ Usage in execute_code:
     result = auto_jailbreak(model="anthropic/claude-sonnet-4")
 """
 
+# ──────────────────────────────────────────────────────────────────
+# Approval gate — see _godmode_gate.py. MUST run before any other
+# import so the script aborts cleanly even if upstream deps are
+# missing (yaml, anthropic, …).
+# ──────────────────────────────────────────────────────────────────
+import os as _gm_os
+import sys as _gm_sys
+from pathlib import Path as _gm_Path
+_gm_gate_dir = _gm_Path(_gm_os.getenv("HERMES_HOME", _gm_Path.home() / ".hermes")) / "skills" / "red-teaming" / "godmode" / "scripts"
+_gm_sys.path.insert(0, str(_gm_gate_dir))
+try:
+    from _godmode_gate import require_consent as _gm_require_consent
+    _gm_require_consent("auto_jailbreak")
+finally:
+    try:
+        _gm_sys.path.remove(str(_gm_gate_dir))
+    except ValueError:
+        pass
+
+
 import os
 import json
 import time
 import yaml
 from pathlib import Path
+
+
+# ──────────────────────────────────────────────────────────────────
+import sys as _gm_sys
+_gm_gate_dir = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")) / "skills" / "red-teaming" / "godmode" / "scripts"
+_gm_sys.path.insert(0, str(_gm_gate_dir))
+try:
+    from _godmode_gate import require_consent as _gm_require_consent
+    _gm_require_consent("auto_jailbreak")
+finally:
+    try:
+        _gm_sys.path.remove(str(_gm_gate_dir))
+    except ValueError:
+        pass
 
 try:
     from openai import OpenAI

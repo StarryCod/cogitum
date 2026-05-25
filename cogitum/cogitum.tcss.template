@@ -24,6 +24,17 @@ Screen {
     content-align: center middle;
 }
 
+/* On short terminals (≤ 24 rows) collapse the figlet banner to a single
+   line so the actual feed area survives. The Banner widget itself
+   detects the '-short' class and renders a compact title. */
+App.-short #banner {
+    height: 3;
+    padding: 0 2 0 2;
+}
+App.-short #banner-tags {
+    display: none;
+}
+
 #banner-tags {
     height: 1;
     padding: 0 2 1 2;
@@ -85,6 +96,17 @@ Screen {
     scrollbar-background-hover: $BG_SOFT;
     scrollbar-color-active: $BG_SOFT;
     scrollbar-color-hover: $BG_SOFT;
+}
+
+/* On narrow terminals (≤ 80 cols) the inspector takes more space than
+   the feed itself — hide it. Feed expands to full width because it's
+   the only remaining child of #main. */
+App.-narrow #inspector-pane {
+    display: none;
+}
+App.-narrow #feed-pane {
+    border-right: none;
+    width: 100%;
 }
 
 #inspector-widget {

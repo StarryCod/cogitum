@@ -95,10 +95,10 @@ class TgStream:
         self._status = _Rail()
         # status rail keeps a rolling buffer; pending_text is rebuilt from this
         self._status_lines: list[str] = []
-        # If response overflows, we freeze older messages and start a new rail
-        # for continuation. We track the historical message ids so flush() can
-        # noop on them.
-        self._response_history: list[int] = []
+        # F25: previously kept ``_response_history: list[int]`` collecting
+        # frozen overflow message IDs — but nothing in this module or the
+        # wider codebase ever read it. Removed to stop unbounded memory
+        # growth on long runs that keep overflowing _MAX_MSG_CHARS.
         # Per-rail lock so two updates can't race a flush_task replacement.
         self._lock = asyncio.Lock()
 
@@ -143,8 +143,18 @@ class TgStream:
             head = text[:cut]
             await self._schedule(self._response, head, formatter)
             await self._flush_rail(self._response)
-            if self._response.msg_id is not None:
-                self._response_history.append(self._response.msg_id)
+            # F23/F24: cancel and drain the previous rail's debounced
+            # flush BEFORE replacing the rail. Without this, the old
+            # ``_Rail.flush_task`` could wake up after we'd already
+            # swapped ``self._response``, fire a duplicate edit on the
+            # frozen message, and (in the worst case) be GC'd
+            # mid-await because no live reference held it. Replacement
+            # is a closed window: schedule cancel, await it, then swap.
+            old_rail = self._response
+            old_task = old_rail.flush_task
+            if old_task is not None and not old_task.done():
+                old_task.cancel()
+                await asyncio.gather(old_task, return_exceptions=True)
             self._response = _Rail()
             text = text[cut:].lstrip("\n")
         await self._schedule(self._response, text, formatter)

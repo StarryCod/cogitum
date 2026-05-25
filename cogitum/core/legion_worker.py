@@ -38,6 +38,8 @@ import logging
 import time
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
+from cogitum.core.tool_result_format import format_tool_result_for_model
+
 from .events import (
     ChunkKind, Message, TextPart, ThinkingPart,
     ToolCallPart, ToolResultPart,
@@ -299,7 +301,12 @@ async def _execute_tool(
     except Exception as e:
         return f"ERROR: {type(e).__name__}: {e}"
 
-    text = str(result)
+    # Route through the shared formatter so dict/list/None/bytes results
+    # from a Legion worker are shaped the same way the primary agent shapes
+    # them (JSON for dict/list, "(no output)" for blanks, base64 for binary,
+    # ERROR: <Type>: <msg> for BaseException returns). Truncation runs AFTER
+    # formatting so we never cut a JSON dict mid-key.
+    text = format_tool_result_for_model(result)
     if len(text) > _TOOL_RESULT_TRUNC:
         text = text[:_TOOL_RESULT_TRUNC] + f"\n…[truncated; {len(text)} chars total]"
     return text

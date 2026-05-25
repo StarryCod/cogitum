@@ -81,7 +81,20 @@ def normalize_messages_openai(
         if has_image:
             wire["content"] = content_parts
         else:
-            wire["content"] = "".join(plain_text_chunks)
+            joined = "".join(plain_text_chunks)
+            # F12 fix: when an assistant message carries tool_calls but no
+            # text body, some OpenAI-compat providers (older llama.cpp HTTP
+            # servers, a handful of gateways) reject `content: ""` with
+            # HTTP 400 even though the spec allows it. Per the OpenAI
+            # spec, `content: null` is valid and unambiguous when
+            # tool_calls are present, so emit None instead of an empty
+            # string. Plain assistant text (no tool_calls, no text) keeps
+            # the empty-string shape — that's the legacy behavior other
+            # callers may rely on.
+            if role == "assistant" and tool_calls and not joined:
+                wire["content"] = None
+            else:
+                wire["content"] = joined
         if tool_calls:
             wire["tool_calls"] = tool_calls
         out.append(wire)
@@ -96,8 +109,19 @@ def normalize_messages_anthropic(
     messages: list[Message],
     *,
     system: str | None = None,
+    current_model: str | None = None,
 ) -> tuple[str | None, list[dict[str, Any]]]:
-    """Render messages for Anthropic. Returns (system, messages)."""
+    """Render messages for Anthropic. Returns (system, messages).
+
+    ``current_model`` is the model id that will receive the request.
+    When a ThinkingPart was produced by a different model (the user
+    ran ``/model`` mid-conversation), its cryptographic signature is
+    no longer valid — Anthropic returns HTTP 400 on cross-model
+    signature replay. We drop the signature in that case so the
+    thinking content is preserved as text but the (now-unsigned)
+    block is filtered out by the existing ``if part.signature``
+    guard below. See audit_r2_history.md GAP-9.
+    """
     out: list[dict[str, Any]] = []
     for msg in messages:
         if msg.role == "system":
@@ -107,10 +131,17 @@ def normalize_messages_anthropic(
             content_blocks = []
             for part in msg.parts:
                 if isinstance(part, ToolResultPart):
+                    # Anthropic rejects messages with empty tool_result
+                    # content blocks (HTTP 400). Substitute a placeholder
+                    # so the wire stays valid even if a tool legitimately
+                    # produced no output.
+                    body = part.content
+                    if body is None or (isinstance(body, str) and not body.strip()):
+                        body = "(no output)"
                     content_blocks.append({
                         "type": "tool_result",
                         "tool_use_id": part.tool_call_id,
-                        "content": part.content,
+                        "content": body,
                         "is_error": part.is_error,
                     })
             if content_blocks:
@@ -120,13 +151,36 @@ def normalize_messages_anthropic(
         blocks: list[dict[str, Any]] = []
         for part in msg.parts:
             if isinstance(part, TextPart):
-                blocks.append({"type": "text", "text": part.text})
+                # Anthropic also rejects empty text blocks on assistant
+                # messages, so coerce them to a single space placeholder
+                # rather than dropping (drop would corrupt block ordering
+                # vs sibling tool_use blocks if any).
+                text = part.text
+                if msg.role == "assistant" and (text is None or not text.strip()):
+                    text = " "
+                blocks.append({"type": "text", "text": text})
             elif isinstance(part, ThinkingPart):
-                if part.signature:
+                # GAP-9 (audit_r2_history.md): if the part was produced
+                # by a different model than the one we're calling now,
+                # the signature is cryptographically bound to the old
+                # model and Anthropic will 400 with "signature from a
+                # different model". Drop the signature so the block is
+                # filtered out below (Anthropic refuses unsigned
+                # thinking blocks anyway, but the run survives the
+                # switch instead of crashing).
+                sig = part.signature
+                if (
+                    sig
+                    and current_model
+                    and part.model
+                    and part.model != current_model
+                ):
+                    sig = None
+                if sig:
                     blocks.append({
                         "type": "thinking",
                         "thinking": part.text,
-                        "signature": part.signature,
+                        "signature": sig,
                     })
             elif isinstance(part, ImagePart):
                 if part.data:
@@ -150,6 +204,18 @@ def normalize_messages_anthropic(
                     "name": part.name,
                     "input": part.arguments,
                 })
+
+        if msg.role == "assistant" and not blocks:
+            # R3 fix (audit GAP-5a): an assistant message that contains
+            # ONLY ThinkingPart entries with no signature drops every
+            # part above (Anthropic refuses unsigned thinking blocks),
+            # leaving an empty content[] which Anthropic 400-rejects.
+            # Mirror hermes-agent/agent/anthropic_adapter.py:1560-1563
+            # by injecting an "(empty)" sentinel so the wire stays
+            # valid. The sentinel only appears on this rare branch —
+            # well-formed assistant turns with text or tool_use are
+            # unaffected.
+            blocks = [{"type": "text", "text": "(empty)"}]
 
         if blocks:
             out.append({"role": msg.role, "content": blocks})

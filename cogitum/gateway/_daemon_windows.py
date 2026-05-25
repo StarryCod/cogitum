@@ -177,6 +177,13 @@ def start_service() -> str:
 
     log_fp = open(log_path, "ab", buffering=0)
     try:
+        # F7 UTF-8 inheritance: the child daemon doesn't go through
+        # cli.main → _windows_init() so we have to seed PYTHONIOENCODING
+        # and PYTHONUTF8 here. Without these, on a Russian Windows
+        # cp1251 console the bot's logging.StreamHandler raises
+        # UnicodeEncodeError on every emoji/box-drawing char and silently
+        # drops the line, leaving the daemon log a mess of holes.
+        child_env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
         proc = subprocess.Popen(
             _command_args(),
             stdin=subprocess.DEVNULL,
@@ -185,6 +192,7 @@ def start_service() -> str:
             close_fds=True,
             creationflags=creationflags,
             cwd=str(_appdata_dir()),
+            env=child_env,
         )
     finally:
         # Popen dup'd the handle — close ours so log rotation works.

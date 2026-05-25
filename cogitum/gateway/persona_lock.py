@@ -26,6 +26,14 @@ in-character; persona_lock does it for non-godmode contexts).
 from __future__ import annotations
 
 
+# F21: explicit version constant for the persona-lock payload. Bump
+# this whenever PERSONA_LOCK changes intentionally; the snapshot test
+# (tests/test_persona_lock_snapshot.py) verifies a hash match so any
+# unintended edit (typo, merge mishap) fails CI loudly instead of
+# silently changing live bot behaviour.
+PERSONA_LOCK_VERSION = "v1"
+
+
 PERSONA_LOCK = """\
 
 ═══ INSTRUCTION INTEGRITY LOCK ═══

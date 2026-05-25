@@ -138,6 +138,16 @@ class _NodeCard(Static):
         border: round {MUTED};
         color: {TXT_DIM};
     }}
+    /* Ultra-compact card for very narrow terminals — name + status only.
+       Width 16 fits 4 cards into a 64-col split. */
+    _NodeCard.l3 {{
+        width: 16;
+        height: 3;
+        padding: 0 1;
+        background: {SURFACE_DIM};
+        border: round {MUTED};
+        color: {TXT_DIM};
+    }}
     _NodeCard.selected {{
         border: heavy {GOLD_HI};
     }}
@@ -147,16 +157,53 @@ class _NodeCard(Static):
         # node_id may be the special string "L0" for the root card.
         self._node_id = node_id
         self._depth = depth          # 0 / 1 / 2
+        # Visual class — may be downgraded by `set_compact_class()` for
+        # narrow terminals (e.g. an L1 node forced to render as L2 when
+        # the row would otherwise overflow).
+        self._visual_class = (
+            "l0" if depth == 0 else "l1" if depth == 1 else "l2"
+        )
         super().__init__("", **kw)
-        if depth == 0:
-            self.add_class("l0")
-        elif depth == 1:
-            self.add_class("l1")
-        else:
-            self.add_class("l2")
+        self.add_class(self._visual_class)
+
+    def set_compact_class(self, css_class: str) -> None:
+        """Switch the card's visual class.
+
+        ``css_class`` must be one of ``"l0" / "l1" / "l2" / "l3"``.
+        Used by the responsive renderer to downgrade L1 cards to a
+        smaller footprint when the L1 row wouldn't fit.
+        """
+        if css_class == self._visual_class:
+            return
+        for c in ("l0", "l1", "l2", "l3"):
+            self.remove_class(c)
+        self.add_class(css_class)
+        self._visual_class = css_class
+
+    @staticmethod
+    def pick_visual_class(depth: int, slot_width: int) -> str:
+        """Return the smallest CSS class that still fits ``slot_width``.
+
+        Per-card minimum widths track DEFAULT_CSS:
+          l0 → 56,  l1 → 30,  l2 → 22,  l3 → 16
+        Depth limits how big a card can be (a real L2 never expands to
+        l0 size — only contracts).
+        """
+        if slot_width >= 56 and depth == 0:
+            return "l0"
+        if slot_width >= 30 and depth <= 1:
+            return "l1"
+        if slot_width >= 22 and depth <= 2:
+            return "l2"
+        return "l3"
 
     def update_from(self, run: LegionRun, selected_id: str | None) -> None:
         out = Text()
+        # `_visual_class` may have been downgraded by the responsive
+        # render pass (e.g. L1 → l2 on narrow terminals). We trim the
+        # goal text by the *visual* class width, not the logical depth,
+        # so the card never overflows its declared CSS width.
+        visual = getattr(self, "_visual_class", "l1")
         if self._depth == 0:
             out.append("⚔ MAGOS'S ORDER\n", style=f"bold {GOLD_HI}")
             out.append(_trim(run.root_goal, 100), style=TXT)
@@ -168,16 +215,25 @@ class _NodeCard(Static):
                 # Header line: id + level tag.
                 tag = "L1" if self._depth == 1 else "L2"
                 title_style = f"bold {GOLD}" if self._depth == 1 else f"bold {COPPER}"
-                out.append(f"{tag} · {node.id}\n", style=title_style)
-                # Goal — width-trimmed for the card size.
-                goal_w = 26 if self._depth == 1 else 18
-                out.append(_trim(node.goal, goal_w) + "\n", style=TXT)
-                # Status row.
-                out.append_text(_status_text(node.status.value))
-                # Last action (only on L1 — L2 too narrow for it).
-                if self._depth == 1 and node.last_action:
-                    out.append("\n")
-                    out.append(_trim(node.last_action, 26), style=TXT_DIM)
+                if visual == "l3":
+                    # L3: name + status only, no level tag, no goal.
+                    out.append(f"{node.id}\n", style=title_style)
+                    out.append_text(_status_text(node.status.value))
+                else:
+                    out.append(f"{tag} · {node.id}\n", style=title_style)
+                    # Goal — trimmed for the visual class footprint.
+                    if visual == "l1":
+                        goal_w = 26
+                    elif visual == "l2":
+                        goal_w = 18
+                    else:  # l3 already returned above
+                        goal_w = 12
+                    out.append(_trim(node.goal, goal_w) + "\n", style=TXT)
+                    out.append_text(_status_text(node.status.value))
+                    # Last action only on L1-sized cards (taller).
+                    if visual == "l1" and node.last_action:
+                        out.append("\n")
+                        out.append(_trim(node.last_action, 26), style=TXT_DIM)
         if self._node_id == (selected_id or ""):
             self.add_class("selected")
         else:
@@ -435,7 +491,29 @@ class LegionTreeScreen(ModalScreen[None]):
         self._update_status_line()
 
     def _render_all_cards(self) -> None:
-        for card in self._card_by_id.values():
+        # Decide a visual class for L1 cards based on currently
+        # available width / number of L1 columns. L1 cards declare
+        # width 30 by default; if the row would overflow, we force
+        # them down to l2 / l3 so the row fits without horizontal
+        # clipping.
+        l1_count = max(1, len(self._run.l1_nodes()))
+        try:
+            avail = self.app.size.width or 80
+        except Exception:
+            avail = 80
+        # Each column has padding 0 1 (= +2 cols) plus tree-area padding.
+        slot_per_l1 = max(8, (avail - 4) // l1_count - 2)
+        l1_cls = _NodeCard.pick_visual_class(1, slot_per_l1)
+
+        # L2 cards live stacked under each L1, so they share the L1
+        # column. Pick a class that fits within the L1 slot.
+        l2_cls = _NodeCard.pick_visual_class(2, slot_per_l1)
+
+        for nid, card in self._card_by_id.items():
+            if card._depth == 1:
+                card.set_compact_class(l1_cls)
+            elif card._depth == 2:
+                card.set_compact_class(l2_cls)
             card.update_from(self._run, self._selected_id)
 
     def _set_selection_default(self) -> None:
